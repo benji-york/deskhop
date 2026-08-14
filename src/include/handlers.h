@@ -47,6 +47,7 @@ void handle_toggle_gaming_msg(uart_packet_t *, device_t *);
 void handle_heartbeat_msg(uart_packet_t *, device_t *);
 void handle_keyboard_uart_msg(uart_packet_t *, device_t *);
 void handle_mouse_abs_uart_msg(uart_packet_t *, device_t *);
+void handle_mouse_nonmotion_uart_msg(uart_packet_t *, device_t *);
 void handle_mouse_zoom_msg(uart_packet_t *, device_t *);
 void handle_output_select_msg(uart_packet_t *, device_t *);
 void handle_pointer_sync_msg(uart_packet_t *, device_t *);

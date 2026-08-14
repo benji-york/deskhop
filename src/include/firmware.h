@@ -28,7 +28,7 @@
  void     fetch_packet(device_t *);
  uint32_t get_ptr_delta(uint32_t, device_t *);
  bool     is_start_of_packet(device_t *);
- void     request_byte(device_t *, uint32_t);
+ bool     request_byte(device_t *, uint32_t);
 
  /*==============================================================================
   *  Button Interaction

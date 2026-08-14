@@ -187,6 +187,26 @@ void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
     state->last_activity[BOARD_ROLE] = time_us_64();
 }
 
+/* Apply position-neutral mouse input at the active board's authoritative
+   coordinates. This prevents button-only reports from an inactive board from
+   reasserting a stale absolute position. */
+void handle_mouse_nonmotion_uart_msg(uart_packet_t *packet, device_t *state) {
+    mouse_nonmotion_report_t *input = (mouse_nonmotion_report_t *)packet->data;
+    uint8_t mode = input->mode == RELATIVE ? RELATIVE : ABSOLUTE;
+    mouse_report_t report = {
+        .buttons = input->buttons,
+        .x       = mode == RELATIVE ? 0 : state->pointer_x,
+        .y       = mode == RELATIVE ? 0 : state->pointer_y,
+        .wheel   = input->wheel,
+        .pan     = input->pan,
+        .mode    = mode,
+    };
+
+    queue_mouse_report(&report, state);
+    state->mouse_buttons = input->buttons;
+    state->last_activity[BOARD_ROLE] = time_us_64();
+}
+
 /* Adopt the authoritative cursor position from the other board.
 
    Both boards track the cursor independently, but there is only one cursor. After an
@@ -332,11 +352,21 @@ void handle_api_read_all_msg(uart_packet_t *packet, device_t *state) {
 void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
     uint32_t address = packet->data32[0];
 
-    if (address >= STAGING_IMAGE_SIZE)
+    if (address > STAGING_IMAGE_SIZE)
         return;
 
+    /* Legacy updaters request one sentinel word at the exact end of the image
+       after committing the final page. Acknowledge it without reading beyond
+       the image so they can enter their completion branch and reboot. */
+    uint32_t data = 0;
+    if (address < STAGING_IMAGE_SIZE) {
+        if (address > STAGING_IMAGE_SIZE - sizeof(data) || address % sizeof(data) != 0)
+            return;
+
+        memcpy(&data, &ADDR_FW_RUNNING[address], sizeof(data));
+    }
+
     /* Add requested data to bytes 4-7 in the packet and return it with a different type */
-    uint32_t data = *(uint32_t *)&ADDR_FW_RUNNING[address];
     packet->data32[1] = data;
 
     queue_packet(packet->data, RESPONSE_BYTE_MSG, PACKET_DATA_LENGTH);

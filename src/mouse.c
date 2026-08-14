@@ -382,18 +382,32 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
         return;
     }
 
+    bool position_changed = values.move_x != 0 || values.move_y != 0;
+
     /* Calculate and update mouse pointer movement. */
     enum screen_pos_e switch_direction = update_mouse_position(state, &values);
 
-    /* Create the report for the output PC based on the updated values */
-    mouse_report_t report = create_mouse_report(state, &values);
+    if (!CURRENT_BOARD_IS_ACTIVE_OUTPUT && !position_changed) {
+        /* Buttons and wheels do not carry a position. Let the active board attach
+           its authoritative coordinates instead of forwarding our cached copy. */
+        mouse_nonmotion_report_t report = {
+            .buttons = values.buttons,
+            .wheel   = values.wheel,
+            .pan     = values.pan,
+            .mode    = state->relative_mouse || state->gaming_mode ? RELATIVE : ABSOLUTE,
+        };
+        queue_packet((uint8_t *)&report, MOUSE_NONMOTION_MSG, sizeof(report));
+    } else {
+        /* Create the report for the output PC based on the updated values */
+        mouse_report_t report = create_mouse_report(state, &values);
 
-    /* Move the mouse, depending where the output is supposed to go */
-    output_mouse_report(&report, state);
+        /* Move the mouse, depending where the output is supposed to go */
+        output_mouse_report(&report, state);
+    }
 
     /* There is one cursor, but each board tracks its position separately. When we are
-       not the active output, output_mouse_report already forwarded the full report and
-       the other board adopts our position from it. When we ARE the active output the
+       not the active output, position-changing reports are forwarded in full and the
+       other board adopts our position from them. When we ARE the active output the
        report stays local, so the other board would keep a stale position and any
        pointing device attached to it (e.g. a keyboard with an integrated trackball)
        would make the cursor jump back to wherever that board last thought it was.

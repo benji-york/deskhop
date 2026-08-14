@@ -194,11 +194,25 @@ void firmware_upgrade_task(device_t *state) {
     if (!state->fw.upgrade_in_progress || !state->fw.byte_done)
         return;
 
-    if (queue_is_full(&state->uart_tx_queue))
+    /* Queue the next read before writing a completed page. Other cores can also
+       produce UART traffic, so request_byte must atomically succeed before it
+       marks this word consumed. The response cannot update page_buffer until this
+       task returns because packet_receiver_task runs on the same core. */
+    bool transfer_complete = state->fw.address >= STAGING_IMAGE_SIZE;
+    if (!transfer_complete && !request_byte(state, state->fw.address))
         return;
 
-    /* End condition, when reached the process is completed. */
-    if (state->fw.address > STAGING_IMAGE_SIZE) {
+    /* A response advances address past the four bytes it supplied. At each page
+       boundary, commit the page that has just finished. Address zero is the start
+       of the transfer, not a completed page. */
+    if (state->fw.address != 0 && TU_U32_BYTE0(state->fw.address) == 0x00) {
+        uint32_t page_start_addr = state->fw.address - FLASH_PAGE_SIZE;
+        write_flash_page((uint32_t)ADDR_FW_RUNNING + page_start_addr - XIP_BASE, state->page_buffer);
+    }
+
+    /* The final response leaves address exactly at the image size. Finalize now;
+       requesting that out-of-range address would never receive a response. */
+    if (transfer_complete) {
         state->fw.upgrade_in_progress = 0;
         state->fw.checksum = ~state->fw.checksum;
 
@@ -212,16 +226,9 @@ void firmware_upgrade_task(device_t *state) {
             state->_running_fw = _firmware_metadata;
             global_state.reboot_requested = true;
         }
+
+        return;
     }
-
-    /* If we're on the last element of the current page, page is done - write it. */
-    if (TU_U32_BYTE0(state->fw.address) == 0x00) {
-
-        uint32_t page_start_addr = (state->fw.address - 1) & 0xFFFFFF00;
-        write_flash_page((uint32_t)ADDR_FW_RUNNING + page_start_addr - XIP_BASE, state->page_buffer);
-    }
-
-    request_byte(state, state->fw.address);
 }
 
 void packet_receiver_task(device_t *state) {

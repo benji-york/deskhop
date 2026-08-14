@@ -139,14 +139,17 @@ bool is_bootsel_pressed(void) {
   return button_pressed;
 }
 
-void request_byte(device_t *state, uint32_t address) {
+bool request_byte(device_t *state, uint32_t address) {
     uart_packet_t packet = {
         .data32[0] = address,
         .type = REQUEST_BYTE_MSG,
     };
-    state->fw.byte_done = false;
 
-    queue_try_add(&global_state.uart_tx_queue, &packet);
+    if (!queue_try_add(&state->uart_tx_queue, &packet))
+        return false;
+
+    state->fw.byte_done = false;
+    return true;
 }
 
 void reboot(void) {
