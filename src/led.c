@@ -31,6 +31,19 @@ void set_keyboard_leds(uint8_t requested_led_state, device_t *state) {
     }
 }
 
+static uint8_t active_keyboard_leds(device_t *state) {
+    uint8_t leds = state->keyboard_leds_desired[state->active_output];
+
+    if (state->config.kbd_led_as_indicator) {
+        leds &= ~KEYBOARD_LED_CAPSLOCK;
+
+        if (state->active_output == OUTPUT_B)
+            leds |= KEYBOARD_LED_CAPSLOCK;
+    }
+
+    return leds;
+}
+
 void restore_leds(device_t *state) {
     /* Light up on-board LED if current board is active output */
     state->onboard_led_state = (state->active_output == BOARD_ROLE);
@@ -38,7 +51,7 @@ void restore_leds(device_t *state) {
 
     /* Light up appropriate keyboard leds (if it's connected locally) */
     if (state->keyboard_connected) {
-        uint8_t leds = state->keyboard_leds_desired[state->active_output];
+        uint8_t leds = active_keyboard_leds(state);
         set_keyboard_leds(leds, state);
     }
 }
@@ -57,9 +70,13 @@ void blink_led(device_t *state) {
 }
 
 void led_sync_task(device_t *state) {
+    /* Do not overwrite an intentional acknowledgement blink. */
+    if (state->blinks_left != 0)
+        return;
+
     /* Check if keyboard LEDs need to be updated */
     if (state->keyboard_connected) {
-        uint8_t desired_leds = state->keyboard_leds_desired[state->active_output];
+        uint8_t desired_leds = active_keyboard_leds(state);
 
         if (state->keyboard_leds_actual[BOARD_ROLE] != desired_leds)
             set_keyboard_leds(desired_leds, state);

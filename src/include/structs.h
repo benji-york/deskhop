@@ -94,7 +94,7 @@ typedef struct {
     uint8_t kbd_dev_addr; // Address of the Keyboard device
     uint8_t kbd_instance; // Keyboard instance (d'uh - isn't this a useless comment)
 
-    uint8_t keyboard_leds_desired[NUM_SCREENS];  // Desired state of keyboard LEDs (index 0 = A, index 1 = B)
+    uint8_t keyboard_leds_desired[NUM_SCREENS];  // Raw host LED state (index 0 = A, index 1 = B)
     uint8_t keyboard_leds_actual[NUM_SCREENS];   // Actual state of keyboard LEDs
     uint64_t last_activity[NUM_SCREENS]; // Timestamp of the last input activity (-||-)
     uint32_t core1_last_loop_pass;       // Timestamp of last core1 loop execution

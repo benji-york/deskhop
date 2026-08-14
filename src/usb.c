@@ -68,14 +68,8 @@ void tud_hid_set_report_cb(uint8_t instance,
 
     uint8_t leds = buffer[0];
 
-    /* If we are using caps lock LED to indicate the chosen output, that has priority */
-    if (global_state.config.kbd_led_as_indicator) {
-        leds = leds & 0xFD; /* 1111 1101 (Clear Caps Lock bit) */
-
-        if (global_state.active_output)
-            leds |= KEYBOARD_LED_CAPSLOCK;
-    }
-
+    /* Cache the host's unmodified state. The focus indicator is applied when
+       the selected output's LEDs are sent to the physical keyboard. */
     global_state.keyboard_leds_desired[BOARD_ROLE] = leds;
 
     /* If the board has a keyboard connected directly, restore those leds. */
