@@ -43,6 +43,11 @@ jobs:
           tests/test_zoom_tracker.c src/zoom_tracker.c \
           -o /tmp/deskhop-zoom-tracker-test
         /tmp/deskhop-zoom-tracker-test
+        cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+          -Isrc/include \
+          tests/test_fw_update.c src/fw_update.c \
+          -o /tmp/deskhop-fw-update-test
+        /tmp/deskhop-fw-update-test
 
     - name: Build firmware
       shell: bash

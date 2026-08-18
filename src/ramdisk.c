@@ -37,8 +37,6 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
 
 /* Return the requested data, or -1 if out-of-bounds */
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
-    const uint8_t *addr = &ADDR_DISK_IMAGE[lba * BLOCK_SIZE + offset];
-
     if (lba >= NUMBER_OF_BLOCKS)
         return -1;
 
@@ -46,8 +44,10 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
     else if (lba >= ACTUAL_NUMBER_OF_BLOCKS)
         memset(buffer, 0x00, bufsize);
 
-    else
-        memcpy(buffer, addr, bufsize);
+    else {
+        const uint8_t *addr = &ADDR_DISK_IMAGE[lba * BLOCK_SIZE + offset];
+        read_flash_bytes(addr, buffer, bufsize);
+    }
 
     return (int32_t)bufsize;
 }
@@ -60,44 +60,71 @@ bool tud_msc_is_writable_cb(uint8_t lun) {
 /* Simple firmware write routine, we get 512-byte uf2 blocks with 256 byte payload */
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize) {
     const uint32_t MAX_BLOCK_NO = (STAGING_IMAGE_SIZE / FLASH_PAGE_SIZE) - 1;
+    const uint32_t EXPECTED_BLOCK_COUNT = STAGING_IMAGE_SIZE / FLASH_PAGE_SIZE;
     uf2_t *uf2 = (uf2_t *)&buffer[0];
-
-    bool is_final_block = (uf2->blockNo == MAX_BLOCK_NO);
-    uint32_t flash_addr = (uint32_t)ADDR_FW_RUNNING + uf2->blockNo * FLASH_PAGE_SIZE - XIP_BASE;
 
     if (lba >= NUMBER_OF_BLOCKS)
         return -1;
 
     /* If we're not detecting UF2 magic constants, we have nothing to do... */
-    if (uf2->magicStart0 != UF2_MAGIC_START0 || uf2->magicStart1 != UF2_MAGIC_START1 || uf2->magicEnd != UF2_MAGIC_END)
+    if (bufsize < sizeof(uf2_t)
+        || uf2->magicStart0 != UF2_MAGIC_START0
+        || uf2->magicStart1 != UF2_MAGIC_START1
+        || uf2->magicEnd != UF2_MAGIC_END)
         return (int32_t)bufsize;
 
-    if (uf2->blockNo == 0) {
-        global_state.fw.checksum = 0xffffffff;
+    if (uf2->payloadSize != FLASH_PAGE_SIZE
+        || uf2->numBlocks != EXPECTED_BLOCK_COUNT
+        || uf2->blockNo > MAX_BLOCK_NO
+        || uf2->targetAddr != XIP_BASE + uf2->blockNo * FLASH_PAGE_SIZE)
+        return (int32_t)bufsize;
 
-        /* Make sure nobody else touches the flash during this operation, otherwise we get empty pages */
-        global_state.fw.upgrade_in_progress = true;
+    firmware_update_lock();
+
+    /* Any valid UF2 block claims the updater before touching flash. This makes
+       reordered host writes safe and atomically stops a peer pull on core 1. */
+    if (global_state.fw.source != FW_UPDATE_SOURCE_DROP) {
+        global_state.fw = (fw_upgrade_state_t) {
+            .upgrade_in_progress = true,
+            .source = FW_UPDATE_SOURCE_DROP,
+            .progressed_at_us = time_us_32(),
+        };
+        memset(global_state.uf2_blocks_received, 0,
+               sizeof(global_state.uf2_blocks_received));
+        memset(global_state.uf2_sectors_erased, 0,
+               sizeof(global_state.uf2_sectors_erased));
+        global_state.uf2_blocks_received_count = 0;
     }
 
-    /* Update checksum continuously as blocks are being received */
-    const uint32_t last_block_with_checksum = (STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE) / FLASH_PAGE_SIZE;
-    for (int i=0; i<FLASH_PAGE_SIZE && uf2->blockNo < last_block_with_checksum; i++)
-        global_state.fw.checksum = crc32_iter(global_state.fw.checksum, buffer[32 + i]);
+    /* Mass-storage hosts may duplicate writes. Count and program every UF2 block
+       once, and finalize only after all 1,024 blocks have arrived in any order. */
+    if (fw_update_mark_block(global_state.uf2_blocks_received,
+                             &global_state.uf2_blocks_received_count,
+                             uf2->blockNo)) {
+        uint32_t flash_addr = (uint32_t)ADDR_FW_RUNNING
+            + uf2->blockNo * FLASH_PAGE_SIZE - XIP_BASE;
+        uint32_t sector_number = uf2->blockNo / (FLASH_SECTOR_SIZE / FLASH_PAGE_SIZE);
+        bool erase_sector = fw_update_mark_block(global_state.uf2_sectors_erased,
+                                                 NULL, sector_number);
 
-    write_flash_page(flash_addr, &buffer[32]);
+        global_state.fw.image_dirty = true;
+        write_flash_page_erasing(flash_addr, &buffer[32], erase_sector);
+        global_state.fw.progressed_at_us = time_us_32();
+    }
 
-    if (is_final_block) {
-        global_state.fw.checksum = ~global_state.fw.checksum;
-
-        /* If checksums don't match, overwrite first sector and rely on ROM bootloader for recovery */
-        if (global_state.fw.checksum != calculate_firmware_crc32()) {
-            flash_range_erase((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);
-            reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+    if (global_state.uf2_blocks_received_count == EXPECTED_BLOCK_COUNT) {
+        /* The build-time metadata checksum is independent of write order and of
+           the bytes just received, so a complete but mixed image cannot pass. */
+        if (!firmware_image_is_valid(0, 0, false)) {
+            enter_firmware_recovery();
         }
         else {
+            global_state.fw.image_dirty = false;
             global_state.reboot_requested = true;
         }
     }
+
+    firmware_update_unlock();
 
     /* Provide some visual indication that fw is being uploaded */
     toggle_led();

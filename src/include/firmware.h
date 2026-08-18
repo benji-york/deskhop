@@ -18,8 +18,16 @@
   *==============================================================================*/
 
  uint32_t calculate_firmware_crc32(void);
+ void     enter_firmware_recovery(void);
+ void     firmware_sync_init(void);
+ void     firmware_update_lock(void);
+ void     firmware_update_unlock(void);
+ bool     firmware_image_is_valid(uint16_t, uint32_t, bool);
+ void     read_flash_bytes(const uint8_t *, void *, size_t);
+ bool     read_running_firmware_word(uint32_t, uint32_t *);
  void     reboot(void);
  void     write_flash_page(uint32_t, uint8_t *);
+ void     write_flash_page_erasing(uint32_t, uint8_t *, bool);
 
  /*==============================================================================
   *  UART Packet Fetching

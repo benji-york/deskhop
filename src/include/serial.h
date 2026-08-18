@@ -30,5 +30,6 @@
 bool get_packet_from_buffer(device_t *);
 void process_packet(uart_packet_t *, device_t *);
 void queue_packet(const uint8_t *, enum packet_type_e, int);
+void queue_packet_blocking(const uint8_t *, enum packet_type_e, int);
 void send_value(const uint8_t, enum packet_type_e);
 void write_raw_packet(uint8_t *, uart_packet_t *);

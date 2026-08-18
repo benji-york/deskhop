@@ -212,6 +212,7 @@ void initial_setup(device_t *state) {
     set_sys_clock_khz(120000, true);
 
     /* Search the persistent storage sector in flash for valid config or use defaults */
+    firmware_sync_init();
     load_config(state);
 
     /* Init and enable the on-board LED GPIO as output */
@@ -237,10 +238,6 @@ void initial_setup(device_t *state) {
     /* Initialize UART queue */
     queue_init(&state->uart_tx_queue, sizeof(uart_packet_t), UART_QUEUE_LENGTH);
 
-    /* Setup RP2040 Core 1 */
-    multicore_reset_core1();
-    multicore_launch_core1(core1_main);
-
     /* Initialize and configure TinyUSB Device */
     tud_init(BOARD_TUD_RHPORT);
 
@@ -256,6 +253,11 @@ void initial_setup(device_t *state) {
 
     /* Update the core1 initial pass timestamp before enabling the watchdog */
     state->core1_last_loop_pass = time_us_32();
+
+    /* Core 1 consumes the USB host, DMA, and firmware metadata state above.
+       Launch it only after all of those dependencies are initialized. */
+    multicore_reset_core1();
+    multicore_launch_core1(core1_main);
 
     /* Setup the watchdog so we reboot and recover from a crash */
     watchdog_enable(WATCHDOG_TIMEOUT, WATCHDOG_PAUSE_ON_DEBUG);

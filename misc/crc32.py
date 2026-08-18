@@ -16,4 +16,5 @@ with open(elf_filename, 'r+b') as f:
     crc32_value = binascii.crc32(data) & 0xFFFFFFFF
 
 with open(output_filename, 'wb') as f:
-    f.write(struct.pack('<IHI', MAGIC_VALUE, int(version), crc32_value))
+    # Keep the checksum word-aligned to match firmware_metadata_t on RP2040.
+    f.write(struct.pack('<IH2xI', MAGIC_VALUE, int(version), crc32_value))

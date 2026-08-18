@@ -390,58 +390,153 @@ void handle_api_read_all_msg(uart_packet_t *packet, device_t *state) {
 void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
     uint32_t address = packet->data32[0];
 
-    if (address > STAGING_IMAGE_SIZE)
+    firmware_update_lock();
+
+    /* Never expose a slot while this board is replacing or repairing it. */
+    if (state->fw.upgrade_in_progress) {
+        firmware_update_unlock();
         return;
+    }
+
+    if (address > STAGING_IMAGE_SIZE) {
+        firmware_update_unlock();
+        return;
+    }
 
     /* Legacy updaters request one sentinel word at the exact end of the image
        after committing the final page. Acknowledge it without reading beyond
        the image so they can enter their completion branch and reboot. */
     uint32_t data = 0;
     if (address < STAGING_IMAGE_SIZE) {
-        if (address > STAGING_IMAGE_SIZE - sizeof(data) || address % sizeof(data) != 0)
+        if (!read_running_firmware_word(address, &data)) {
+            firmware_update_unlock();
             return;
-
-        memcpy(&data, &ADDR_FW_RUNNING[address], sizeof(data));
+        }
     }
+
+    firmware_update_unlock();
 
     /* Add requested data to bytes 4-7 in the packet and return it with a different type */
     packet->data32[1] = data;
 
-    queue_packet(packet->data, RESPONSE_BYTE_MSG, PACKET_DATA_LENGTH);
+    queue_packet_blocking(packet->data, RESPONSE_BYTE_MSG, PACKET_DATA_LENGTH);
 }
 
 /* Process response message following a request we sent to read a byte */
 /* state->page_offset and state->page_number are kept locally and compared to returned values */
-void handle_response_byte_msg(uart_packet_t *packet, device_t *state) {
-    uint16_t offset = packet->data[0];
+static void handle_response_byte_msg_locked(uart_packet_t *packet, device_t *state) {
     uint32_t address = packet->data32[0];
 
-    if (address != state->fw.address) {
-        state->fw.upgrade_in_progress = false;
-        state->fw.address = 0;
+    /* Retransmission can produce a late duplicate response. Only the one exact
+       response currently outstanding may touch the page buffer or checksum. */
+    if (!fw_update_response_expected(state->fw.source,
+                                     state->fw.request_pending,
+                                     state->fw.address,
+                                     address))
         return;
-    }
-    else {
-        /* Provide visual feedback of the ongoing copy by toggling LED for every sector */
-        if((address & 0xfff) == 0x000)
-            toggle_led();
-    }
+
+    if (address >= STAGING_IMAGE_SIZE || address % sizeof(uint32_t) != 0)
+        return;
+
+    /* Provide visual feedback of the ongoing copy by toggling LED for every sector */
+    if((address & 0xfff) == 0x000)
+        toggle_led();
 
     /* Update checksum as we receive each byte */
     if (address < STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE)
         for (int i=0; i<4; i++)
             state->fw.checksum = crc32_iter(state->fw.checksum, packet->data[4 + i]);
 
-    memcpy(state->page_buffer + offset, &packet->data32[1], sizeof(uint32_t));
+    memcpy(state->page_buffer + (uint8_t)address, &packet->data32[1], sizeof(uint32_t));
 
     /* Neeeeeeext byte, please! */
     state->fw.address += sizeof(uint32_t);
+    state->fw.progressed_at_us = time_us_32();
+    state->fw.request_pending = false;
     state->fw.byte_done = true;
 }
 
+void handle_response_byte_msg(uart_packet_t *packet, device_t *state) {
+    firmware_update_lock();
+    handle_response_byte_msg_locked(packet, state);
+    firmware_update_unlock();
+}
+
+static void begin_firmware_pull(device_t *state,
+                                uint16_t version,
+                                uint32_t peer_checksum,
+                                bool image_dirty,
+                                uint32_t now,
+                                bool drain_old_responses) {
+    state->fw = (fw_upgrade_state_t) {
+        .upgrade_in_progress = true,
+        .byte_done = !drain_old_responses,
+        .image_dirty = image_dirty,
+        .source = FW_UPDATE_SOURCE_PULL,
+        .version = version,
+        .peer_checksum = peer_checksum,
+        .checksum = 0xffffffff,
+        .requested_at_us = now,
+        .progressed_at_us = now,
+    };
+}
+
 /* Process a request to read a firmware package from flash */
-void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
+static void handle_heartbeat_msg_locked(uart_packet_t *packet, device_t *state) {
     uint16_t other_running_version = packet->data16[0];
+    uint32_t other_running_checksum = packet->data32[1];
+    uint32_t now = time_us_32();
+
+    /* Firmware before v0.85 used bytes 4-5 for unrelated state and supplied no
+       build checksum. Old receivers can consume our extended heartbeat, but a
+       new receiver must not pull from an unmarked, unverifiable source. */
+    if (!fw_update_peer_compatible(packet->data16[1])) {
+        if (state->fw.source == FW_UPDATE_SOURCE_PULL) {
+            if (state->fw.image_dirty) {
+                state->fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
+                state->fw.request_pending = false;
+                state->fw.byte_done = false;
+            }
+            else {
+                state->fw = (fw_upgrade_state_t){0};
+            }
+        }
+        return;
+    }
+
+    state->peer_fw_last_seen_us = now;
+
+    /* A dirty transfer whose peer disappeared remains alive in RAM. A newer
+       heartbeat resumes its repair, after a short stale-response drain. */
+    if (state->fw.source == FW_UPDATE_SOURCE_PULL_PAUSED) {
+        if (other_running_version >= state->_running_fw.version)
+            begin_firmware_pull(state, other_running_version, other_running_checksum,
+                                state->fw.image_dirty, now, true);
+        return;
+    }
+
+    /* Pin the source version so a peer that changes image midway cannot create
+       a hybrid image or silently downgrade this board. */
+    if (state->fw.source == FW_UPDATE_SOURCE_PULL) {
+        if (other_running_version != state->fw.version
+            || other_running_checksum != state->fw.peer_checksum) {
+            if (other_running_version > state->_running_fw.version
+                || (state->fw.image_dirty
+                    && other_running_version == state->_running_fw.version)) {
+                begin_firmware_pull(state, other_running_version, other_running_checksum,
+                                    state->fw.image_dirty, now, true);
+            }
+            else if (state->fw.image_dirty) {
+                state->fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
+                state->fw.request_pending = false;
+                state->fw.byte_done = false;
+            }
+            else {
+                state->fw = (fw_upgrade_state_t){0};
+            }
+        }
+        return;
+    }
 
     if (state->fw.upgrade_in_progress)
         return;
@@ -451,12 +546,14 @@ void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
         return;
 
     /* It is? Ok, kick off the firmware upgrade */
-    state->fw = (fw_upgrade_state_t) {
-        .upgrade_in_progress = true,
-        .byte_done = true,
-        .address = 0,
-        .checksum = 0xffffffff,
-    };
+    begin_firmware_pull(state, other_running_version, other_running_checksum,
+                        false, now, false);
+}
+
+void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
+    firmware_update_lock();
+    handle_heartbeat_msg_locked(packet, state);
+    firmware_update_unlock();
 }
 
 

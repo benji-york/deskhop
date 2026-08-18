@@ -140,11 +140,18 @@ void screensaver_task(device_t *state) {
 
 /* Periodically emit heartbeat packets */
 void heartbeat_output_task(device_t *state) {
-    /* If firmware upgrade is in progress, don't touch flash_cs */
-    if (state->fw.upgrade_in_progress)
-        return;
+    firmware_update_lock();
 
-    if (state->config_mode_active) {
+    /* A host UF2 drop is actively replacing the advertised image. Remain silent
+       until reboot so the peer cannot start pulling a changing flash slot. */
+    if (state->fw.source == FW_UPDATE_SOURCE_DROP) {
+        firmware_update_unlock();
+        return;
+    }
+
+    /* Config-mode timeout and BOOTSEL probing touch flash state. Heartbeats do
+       not, and must continue during a pull so a stalled peer can recover. */
+    if (!state->fw.upgrade_in_progress && state->config_mode_active) {
         /* Leave config mode if timeout expired and user didn't click exit */
         if (time_us_64() > state->config_mode_timer)
             reboot();
@@ -155,17 +162,18 @@ void heartbeat_output_task(device_t *state) {
 
 #ifdef DH_DEBUG
     /* Holding the button invokes bootsel firmware upgrade */
-    if (is_bootsel_pressed())
+    if (!state->fw.upgrade_in_progress && is_bootsel_pressed())
         reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
 #endif
 
-    uart_packet_t packet = {
-        .type = HEARTBEAT_MSG,
-        .data16 = {
-            [0] = state->_running_fw.version,
-            [2] = state->active_output,
-        },
-    };
+    uint16_t running_version = state->_running_fw.version;
+    uint32_t running_checksum = state->_running_fw.checksum;
+    firmware_update_unlock();
+
+    uart_packet_t packet = {.type = HEARTBEAT_MSG};
+    packet.data16[0] = running_version;
+    packet.data16[1] = FW_UPDATE_PROTOCOL_MARKER;
+    packet.data32[1] = running_checksum;
 
     queue_try_add(&global_state.uart_tx_queue, &packet);
     sync_owned_zoom_assist(state);
@@ -191,9 +199,62 @@ void process_hid_queue_task(device_t *state) {
 }
 
 /* Task that handles copying firmware from the other device to ours */
-void firmware_upgrade_task(device_t *state) {
-    if (!state->fw.upgrade_in_progress || !state->fw.byte_done)
+static void firmware_upgrade_task_locked(device_t *state) {
+    if (!state->fw.upgrade_in_progress)
         return;
+
+    uint32_t now = time_us_32();
+    fw_update_action_t action = fw_update_next_action(state->fw.source,
+                                                      state->fw.byte_done,
+                                                      state->fw.image_dirty,
+                                                      now,
+                                                      state->fw.requested_at_us,
+                                                      state->fw.progressed_at_us,
+                                                      state->peer_fw_last_seen_us);
+
+    if (action == FW_UPDATE_WAIT)
+        return;
+
+    if (action == FW_UPDATE_ABANDON) {
+        state->fw = (fw_upgrade_state_t){0};
+        return;
+    }
+
+    if (action == FW_UPDATE_RESTART) {
+        bool image_dirty = state->fw.image_dirty;
+        uint16_t version = state->fw.version;
+        uint32_t peer_checksum = state->fw.peer_checksum;
+        state->fw = (fw_upgrade_state_t) {
+            .upgrade_in_progress = true,
+            /* Drain replies from the old transfer generation before requesting
+               address zero. request_pending=false rejects them in the meantime. */
+            .byte_done = false,
+            .image_dirty = image_dirty,
+            .source = FW_UPDATE_SOURCE_PULL,
+            .version = version,
+            .peer_checksum = peer_checksum,
+            .checksum = 0xffffffff,
+            .requested_at_us = now,
+            .progressed_at_us = now,
+        };
+        return;
+    }
+
+    if (action == FW_UPDATE_PAUSE) {
+        /* Keep executing safely from RAM and advertising heartbeats. When the
+           peer returns, its heartbeat will restart the repair from address 0. */
+        state->fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
+        state->fw.request_pending = false;
+        state->fw.byte_done = false;
+        return;
+    }
+
+    /* A timeout asks for the same address again. Do not run the completed-word
+       page/finalization logic until a response has actually advanced it. */
+    if (!state->fw.byte_done) {
+        request_byte(state, state->fw.address);
+        return;
+    }
 
     /* Queue the next read before writing a completed page. Other cores can also
        produce UART traffic, so request_byte must atomically succeed before it
@@ -209,27 +270,40 @@ void firmware_upgrade_task(device_t *state) {
     if (state->fw.address != 0 && TU_U32_BYTE0(state->fw.address) == 0x00) {
         uint32_t page_start_addr = state->fw.address - FLASH_PAGE_SIZE;
         write_flash_page((uint32_t)ADDR_FW_RUNNING + page_start_addr - XIP_BASE, state->page_buffer);
+        state->fw.image_dirty = true;
     }
 
     /* The final response leaves address exactly at the image size. Finalize now;
        requesting that out-of-range address would never receive a response. */
     if (transfer_complete) {
         state->fw.upgrade_in_progress = 0;
+        state->fw.source = FW_UPDATE_SOURCE_NONE;
         state->fw.checksum = ~state->fw.checksum;
 
         /* Checksum mismatch, we wipe the stage 2 bootloader and rely on ROM recovery */
-        if(calculate_firmware_crc32() != state->fw.checksum) {
-            flash_range_erase((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);
-            reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+        if(state->fw.checksum != state->fw.peer_checksum
+           || !firmware_image_is_valid(state->fw.version, state->fw.checksum, true)) {
+            enter_firmware_recovery();
         }
 
         else {
-            state->_running_fw = _firmware_metadata;
+            state->fw.image_dirty = false;
+            state->_running_fw = (firmware_metadata_t) {
+                .magic = FIRMWARE_METADATA_MAGIC,
+                .version = state->fw.version,
+                .checksum = state->fw.checksum,
+            };
             global_state.reboot_requested = true;
         }
 
         return;
     }
+}
+
+void firmware_upgrade_task(device_t *state) {
+    firmware_update_lock();
+    firmware_upgrade_task_locked(state);
+    firmware_update_unlock();
 }
 
 void packet_receiver_task(device_t *state) {

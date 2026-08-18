@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include <hardware/flash.h>
 
@@ -20,8 +21,16 @@
 typedef struct {
     uint32_t magic;
     uint16_t version;
+    uint16_t _reserved;
     uint32_t checksum;
 } firmware_metadata_t;
+
+_Static_assert(offsetof(firmware_metadata_t, version) == 4,
+               "firmware version offset is part of the on-flash format");
+_Static_assert(offsetof(firmware_metadata_t, checksum) == 8,
+               "firmware checksum must remain word-aligned");
+_Static_assert(sizeof(firmware_metadata_t) == 12,
+               "firmware metadata is a fixed on-flash format");
 
 extern firmware_metadata_t _firmware_metadata;
 #define FIRMWARE_METADATA_MAGIC   0xf00d
@@ -70,6 +79,9 @@ typedef struct {
     uint8_t data[476];
     uint32_t magicEnd;
 } uf2_t;
+
+_Static_assert(offsetof(uf2_t, data) == 32, "UF2 payload offset must remain 32 bytes");
+_Static_assert(sizeof(uf2_t) == 512, "UF2 blocks must remain 512 bytes");
 
 #define UF2_MAGIC_START0 0x0A324655
 #define UF2_MAGIC_START1 0x9E5D5157

@@ -11,6 +11,25 @@
 
 #include "main.h"
 
+/* Firmware state is shared by the TinyUSB device task on core 0 and the peer
+   puller on core 1. Flash commands and XIP data reads also need their own
+   cross-core exclusion; disabling interrupts protects only the calling core. */
+static critical_section_t firmware_update_critical_section;
+static critical_section_t flash_access_critical_section;
+
+void firmware_sync_init(void) {
+    critical_section_init(&firmware_update_critical_section);
+    critical_section_init(&flash_access_critical_section);
+}
+
+void firmware_update_lock(void) {
+    critical_section_enter_blocking(&firmware_update_critical_section);
+}
+
+void firmware_update_unlock(void) {
+    critical_section_exit(&firmware_update_critical_section);
+}
+
 /* ================================================== *
  * ==============  Checksum Functions  ============== *
  * ================================================== */
@@ -45,8 +64,76 @@ uint32_t calc_crc32(const uint8_t *s, size_t n) {
     return ~crc;
 }
 
-uint32_t calculate_firmware_crc32(void) {
+static uint32_t calculate_firmware_crc32_unlocked(void) {
     return calc_crc32(ADDR_FW_RUNNING, STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE);
+}
+
+uint32_t calculate_firmware_crc32(void) {
+    critical_section_enter_blocking(&flash_access_critical_section);
+    uint32_t checksum = calculate_firmware_crc32_unlocked();
+    critical_section_exit(&flash_access_critical_section);
+    return checksum;
+}
+
+bool firmware_image_is_valid(uint16_t expected_version,
+                             uint32_t transferred_checksum,
+                             bool check_transferred_checksum) {
+    firmware_metadata_t metadata;
+    uint32_t legacy_checksum;
+
+    critical_section_enter_blocking(&flash_access_critical_section);
+    uint32_t calculated_checksum = calculate_firmware_crc32_unlocked();
+    memcpy(&metadata, ADDR_FW_METADATA, sizeof(metadata));
+    /* Firmware through v0.84 packed checksum at byte 6. Keep direct rollback
+       possible while requiring the aligned format for peer propagation. */
+    memcpy(&legacy_checksum, ADDR_FW_METADATA + 6, sizeof(legacy_checksum));
+    critical_section_exit(&flash_access_critical_section);
+
+    bool metadata_valid = fw_update_metadata_matches(metadata.magic,
+                                                     metadata.version,
+                                                     metadata.checksum,
+                                                     calculated_checksum,
+                                                     expected_version,
+                                                     expected_version != 0);
+    bool legacy_direct_image = !check_transferred_checksum
+        && expected_version == 0
+        && fw_update_metadata_matches(metadata.magic,
+                                      metadata.version,
+                                      legacy_checksum,
+                                      calculated_checksum,
+                                      0,
+                                      false);
+
+    return (!check_transferred_checksum || transferred_checksum == calculated_checksum)
+        && (metadata_valid || legacy_direct_image);
+}
+
+bool read_running_firmware_word(uint32_t address, uint32_t *word) {
+    if (address > STAGING_IMAGE_SIZE - sizeof(*word)
+        || address % sizeof(*word) != 0)
+        return false;
+
+    critical_section_enter_blocking(&flash_access_critical_section);
+    memcpy(word, &ADDR_FW_RUNNING[address], sizeof(*word));
+    critical_section_exit(&flash_access_critical_section);
+    return true;
+}
+
+void read_flash_bytes(const uint8_t *source, void *destination, size_t length) {
+    critical_section_enter_blocking(&flash_access_critical_section);
+    memcpy(destination, source, length);
+    critical_section_exit(&flash_access_critical_section);
+}
+
+/* Never attempt a normal reboot with a known-partial image. Invalidating its
+   first sector makes the ROM USB bootloader the deterministic recovery path. */
+void enter_firmware_recovery(void) {
+    critical_section_enter_blocking(&flash_access_critical_section);
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);
+    restore_interrupts(ints);
+    critical_section_exit(&flash_access_critical_section);
+    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
 }
 
 /* ================================================== *
@@ -54,21 +141,34 @@ uint32_t calculate_firmware_crc32(void) {
  * ================================================== */
 
 void wipe_config(void) {
+    firmware_update_lock();
+    if (global_state.fw.upgrade_in_progress) {
+        firmware_update_unlock();
+        return;
+    }
+
+    critical_section_enter_blocking(&flash_access_critical_section);
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase((uint32_t)ADDR_CONFIG - XIP_BASE, FLASH_SECTOR_SIZE);
     restore_interrupts(ints);
+    critical_section_exit(&flash_access_critical_section);
+    firmware_update_unlock();
 }
 
-void write_flash_page(uint32_t target_addr, uint8_t *buffer) {
-    /* Start of sector == first 256-byte page in a 4096 byte block */
-    bool is_sector_start = (target_addr & 0xf00) == 0;
-
+void write_flash_page_erasing(uint32_t target_addr, uint8_t *buffer, bool erase_sector) {
+    critical_section_enter_blocking(&flash_access_critical_section);
     uint32_t ints = save_and_disable_interrupts();
-    if (is_sector_start)
-        flash_range_erase(target_addr, FLASH_SECTOR_SIZE);
+    if (erase_sector)
+        flash_range_erase(target_addr & ~(FLASH_SECTOR_SIZE - 1), FLASH_SECTOR_SIZE);
 
     flash_range_program(target_addr, buffer, FLASH_PAGE_SIZE);
     restore_interrupts(ints);
+    critical_section_exit(&flash_access_critical_section);
+}
+
+void write_flash_page(uint32_t target_addr, uint8_t *buffer) {
+    /* Sequential writers encounter the first page of each sector first. */
+    write_flash_page_erasing(target_addr, buffer, (target_addr & 0xf00) == 0);
 }
 
 void load_config(device_t *state) {
@@ -76,7 +176,9 @@ void load_config(device_t *state) {
     config_t *running_config = &state->config;
 
     /* Load the flash config first, including the checksum */
+    critical_section_enter_blocking(&flash_access_critical_section);
     memcpy(running_config, config, sizeof(config_t));
+    critical_section_exit(&flash_access_critical_section);
 
     /* Calculate and update checksum, size without checksum */
     uint32_t checksum = calc_crc32((uint8_t *)running_config, offsetof(config_t, checksum));
@@ -96,6 +198,12 @@ void load_config(device_t *state) {
 }
 
 void save_config(device_t *state) {
+    firmware_update_lock();
+    if (state->fw.upgrade_in_progress) {
+        firmware_update_unlock();
+        return;
+    }
+
     uint8_t *raw_config = (uint8_t *)&state->config;
 
     /* Calculate and update checksum, size without checksum */
@@ -108,6 +216,7 @@ void save_config(device_t *state) {
 
     /* Write the new config to flash */
     write_flash_page((uint32_t)ADDR_CONFIG - XIP_BASE, state->page_buffer);
+    firmware_update_unlock();
 }
 
 void reset_config_timer(device_t *state) {
@@ -123,6 +232,7 @@ void _configure_flash_cs(enum gpio_override gpo, uint pin_index) {
 
 bool is_bootsel_pressed(void) {
   const uint CS_PIN_INDEX = 1;
+  critical_section_enter_blocking(&flash_access_critical_section);
   uint32_t flags = save_and_disable_interrupts();
 
   /* Set chip select to high impedance */
@@ -135,6 +245,7 @@ bool is_bootsel_pressed(void) {
   /* Restore chip select state */
   _configure_flash_cs(GPIO_OVERRIDE_NORMAL, CS_PIN_INDEX);
   restore_interrupts(flags);
+  critical_section_exit(&flash_access_critical_section);
 
   return button_pressed;
 }
@@ -149,6 +260,8 @@ bool request_byte(device_t *state, uint32_t address) {
         return false;
 
     state->fw.byte_done = false;
+    state->fw.request_pending = true;
+    state->fw.requested_at_us = time_us_32();
     return true;
 }
 

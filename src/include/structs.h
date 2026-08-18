@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include "flash.h"
+#include "fw_update.h"
 #include "packet.h"
 #include "screen.h"
 #include "zoom_tracker.h"
@@ -68,7 +69,13 @@ typedef enum { IDLE, READING_PACKET, PROCESSING_PACKET } receiver_state_t;
 typedef struct {
     uint32_t address;         // Address we're sending to the other box
     uint32_t checksum;
+    uint32_t peer_checksum;   // Build-time checksum advertised by the source
+    uint32_t requested_at_us; // When the outstanding word was last requested
+    uint32_t progressed_at_us;// When the last valid word was received
     uint16_t version;
+    fw_update_source_t source;// Peer pull and host UF2 drop must never be mixed
+    bool image_dirty;         // At least one page of the running image was overwritten
+    bool request_pending;     // Only an outstanding request may accept a response
     bool byte_done;           // Has the byte been successfully transferred
     bool upgrade_in_progress; // True if firmware transfer from the other box is in progress
 } fw_upgrade_state_t;
@@ -138,10 +145,14 @@ typedef struct {
     /* Firmware */
     fw_upgrade_state_t fw;           // State of the firmware upgrader
     firmware_metadata_t _running_fw; // RAM copy of running fw metadata
+    uint32_t peer_fw_last_seen_us;    // Last heartbeat, used for stalled-pull recovery
     bool reboot_requested;           // If set, stop updating watchdog
     uint64_t config_mode_timer;      // Counts how long are we to remain in config mode
 
     uint8_t page_buffer[FLASH_PAGE_SIZE]; // For firmware-over-serial upgrades
+    uint32_t uf2_blocks_received[STAGING_PAGES_CNT / 32];
+    uint32_t uf2_sectors_erased[STAGING_PAGES_CNT / 16 / 32];
+    uint16_t uf2_blocks_received_count;
 
     /* Connection status flags */
     bool tud_connected;      // True when TinyUSB device successfully connects

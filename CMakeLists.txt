@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 84)
+set(VERSION_MINOR 85)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -59,6 +59,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/protocol.c
   ${SRC_DIR}/hid_parser.c
   ${SRC_DIR}/hid_report.c
+  ${SRC_DIR}/fw_update.c
   ${SRC_DIR}/utils.c
   ${SRC_DIR}/handlers.c
   ${SRC_DIR}/setup.c

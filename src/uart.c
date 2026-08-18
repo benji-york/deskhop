@@ -35,6 +35,15 @@ void queue_packet(const uint8_t *data, enum packet_type_e packet_type, int lengt
     queue_try_add(&global_state.uart_tx_queue, &packet);
 }
 
+/* Firmware receivers prior to v0.85 have no timeout. Never silently drop the
+   response that would strand one of those receivers until its next power cycle. */
+void queue_packet_blocking(const uint8_t *data, enum packet_type_e packet_type, int length) {
+    uart_packet_t packet = {.type = packet_type};
+    memcpy(packet.data, data, length);
+
+    queue_add_blocking(&global_state.uart_tx_queue, &packet);
+}
+
 /* Sends just one byte of a certain packet type to the other box. */
 void send_value(const uint8_t value, enum packet_type_e packet_type) {
     queue_packet(&value, packet_type, sizeof(uint8_t));
