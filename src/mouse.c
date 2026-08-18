@@ -288,8 +288,10 @@ void switch_virtual_desktop(device_t *state, output_t *output, int new_index, in
 void do_screen_switch(device_t *state, int direction) {
     output_t *output = &state->config.output[state->active_output];
 
-    /* No switching allowed if explicitly disabled or in gaming mode */
-    if (state->switch_lock || state->gaming_mode)
+    /* Zoom Assist uses relative reports so macOS can keep panning a zoomed
+       viewport at the physical screen edge. Pointer-based switching must stay
+       disabled until the user deliberately zooms all the way back out. */
+    if (state->switch_lock || state->gaming_mode || zoom_assist_is_active(state))
         return;
 
     /* We want to jump in the direction of the other computer */
@@ -355,8 +357,9 @@ mouse_report_t create_mouse_report(device_t *state, mouse_values_t *values) {
         .mode    = ABSOLUTE,
     };
 
-    /* Workaround for Windows multiple desktops */
-    if (state->relative_mouse || state->gaming_mode) {
+    /* Workaround for Windows multiple desktops, gaming mode, and inferred
+       macOS Zoom Assist. */
+    if (mouse_uses_relative_mode(state)) {
         mouse_report.x = values->move_x;
         mouse_report.y = values->move_y;
         mouse_report.mode = RELATIVE;
@@ -372,6 +375,11 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
     /* Interpret the mouse HID report, extract and save values we need. */
     extract_report_values(raw_report, len, state, &values, iface);
 
+    /* DeskHop's device and UART mouse reports carry an int8 wheel. Clamp a
+       wider source field once so local and forwarded inference see identical
+       magnitudes and can never disagree about direction through truncation. */
+    values.wheel = zoom_canonicalize_wheel(values.wheel);
+
     /* If nothing changed, don't send a report. This prevents composite keyboards
        (e.g. QMK) that expose a mouse HID interface from generating spurious
        absolute position reports when they send zero-movement mouse reports during
@@ -381,6 +389,15 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
         values.buttons == state->mouse_buttons) {
         return;
     }
+
+    /* Command-scroll is macOS's built-in accessibility zoom gesture. Observe
+       it before constructing this mouse report so the activating wheel event
+       itself is emitted through the relative helper interface. */
+    bool zoom_scroll = is_macos_zoom_scroll(state, values.wheel);
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+        observe_zoom_scroll(state, values.wheel);
+    else if (zoom_scroll)
+        state->zoom_activation_pending[state->active_output] = true;
 
     bool position_changed = values.move_x != 0 || values.move_y != 0;
 
@@ -394,29 +411,40 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
             .buttons = values.buttons,
             .wheel   = values.wheel,
             .pan     = values.pan,
-            .mode    = state->relative_mouse || state->gaming_mode ? RELATIVE : ABSOLUTE,
+            .mode    = mouse_uses_relative_mode(state) ? RELATIVE : ABSOLUTE,
         };
         queue_packet((uint8_t *)&report, MOUSE_NONMOTION_MSG, sizeof(report));
     } else {
         /* Create the report for the output PC based on the updated values */
         mouse_report_t report = create_mouse_report(state, &values);
 
+        /* A remote mouse may initiate Zoom Assist before the owner's state
+           mirror makes the round trip. Preserve the raw deltas in that first
+           combined Command-scroll report instead of forwarding absolute x/y. */
+        if (zoom_scroll) {
+            report.x = values.move_x;
+            report.y = values.move_y;
+            report.mode = RELATIVE;
+        }
+
         /* Move the mouse, depending where the output is supposed to go */
         output_mouse_report(&report, state);
     }
 
-    /* There is one cursor, but each board tracks its position separately. When we are
-       not the active output, position-changing reports are forwarded in full and the
-       other board adopts our position from them. When we ARE the active output the
-       report stays local, so the other board would keep a stale position and any
-       pointing device attached to it (e.g. a keyboard with an integrated trackball)
-       would make the cursor jump back to wherever that board last thought it was.
-       Publish our position so both boards stay in agreement. */
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+    /* There is one cursor, but each board tracks its position separately. Absolute
+       reports forwarded to the active board already carry our coordinates. Relative
+       reports carry only deltas, so a separately attached keyboard/mouse button on
+       that board would otherwise reuse stale absolute coordinates and make the cursor
+       jump after Zoom Assist exits. Mirror the logical position in both cases. */
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT
+        || (position_changed && (mouse_uses_relative_mode(state) || zoom_scroll)))
         sync_pointer_position(state);
 
     /* We use the mouse to switch outputs, if switch_direction is LEFT or RIGHT */
-    if (switch_direction != NONE)
+    /* On the first forwarded Command-scroll event, the active-output Pico has
+       not mirrored the newly active state back yet. Suppress a coincident edge
+       crossing locally so that first zoom gesture cannot hop computers. */
+    if (switch_direction != NONE && !zoom_scroll)
         do_screen_switch(state, switch_direction);
 }
 
@@ -439,8 +467,10 @@ void process_mouse_queue_task(device_t *state) {
     if (tud_suspended())
         tud_remote_wakeup();
 
-    /* If it's not ready, we'll try on the next pass */
-    if (!tud_hid_n_ready(ITF_NUM_HID))
+    /* Absolute and relative reports use separate HID interfaces. Check the
+       interface this queued report will actually use. */
+    uint8_t instance = report.mode == RELATIVE ? ITF_NUM_HID_REL_M : ITF_NUM_HID;
+    if (!tud_hid_n_ready(instance))
         return;
 
     /* Try sending it to the host, if it's successful */

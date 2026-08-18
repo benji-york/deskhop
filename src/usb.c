@@ -113,6 +113,20 @@ void tud_cdc_rx_cb(uint8_t itf) {
  * ===============  USB HOST Section  =============== *
  * ================================================== */
 
+static uint8_t get_device_index(uint8_t dev_addr, uint8_t instance, uint8_t itf_protocol) {
+    if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
+        if (dev_addr == global_state.kbd_dev_addr && instance == global_state.kbd_instance)
+            return 0;
+
+        return MAX_DEVICES - 2;
+    }
+
+    if (itf_protocol == HID_ITF_PROTOCOL_MOUSE)
+        return 1;
+
+    return (dev_addr - 1) % (MAX_DEVICES - 1);
+}
+
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     uint8_t itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
@@ -120,20 +134,46 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         return;
 
     hid_interface_t *iface = &global_state.iface[dev_addr-1][instance];
+    bool contains_keyboard = itf_protocol == HID_ITF_PROTOCOL_KEYBOARD
+                             || iface->num_keyboards > 0;
+    bool contains_mouse = itf_protocol == HID_ITF_PROTOCOL_MOUSE
+                          || iface->mouse.is_found;
 
-    switch (itf_protocol) {
-        case HID_ITF_PROTOCOL_KEYBOARD:
+    if (contains_keyboard) {
+        if (dev_addr == global_state.kbd_dev_addr
+            && instance == global_state.kbd_instance)
             global_state.keyboard_connected = false;
-            break;
 
-        case HID_ITF_PROTOCOL_MOUSE:
-            global_state.mouse_connected = false;
-            break;
+        /* Clear only this device. Keeping the other local and remote keyboard
+           states avoids spuriously releasing their held keys. */
+        uint8_t device_idx = get_device_index(dev_addr, instance, itf_protocol);
+        memset(&global_state.local_kbd_states[device_idx], 0,
+               sizeof(hid_keyboard_report_t));
+        publish_local_modifiers(&global_state);
+
+        /* Route the recombined state to whichever output is active. This also
+           prevents an unplugged Command key from classifying later scrolls as
+           macOS Zoom gestures. */
+        hid_keyboard_report_t combined_report;
+        combine_kbd_states(&global_state, &combined_report);
+        send_key(&combined_report, &global_state);
     }
 
     /* Also clear the interface structure, otherwise plugging something else later
        might be a fun (and confusing) experience */
     memset(iface, 0, sizeof(hid_interface_t));
+
+    if (contains_mouse) {
+        global_state.mouse_connected = false;
+        for (uint8_t dev = 0; dev < MAX_DEVICES; dev++) {
+            for (uint8_t itf = 0; itf < MAX_INTERFACES; itf++) {
+                if (global_state.iface[dev][itf].mouse.is_found) {
+                    global_state.mouse_connected = true;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_report, uint16_t desc_len) {
@@ -211,33 +251,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 
     hid_interface_t *iface = &global_state.iface[dev_addr-1][instance];
 
-    /* Calculate a device index that distinguishes between different devices
-       while staying within the bounds of MAX_DEVICES.
-
-       Device index assignment:
-       - 0: Primary keyboard (the one set in tuh_hid_mount_cb)
-       - 1: Mouse devices
-       - MAX_DEVICES-2: Secondary keyboards (e.g., wireless keyboard through unified dongle)
-       - (dev_addr-1) % (MAX_DEVICES-1): Other devices
-
-       Note: Slot MAX_DEVICES-1 is reserved for the remote device (used in handle_keyboard_uart_msg) */
-    uint8_t device_idx;
-
-    if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
-        if (dev_addr == global_state.kbd_dev_addr && instance == global_state.kbd_instance) {
-            /* Primary keyboard */
-            device_idx = 0;
-        } else {
-            /* Secondary keyboard (e.g., wireless keyboard through unified dongle) */
-            device_idx = (MAX_DEVICES - 2);
-        }
-    } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
-        /* Mouse devices */
-        device_idx = 1;
-    } else {
-        /* Other devices */
-        device_idx = (dev_addr - 1) % (MAX_DEVICES - 1);
-    }
+    /* Keep report routing and unmount cleanup on the same device-state slot. */
+    uint8_t device_idx = get_device_index(dev_addr, instance, itf_protocol);
 
     if (iface->uses_report_id || itf_protocol == HID_ITF_PROTOCOL_NONE) {
         uint8_t report_id = 0;

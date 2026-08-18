@@ -45,6 +45,7 @@
 #include "setup.h"
 #include "tasks.h"
 #include "watchdog.h"
+#include "zoom.h"
 
 
 #include <hardware/structs/ioqspi.h>

@@ -168,6 +168,7 @@ void heartbeat_output_task(device_t *state) {
     };
 
     queue_try_add(&global_state.uart_tx_queue, &packet);
+    sync_owned_zoom_assist(state);
 }
 
 

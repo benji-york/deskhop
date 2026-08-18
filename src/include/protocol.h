@@ -38,6 +38,9 @@ enum packet_type_e {
     RESPONSE_BYTE_MSG    = 25,
     POINTER_SYNC_MSG     = 26,
     MOUSE_NONMOTION_MSG  = 27,
+    MODIFIER_STATE_MSG   = 28,
+    ZOOM_ASSIST_MSG      = 29,
+    ZOOM_ASSIST_CLEAR_MSG = 30,
 };
 
 typedef enum {

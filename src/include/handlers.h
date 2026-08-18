@@ -19,6 +19,7 @@
  *==============================================================================*/
 
 void config_enable_hotkey_handler(device_t *, hid_keyboard_report_t *);
+void clear_zoom_assist_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void disable_screensaver_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void enable_screensaver_pong_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void enable_screensaver_jitter_hotkey_handler(device_t *, hid_keyboard_report_t *);

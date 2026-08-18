@@ -65,6 +65,9 @@ const uart_handler_t uart_handler[] = {
     {.type = MOUSE_NONMOTION_MSG, .handler = handle_mouse_nonmotion_uart_msg},
     {.type = OUTPUT_SELECT_MSG, .handler = handle_output_select_msg},
     {.type = POINTER_SYNC_MSG, .handler = handle_pointer_sync_msg},
+    {.type = MODIFIER_STATE_MSG, .handler = handle_modifier_state_msg},
+    {.type = ZOOM_ASSIST_MSG, .handler = handle_zoom_assist_msg},
+    {.type = ZOOM_ASSIST_CLEAR_MSG, .handler = handle_zoom_assist_clear_msg},
 
     /* Box control */
     {.type = MOUSE_ZOOM_MSG, .handler = handle_mouse_zoom_msg},

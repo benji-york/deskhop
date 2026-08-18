@@ -14,6 +14,7 @@
 #include "flash.h"
 #include "packet.h"
 #include "screen.h"
+#include "zoom_tracker.h"
 
 typedef void (*action_handler_t)();
 
@@ -111,6 +112,9 @@ typedef struct {
     hid_keyboard_report_t local_kbd_states[MAX_DEVICES]; // Store keyboard states
     hid_keyboard_report_t remote_kbd_state;              // Store combined remote keyboard state
     uint8_t max_kbd_idx;                                 // Store largest kbd_idx seen
+    uint8_t local_modifiers;                             // Modifier state from locally attached keyboards
+    uint8_t peer_modifiers;                              // Modifier state mirrored by the other Pico
+    uint64_t peer_modifiers_last_seen;                   // Local receipt time of the peer's latest heartbeat
 
     int16_t pointer_x; // Store and update the location of our mouse pointer
     int16_t pointer_y;
@@ -152,6 +156,10 @@ typedef struct {
     bool gaming_mode;        // True when gaming mode is on (relative passthru + lock)
     bool config_mode_active; // True when config mode is active
     bool digitizer_active;   // True when digitizer Win/Mac workaround is active
+
+    /* Runtime-only inferred macOS Zoom state, kept independently per output. */
+    zoom_tracker_t zoom_assist[NUM_SCREENS];
+    bool zoom_activation_pending[NUM_SCREENS]; // Non-owner waits for authoritative state sync
 
     /* Onboard LED blinky (provide feedback when e.g. mouse connected) */
     int32_t  blinks_left;     // How many blink transitions are left

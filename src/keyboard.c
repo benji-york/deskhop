@@ -52,6 +52,13 @@ hotkey_combo_t hotkeys[] = {
      .acknowledge    = true,
      .action_handler = &toggle_gaming_mode_handler},
 
+    /* Clear inferred macOS Zoom Assist state and relearn wheel direction */
+    {.modifier       = KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT,
+     .keys           = {HID_KEY_Z},
+     .key_count      = 1,
+     .acknowledge    = true,
+     .action_handler = &clear_zoom_assist_hotkey_handler},
+
     /* Enable screensaver pong for active output */
     {.modifier       = KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT,
      .keys           = {HID_KEY_S},
@@ -191,6 +198,7 @@ static void add_keys(hid_keyboard_report_t *dest, const hid_keyboard_report_t *s
 void release_all_keys(device_t *state) {
     memset(state->local_kbd_states, 0, sizeof(state->local_kbd_states));
     memset(&state->remote_kbd_state, 0, sizeof(hid_keyboard_report_t));
+    publish_local_modifiers(state);
     
     static hid_keyboard_report_t empty_report = {0};
     queue_kbd_report(&empty_report, state);
@@ -307,6 +315,7 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
 
     /* Update the keyboard state for this device */
     update_kbd_state(state, &new_report, itf);
+    publish_local_modifiers(state);
 
     /* Check if any hotkey was pressed */
     hotkey = check_all_hotkeys(&new_report, state);

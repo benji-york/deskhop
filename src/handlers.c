@@ -73,6 +73,14 @@ void toggle_gaming_mode_handler(device_t *state, hid_keyboard_report_t *report) 
     send_value(state->gaming_mode, GAMING_MODE_MSG);
 };
 
+/* Clear inferred Zoom Assist without changing manually selected gaming mode. */
+void clear_zoom_assist_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+        clear_zoom_assist(state, state->active_output, true);
+    else
+        send_value(state->active_output, ZOOM_ASSIST_CLEAR_MSG);
+}
+
 /* This key combo locks both outputs simultaneously */
 void screenlock_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
     hid_keyboard_report_t lock_report = {0}, release_keys = {0};
@@ -164,6 +172,12 @@ void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
     hid_keyboard_report_t *report = (hid_keyboard_report_t *)packet->data;
     hid_keyboard_report_t combined_report;
 
+    /* A forwarded keyboard report is ordered with the host-visible key event,
+       so it is also a reliable modifier-state update if the dedicated mirror
+       packet was ever dropped. */
+    state->peer_modifiers = report->modifier;
+    state->peer_modifiers_last_seen = time_us_64();
+
     /* Update the keyboard state for the remote device  */
     update_remote_kbd_state(state, report);
 
@@ -177,12 +191,33 @@ void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
 
 /* Function handles received mouse moves from the other board */
 void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
-    mouse_report_t *mouse_report = (mouse_report_t *)packet->data;
-    queue_mouse_report(mouse_report, state);
+    mouse_report_t report = *(mouse_report_t *)packet->data;
+    bool activating_zoom = is_macos_zoom_scroll(state, report.wheel);
+    observe_zoom_scroll(state, report.wheel);
 
-    state->pointer_x       = mouse_report->x;
-    state->pointer_y       = mouse_report->y;
-    state->mouse_buttons   = mouse_report->buttons;
+    /* If the source had not yet received mirrored Command state, it may have
+       encoded this first combined wheel+motion event as absolute. The owner
+       knows the reported logical position, but emitting it as relative motion
+       would treat coordinates as deltas. Retain the logical position and send
+       a zero-motion relative wheel report instead; the next input carries the
+       ordinary movement after state synchronization. */
+    if (activating_zoom && report.mode != RELATIVE) {
+        state->pointer_x = report.x;
+        state->pointer_y = report.y;
+        report.x = 0;
+        report.y = 0;
+        report.mode = RELATIVE;
+    }
+
+    queue_mouse_report(&report, state);
+
+    /* A relative report carries deltas, not authoritative coordinates. Do not
+       mistake those small deltas for an absolute cursor position. */
+    if (report.mode != RELATIVE) {
+        state->pointer_x = report.x;
+        state->pointer_y = report.y;
+    }
+    state->mouse_buttons = report.buttons;
 
     state->last_activity[BOARD_ROLE] = time_us_64();
 }
@@ -192,7 +227,10 @@ void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
    reasserting a stale absolute position. */
 void handle_mouse_nonmotion_uart_msg(uart_packet_t *packet, device_t *state) {
     mouse_nonmotion_report_t *input = (mouse_nonmotion_report_t *)packet->data;
-    uint8_t mode = input->mode == RELATIVE ? RELATIVE : ABSOLUTE;
+    observe_zoom_scroll(state, input->wheel);
+    uint8_t mode = mouse_uses_relative_mode(state) || input->mode == RELATIVE
+                       ? RELATIVE
+                       : ABSOLUTE;
     mouse_report_t report = {
         .buttons = input->buttons,
         .x       = mode == RELATIVE ? 0 : state->pointer_x,
