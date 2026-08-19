@@ -26,29 +26,33 @@
  * ===========  Hotkey for output switching  =========== *
  * ===================================================== *
  *
- * Everyone is different, I prefer to use caps lock because I HATE SHOUTING :)
- * You might prefer something else. Pick something from the list found at:
+ * F24 is the default because an accidental F24 event is harmless on the host:
+ * unlike Caps Lock or a modifier, it cannot leave behind a latched state. Pick
+ * another key from the list found at:
  *
  * https://github.com/hathach/tinyusb/blob/master/src/class/hid/hid.h
  *
  * defined as HID_KEY_<something>
  *
  * In addition, there is an optional modifier you can use for the hotkey
- * switching. Currently, it's set to LEFT CTRL, you can change it by
- * redefining HOTKEY_MODIFIER here from KEYBOARD_MODIFIER_LEFTCTRL to something
- * else (check file referenced below) or HID_KEY_NONE.
+ * switching. The default F24 command uses no modifier. Ctrl+Caps Lock remains
+ * recognized as a legacy transition command, but new keyboard mappings should
+ * emit bare F24.
  *
  * If you do not want to use a key for switching outputs, you may be tempted
  * to select HID_KEY_NONE here as well; don't do that! That code appears in many
  * HID messages and the result will be a non-functional keyboard. Instead, choose
  * a key that is unlikely to ever appear on a keyboard that you will use.
- * HID_KEY_F24 is probably a good choice as keyboards with 24 function keys
- * are rare.
+ * HID_KEY_F24 is a good choice as keyboards with 24 function keys are rare.
  *
  * */
 
-#define HOTKEY_MODIFIER  KEYBOARD_MODIFIER_LEFTCTRL
-#define HOTKEY_TOGGLE    HID_KEY_CAPS_LOCK
+#define HOTKEY_MODIFIER  0
+#define HOTKEY_TOGGLE    HID_KEY_F24
+
+/* Temporary compatibility for keyboards flashed with the former command. */
+#define LEGACY_HOTKEY_MODIFIER KEYBOARD_MODIFIER_LEFTCTRL
+#define LEGACY_HOTKEY_TOGGLE   HID_KEY_CAPS_LOCK
 
 /**================================================== *
  * ==============  Mouse Speed Factor  ============== *

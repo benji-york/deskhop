@@ -44,6 +44,7 @@ void     process_keyboard_report(uint8_t *, int, uint8_t, hid_interface_t *);
 void     process_system_report(uint8_t *, int, uint8_t, hid_interface_t *);
 void     queue_cc_packet(uint8_t *, device_t *);
 void     queue_kbd_report(hid_keyboard_report_t *, device_t *);
+bool     queue_kbd_report_critical(hid_keyboard_report_t *, device_t *);
 void     queue_system_packet(uint8_t *, device_t *);
 void     release_all_keys(device_t *);
 void     send_consumer_control(uint8_t *, device_t *);

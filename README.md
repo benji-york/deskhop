@@ -45,7 +45,7 @@ The actual switch happens at the very moment when one arrow stops moving and the
 
 ## Keyboard
 
-Acting as a USB Host and querying your keyboard periodically, it looks for a preconfigured hotkey in the hid report (usually Ctrl + Caps Lock for me). When found, it will forward all subsequent characters to the other output.
+Acting as a USB Host and querying your keyboard periodically, it looks for a preconfigured hotkey in the HID report (bare F24 by default). When found, it will forward all subsequent characters to the other output.
 
 To have a visual indication which output you are using at any given moment, you can repurpose keyboard LEDs and have them provide the necessary feedback.
 
@@ -253,7 +253,7 @@ _Usage_:
 - ```Left CTRL + Right Shift + Z``` - Clear/relearn automatic macOS Zoom Assist for the active output
 - ```Left CTRL + Right Shift + S``` - Enable screensaver
 - ```Left CTRL + Right Shift + X``` - Disable screensaver
-- ```Left CTRL + Caps Lock``` - Switch between outputs
+- ```F24``` - Switch between outputs. The former ```Left CTRL + Caps Lock``` command is accepted temporarily for compatibility with existing keyboard firmware; new mappings should use bare F24 so an escaped report cannot latch Caps Lock on the host.
 
 Note: some keyboards don't send both shifts at the same time properly, that's why the shortcut was changed - to work for everyone. Apologies for the confusion.
 

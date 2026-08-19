@@ -11,14 +11,25 @@
 
 #include "main.h"
 
+#define KBD_CRITICAL_QUEUE_TIMEOUT_US 100000
+
 /* ==================================================== *
  * Hotkeys to trigger actions via the keyboard.
  * ==================================================== */
 
 hotkey_combo_t hotkeys[] = {
-    /* Main keyboard switching hotkey */
+    /* Main keyboard switching hotkey. F24 is intentionally harmless if a
+       malformed report ever escapes to the host. */
     {.modifier       = HOTKEY_MODIFIER,
      .keys           = {HOTKEY_TOGGLE},
+     .key_count      = 1,
+     .pass_to_os     = false,
+     .action_handler = &output_toggle_hotkey_handler},
+
+    /* Accept the former Ctrl+Caps Lock command while keyboards transition to
+       F24. It is swallowed exactly like the primary command. */
+    {.modifier       = LEGACY_HOTKEY_MODIFIER,
+     .keys           = {LEGACY_HOTKEY_TOGGLE},
      .key_count      = 1,
      .pass_to_os     = false,
      .action_handler = &output_toggle_hotkey_handler},
@@ -201,7 +212,7 @@ void release_all_keys(device_t *state) {
     publish_local_modifiers(state);
     
     static hid_keyboard_report_t empty_report = {0};
-    queue_kbd_report(&empty_report, state);
+    queue_kbd_report_critical(&empty_report, state);
 }
 
 
@@ -257,6 +268,31 @@ void queue_kbd_report(hid_keyboard_report_t *report, device_t *state) {
         return;
 
     queue_try_add(&state->kbd_queue, report);
+}
+
+/* Key-up reports are switch-critical: silently dropping one can leave a
+   modifier latched in the host's input stack. A functioning endpoint normally
+   frees a slot within one USB poll. Bound the wait so an unresponsive endpoint
+   cannot hang core 1 forever; rebooting is the fail-safe because it resets both
+   the USB device and all internal keyboard state. */
+bool queue_kbd_report_critical(hid_keyboard_report_t *report, device_t *state) {
+    if (!state->tud_connected)
+        return false;
+
+    uint64_t started = time_us_64();
+    while (!queue_try_add(&state->kbd_queue, report)) {
+        if (!state->tud_connected)
+            return false;
+
+        if (time_us_64() - started >= KBD_CRITICAL_QUEUE_TIMEOUT_US) {
+            state->reboot_requested = true;
+            return false;
+        }
+
+        tight_loop_contents();
+    }
+
+    return true;
 }
 
 /* If keys need to go locally, queue packet to kbd queue, else send them through UART */

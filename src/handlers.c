@@ -584,7 +584,11 @@ void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
 void set_active_output(device_t *state, uint8_t new_output) {
     state->active_output = new_output;
     restore_leds(state);
-    send_value(new_output, OUTPUT_SELECT_MSG);
+
+    /* A dropped selection packet leaves the two Picos routing reports to
+       different hosts. This queue is drained by the other core, so wait for a
+       slot rather than silently losing a switch-critical state transition. */
+    queue_packet_blocking(&new_output, OUTPUT_SELECT_MSG, sizeof(new_output));
 
     /* If we were holding a key down and drag the mouse to another screen, the key gets stuck.
        Changing outputs = no more keypresses on the previous system. */
