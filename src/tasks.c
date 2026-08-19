@@ -11,6 +11,9 @@
 
 #include "main.h"
 
+_Static_assert(ACTIVITY_OUTPUT_COUNT == NUM_SCREENS,
+               "activity synchronization must cover every DeskHop output");
+
 void task_scheduler(device_t *state, task_t *task) {
     uint64_t current_time = time_us_64();
 
@@ -53,6 +56,46 @@ void usb_host_task(device_t *state) {
         tuh_task();
 }
 
+/* Record real input at its physical source. The separate direct timestamp is
+   authoritative for this Pico and is the only activity we broadcast, which
+   prevents timestamps from echoing back and becoming artificially newer. */
+void record_local_activity(device_t *state, uint8_t output) {
+    if (output >= NUM_SCREENS)
+        return;
+
+    uint64_t now = time_us_64();
+    state->last_activity[output] = now;
+    state->direct_activity[output] = now;
+    state->direct_activity_valid |= (1u << output);
+}
+
+/* A routed HID report is proof of peer-originated activity. Keep it out of the
+   direct array so the next activity packet never rebroadcasts it. */
+void record_remote_activity(device_t *state, uint8_t output) {
+    if (output >= NUM_SCREENS)
+        return;
+
+    uint64_t now = time_us_64();
+    state->last_activity[output] = now;
+    state->peer_activity[output] = now;
+    state->peer_activity_valid |= (1u << output);
+}
+
+static void sync_activity(device_t *state) {
+    uint64_t now = time_us_64();
+    uart_packet_t packet = {.type = ACTIVITY_MSG};
+
+    for (uint8_t output = 0; output < NUM_SCREENS; output++) {
+        uint8_t mask = 1u << output;
+        packet.data32[output] = activity_age_seconds(
+            now, state->direct_activity[output], state->direct_activity_valid & mask);
+    }
+
+    /* This repeats every second, so a full queue or a corrupt UART packet only
+       delays convergence; it cannot permanently lose the activity update. */
+    queue_try_add(&state->uart_tx_queue, &packet);
+}
+
 mouse_report_t *screensaver_pong(device_t *state) {
     static mouse_report_t report = {0};
     static int dx = 20, dy = 25;
@@ -88,8 +131,9 @@ void screensaver_task(device_t *state) {
         10000000, /* JITTER, once every 10 sec is more than enough */
     };
     static uint32_t last_pointer_move = 0;
+    uint64_t now = time_us_64();
     screensaver_t *screensaver = &state->config.output[BOARD_ROLE].screensaver;
-    uint64_t inactivity_period = time_us_64() - state->last_activity[BOARD_ROLE];
+    uint64_t inactivity_period = now - state->last_activity[BOARD_ROLE];
 
     /* If we're not enabled, nothing to do here. */
     if (screensaver->mode == DISABLED)
@@ -106,6 +150,17 @@ void screensaver_task(device_t *state) {
 
     /* If we're the selected output and we can only run on inactive output, nothing to do here. */
     if (screensaver->only_if_inactive && CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+        return;
+
+    /* Keep both computers awake while either is genuinely in use, but stop all
+       synthetic motion after the configured system-wide idle period. */
+    if (screensaver_system_idle_timed_out(
+            now,
+            activity_latest_timestamp(state->direct_activity,
+                                      state->direct_activity_valid,
+                                      state->peer_activity,
+                                      state->peer_activity_valid),
+            state->config.screensaver_system_timeout_sec))
         return;
 
     /* We're active! Now check if it's time to move the cursor yet. */
@@ -176,6 +231,7 @@ void heartbeat_output_task(device_t *state) {
     packet.data32[1] = running_checksum;
 
     queue_try_add(&global_state.uart_tx_queue, &packet);
+    sync_activity(state);
     sync_owned_zoom_assist(state);
 }
 

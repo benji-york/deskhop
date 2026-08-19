@@ -11,6 +11,13 @@
 
 #include "main.h"
 
+_Static_assert(sizeof(config_t) <= FLASH_PAGE_SIZE,
+               "config_t has grown beyond the configuration flash page");
+_Static_assert(sizeof(config_t) == CONFIG_V8_SIZE_BYTES,
+               "v8-to-v9 migration requires the persisted config layout to remain unchanged");
+_Static_assert(offsetof(config_t, screensaver_system_timeout_sec) == CONFIG_V8_RESERVED_OFFSET,
+               "system timeout must occupy the v8 reserved configuration word");
+
 /* Firmware state is shared by the TinyUSB device task on core 0 and the peer
    puller on core 1. Flash commands and XIP data reads also need their own
    cross-core exclusion; disabling interrupts protects only the calling core. */
@@ -189,11 +196,20 @@ void load_config(device_t *state) {
     /* We expect the checksum to match */
     bool checksum_fail = (running_config->checksum != checksum);
 
-    /* We expect the config version to match exactly, to avoid erroneous values */
-    bool version_fail = (running_config->version != CURRENT_CONFIG_VERSION);
+    bool config_valid = !magic_header_fail && !checksum_fail;
+
+    /* Version 8 reserved exactly the word now used by the global timeout, so
+       migrate it in place without disturbing the user's HID, LED, OS, or
+       screensaver configuration. Persist once so subsequent boots read v9. */
+    if (config_valid && running_config->version == PREVIOUS_CONFIG_VERSION) {
+        running_config->version = CURRENT_CONFIG_VERSION;
+        running_config->screensaver_system_timeout_sec = SCREENSAVER_SYSTEM_TIMEOUT_SEC;
+        save_config(state);
+        return;
+    }
 
     /* On any condition failing, we fall back to default config */
-    if (magic_header_fail || checksum_fail || version_fail)
+    if (!config_valid || running_config->version != CURRENT_CONFIG_VERSION)
         memcpy(running_config, &default_config, sizeof(config_t));
 }
 

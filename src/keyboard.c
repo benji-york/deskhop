@@ -268,7 +268,6 @@ void send_key(hid_keyboard_report_t *report, device_t *state) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
         /* Queue the combined report */
         queue_kbd_report(&combined_report, state);
-        state->last_activity[BOARD_ROLE] = time_us_64();
     } else {
         /* Send the combined report to ensure all keys are included */
         queue_packet((uint8_t *)&combined_report, KEYBOARD_REPORT_MSG, KBD_REPORT_LENGTH);
@@ -279,7 +278,6 @@ void send_key(hid_keyboard_report_t *report, device_t *state) {
 void send_consumer_control(uint8_t *raw_report, device_t *state) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
         queue_cc_packet(raw_report, state);
-        state->last_activity[BOARD_ROLE] = time_us_64();
     } else {
         queue_packet((uint8_t *)raw_report, CONSUMER_CONTROL_MSG, CONSUMER_CONTROL_LENGTH);
     }
@@ -289,7 +287,6 @@ void send_consumer_control(uint8_t *raw_report, device_t *state) {
 void send_system_control(uint8_t *raw_report, device_t *state) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
         queue_system_packet(raw_report, state);
-        state->last_activity[BOARD_ROLE] = time_us_64();
     } else {
         queue_packet((uint8_t *)raw_report, SYSTEM_CONTROL_MSG, SYSTEM_CONTROL_LENGTH);
     }
@@ -316,6 +313,7 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
     /* Update the keyboard state for this device */
     update_kbd_state(state, &new_report, itf);
     publish_local_modifiers(state);
+    record_local_activity(state, state->active_output);
 
     /* Check if any hotkey was pressed */
     hotkey = check_all_hotkeys(&new_report, state);
@@ -374,11 +372,8 @@ void process_consumer_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
             new_report[i] = data[i];
     }
 
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
-        send_consumer_control(new_report, state);
-    } else {
-        queue_packet((uint8_t *)new_report, CONSUMER_CONTROL_MSG, CONSUMER_CONTROL_LENGTH);
-    }
+    record_local_activity(state, state->active_output);
+    send_consumer_control(new_report, state);
 }
 
 void process_system_report(uint8_t *raw_report, int length, uint8_t itf, hid_interface_t *iface) {
@@ -400,11 +395,8 @@ void process_system_report(uint8_t *raw_report, int length, uint8_t itf, hid_int
     uint8_t *report_ptr = (uint8_t *)&new_report;
     device_t *state = &global_state;
 
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
-        send_system_control(report_ptr, state);
-    } else {
-        queue_packet(report_ptr, SYSTEM_CONTROL_MSG, SYSTEM_CONTROL_LENGTH);
-    }
+    record_local_activity(state, state->active_output);
+    send_system_control(report_ptr, state);
 }
 
 keyboard_t *get_keyboard(hid_interface_t *iface, uint8_t report_id) {

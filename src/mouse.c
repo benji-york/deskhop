@@ -149,7 +149,6 @@ enum screen_pos_e update_mouse_position(device_t *state, mouse_values_t *values)
 void output_mouse_report(mouse_report_t *report, device_t *state) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
         queue_mouse_report(report, state);
-        state->last_activity[BOARD_ROLE] = time_us_64();
     } else {
         queue_packet((uint8_t *)report, MOUSE_REPORT_MSG, MOUSE_REPORT_LENGTH);
     }
@@ -389,6 +388,8 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
         values.buttons == state->mouse_buttons) {
         return;
     }
+
+    record_local_activity(state, state->active_output);
 
     /* Command-scroll is macOS's built-in accessibility zoom gesture. Observe
        it before constructing this mouse report so the activating wheel event

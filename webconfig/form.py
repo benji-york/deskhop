@@ -37,6 +37,9 @@ CONFIG_ = [
     FormField(73, "KBD LED as Indicator", None, {}, "uint8", "checkbox"),
 
     FormField(76, "Enforce Ports", None, {}, "uint8", "checkbox"),
+
+    FormField(1004, "Keep Awake", elem="label"),
+    FormField(83, "System idle timeout (seconds; 0 = unlimited)", 300, {}, "uint32"),
 ]
 
 OUTPUT_ = [

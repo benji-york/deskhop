@@ -41,6 +41,7 @@ enum packet_type_e {
     MODIFIER_STATE_MSG   = 28,
     ZOOM_ASSIST_MSG      = 29,
     ZOOM_ASSIST_CLEAR_MSG = 30,
+    ACTIVITY_MSG         = 31,
 };
 
 typedef enum {

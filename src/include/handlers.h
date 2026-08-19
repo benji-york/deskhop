@@ -41,6 +41,7 @@ void wipe_config_hotkey_handler(device_t *, hid_keyboard_report_t *);
 
 void handle_api_msgs(uart_packet_t *, device_t *);
 void handle_api_read_all_msg(uart_packet_t *, device_t *);
+void handle_activity_msg(uart_packet_t *, device_t *);
 void handle_consumer_control_msg(uart_packet_t *, device_t *);
 void handle_flash_led_msg(uart_packet_t *, device_t *);
 void handle_fw_upgrade_msg(uart_packet_t *, device_t *);
@@ -60,6 +61,7 @@ void handle_response_byte_msg(uart_packet_t *, device_t *);
 void handle_save_config_msg(uart_packet_t *, device_t *);
 void handle_screensaver_msg(uart_packet_t *, device_t *);
 void handle_set_report_msg(uart_packet_t *, device_t *);
+void handle_system_control_msg(uart_packet_t *, device_t *);
 void handle_switch_lock_msg(uart_packet_t *, device_t *);
 void handle_sync_borders_msg(uart_packet_t *, device_t *);
 void handle_wipe_config_msg(uart_packet_t *, device_t *);

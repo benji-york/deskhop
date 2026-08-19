@@ -95,7 +95,7 @@ typedef struct {
     uint16_t jump_threshold;
 
     output_t output[NUM_SCREENS];
-    uint32_t _reserved;
+    uint32_t screensaver_system_timeout_sec;
 
     // Keep checksum at the end of the struct
     uint32_t checksum;
@@ -111,7 +111,11 @@ typedef struct {
 
     uint8_t keyboard_leds_desired[NUM_SCREENS];  // Raw host LED state (index 0 = A, index 1 = B)
     uint8_t keyboard_leds_actual[NUM_SCREENS];   // Actual state of keyboard LEDs
-    uint64_t last_activity[NUM_SCREENS]; // Timestamp of the last input activity (-||-)
+    uint64_t last_activity[NUM_SCREENS];   // Activity delivered to each output
+    uint64_t direct_activity[NUM_SCREENS]; // Physical input originating on this Pico
+    uint64_t peer_activity[NUM_SCREENS];   // Physical input originating on the peer Pico
+    uint8_t direct_activity_valid;          // Bitmask for direct_activity
+    uint8_t peer_activity_valid;            // Bitmask for peer_activity
     uint32_t core1_last_loop_pass;       // Timestamp of last core1 loop execution
     uint8_t active_output;               // Currently selected output (0 = A, 1 = B)
     uint8_t board_role;                  // Which board are we running on? (0 = A, 1 = B, etc.)

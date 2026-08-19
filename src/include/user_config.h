@@ -151,6 +151,17 @@
 
 /**================================================== *
  *
+ * SCREENSAVER_SYSTEM_TIMEOUT_SEC: Stop keep-awake mouse movement after
+ * neither computer has received real keyboard or pointing-device activity
+ * for this many seconds. Activity on either computer keeps both eligible
+ * for keep-awake. Set to 0 to preserve the old unlimited behavior.
+ *
+ * */
+
+#define SCREENSAVER_SYSTEM_TIMEOUT_SEC 300
+
+/**================================================== *
+ *
  * SCREENSAVER_{A|B}_ONLY_IF_INACTIVE: [0 or 1] 1 means the
  * screensaver will activate only if the output is inactive.
  *

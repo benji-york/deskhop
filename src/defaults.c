@@ -61,4 +61,5 @@ const config_t default_config = {
     .hotkey_toggle = HOTKEY_TOGGLE,
     .kbd_led_as_indicator = KBD_LED_AS_INDICATOR,
     .jump_threshold = JUMP_THRESHOLD,
+    .screensaver_system_timeout_sec = SCREENSAVER_SYSTEM_TIMEOUT_SEC,
 };

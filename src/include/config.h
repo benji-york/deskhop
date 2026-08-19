@@ -15,7 +15,10 @@
 #include "misc.h"
 #include "screen.h"
 
-#define CURRENT_CONFIG_VERSION 8
+#define PREVIOUS_CONFIG_VERSION 8
+#define CURRENT_CONFIG_VERSION  9
+#define CONFIG_V8_SIZE_BYTES     136
+#define CONFIG_V8_RESERVED_OFFSET 128
 
 /*==============================================================================
  *  Configuration Data

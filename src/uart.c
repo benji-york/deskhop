@@ -77,6 +77,7 @@ const uart_handler_t uart_handler[] = {
     {.type = MODIFIER_STATE_MSG, .handler = handle_modifier_state_msg},
     {.type = ZOOM_ASSIST_MSG, .handler = handle_zoom_assist_msg},
     {.type = ZOOM_ASSIST_CLEAR_MSG, .handler = handle_zoom_assist_clear_msg},
+    {.type = ACTIVITY_MSG, .handler = handle_activity_msg},
 
     /* Box control */
     {.type = MOUSE_ZOOM_MSG, .handler = handle_mouse_zoom_msg},
@@ -86,6 +87,7 @@ const uart_handler_t uart_handler[] = {
     {.type = FLASH_LED_MSG, .handler = handle_flash_led_msg},
     {.type = GAMING_MODE_MSG, .handler = handle_toggle_gaming_msg},
     {.type = CONSUMER_CONTROL_MSG, .handler = handle_consumer_control_msg},
+    {.type = SYSTEM_CONTROL_MSG, .handler = handle_system_control_msg},
     {.type = SCREENSAVER_MSG, .handler = handle_screensaver_msg},
 
     /* Config */

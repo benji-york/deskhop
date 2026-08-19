@@ -186,7 +186,7 @@ void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
 
     /* Queue the combined report */
     queue_kbd_report(&combined_report, state);
-    state->last_activity[BOARD_ROLE] = time_us_64();
+    record_remote_activity(state, BOARD_ROLE);
 }
 
 /* Function handles received mouse moves from the other board */
@@ -219,7 +219,7 @@ void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
     }
     state->mouse_buttons = report.buttons;
 
-    state->last_activity[BOARD_ROLE] = time_us_64();
+    record_remote_activity(state, BOARD_ROLE);
 }
 
 /* Apply position-neutral mouse input at the active board's authoritative
@@ -242,7 +242,19 @@ void handle_mouse_nonmotion_uart_msg(uart_packet_t *packet, device_t *state) {
 
     queue_mouse_report(&report, state);
     state->mouse_buttons = input->buttons;
-    state->last_activity[BOARD_ROLE] = time_us_64();
+    record_remote_activity(state, BOARD_ROLE);
+}
+
+/* Merge source-authoritative activity ages into this Pico's monotonic clock.
+   Unknown entries never erase previously received history after a peer reboot. */
+void handle_activity_msg(uart_packet_t *packet, device_t *state) {
+    uint64_t now = time_us_64();
+
+    for (uint8_t output = 0; output < NUM_SCREENS; output++) {
+        if (activity_merge_age_seconds(now, packet->data32[output],
+                                       &state->peer_activity[output]))
+            state->peer_activity_valid |= (1u << output);
+    }
 }
 
 /* Adopt the authoritative cursor position from the other board.
@@ -325,6 +337,13 @@ void handle_screensaver_msg(uart_packet_t *packet, device_t *state) {
 /* Process consumer control message */
 void handle_consumer_control_msg(uart_packet_t *packet, device_t *state) {
     queue_cc_packet(packet->data, state);
+    record_remote_activity(state, BOARD_ROLE);
+}
+
+/* Process system control message */
+void handle_system_control_msg(uart_packet_t *packet, device_t *state) {
+    queue_system_packet(packet->data, state);
+    record_remote_activity(state, BOARD_ROLE);
 }
 
 /* Process request to store config to flash */

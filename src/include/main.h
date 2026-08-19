@@ -41,6 +41,7 @@
 #include "packet.h"
 #include "pinout.h"
 #include "screen.h"
+#include "screensaver_policy.h"
 #include "serial.h"
 #include "setup.h"
 #include "tasks.h"
