@@ -53,6 +53,11 @@ jobs:
           tests/test_screensaver_policy.c src/screensaver_policy.c \
           -o /tmp/deskhop-screensaver-policy-test
         /tmp/deskhop-screensaver-policy-test
+        cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+          -Isrc/include \
+          tests/test_reboot_hotkey.c src/reboot_hotkey.c \
+          -o /tmp/deskhop-reboot-hotkey-test
+        /tmp/deskhop-reboot-hotkey-test
 
     - name: Build firmware
       shell: bash

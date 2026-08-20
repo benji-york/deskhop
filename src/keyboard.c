@@ -334,22 +334,57 @@ void send_system_control(uint8_t *raw_report, device_t *state) {
 
 void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_interface_t *iface) {
     hid_keyboard_report_t new_report = {0};
+    hid_keyboard_report_t stored_report;
     device_t *state                  = &global_state;
     hotkey_combo_t *hotkey           = NULL;
 
-    if (length < KBD_REPORT_LENGTH)
+    if (length < KBD_REPORT_LENGTH || itf >= MAX_DEVICES)
         return;
 
     /* No more keys accepted if we're about to reboot */
     if (global_state.reboot_requested)
         return;
 
-    extract_kbd_data(raw_report, length, itf, iface, &new_report);
+    if (extract_kbd_data(raw_report, length, itf, iface, &new_report) < 0)
+        return;
+
+    reboot_hotkey_result_t reboot_result = reboot_hotkey_process_report(
+        &state->reboot_hotkey_sequence,
+        state->reboot_hotkey_source,
+        MAX_DEVICES,
+        itf,
+        new_report.modifier,
+        new_report.keycode,
+        KEYS_IN_USB_REPORT,
+        KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT,
+        HID_KEY_Q,
+        time_us_64());
+
+    /* A swallowed reboot chord must never remain in the stored keyboard state.
+       Otherwise a report from another keyboard could recombine and leak the
+       hidden Q or modifiers to the active computer before Q is released. */
+    stored_report = new_report;
+    if (reboot_result == REBOOT_HOTKEY_SWALLOW
+        || reboot_result == REBOOT_HOTKEY_TRIGGER) {
+        stored_report = (hid_keyboard_report_t){0};
+    }
 
     /* Update the keyboard state for this device */
-    update_kbd_state(state, &new_report, itf);
+    update_kbd_state(state, &stored_report, itf);
     publish_local_modifiers(state);
     record_local_activity(state, state->active_output);
+
+    if (reboot_result == REBOOT_HOTKEY_SWALLOW)
+        return;
+
+    if (reboot_result == REBOOT_HOTKEY_TAP)
+        blink_led(state);
+
+    if (reboot_result == REBOOT_HOTKEY_TRIGGER) {
+        blink_led(state);
+        reboot_hotkey_handler(state, &stored_report);
+        return;
+    }
 
     /* Check if any hotkey was pressed */
     hotkey = check_all_hotkeys(&new_report, state);

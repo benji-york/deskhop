@@ -28,11 +28,15 @@ void write_raw_packet(uint8_t *dst, uart_packet_t *packet) {
 }
 
 /* Schedule packet for sending to the other box */
-void queue_packet(const uint8_t *data, enum packet_type_e packet_type, int length) {
+bool queue_packet_try(const uint8_t *data, enum packet_type_e packet_type, int length) {
     uart_packet_t packet = {.type = packet_type};
     memcpy(packet.data, data, length);
 
-    queue_try_add(&global_state.uart_tx_queue, &packet);
+    return queue_try_add(&global_state.uart_tx_queue, &packet);
+}
+
+void queue_packet(const uint8_t *data, enum packet_type_e packet_type, int length) {
+    queue_packet_try(data, packet_type, length);
 }
 
 /* Firmware receivers prior to v0.85 have no timeout. Never silently drop the

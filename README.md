@@ -253,7 +253,16 @@ _Usage_:
 - ```Left CTRL + Right Shift + Z``` - Clear/relearn automatic macOS Zoom Assist for the active output
 - ```Left CTRL + Right Shift + S``` - Enable screensaver
 - ```Left CTRL + Right Shift + X``` - Disable screensaver
+- ```Left CTRL + Right Shift + Q``` three times - Reboot both DeskHop boards
 - ```F24``` - Switch between outputs. The former ```Left CTRL + Caps Lock``` command is accepted temporarily for compatibility with existing keyboard firmware; new mappings should use bare F24 so an escaped report cannot latch Caps Lock on the host.
+
+The reboot shortcut requires three completed presses from the same keyboard
+within one second. Each press must contain exactly
+Left Ctrl, Right Shift, and Q; another key cancels the sequence. DeskHop consumes
+the Q reports, sends a reliable reboot request to the peer Pico, releases all
+host-visible keys, and then lets both boards reboot through their watchdogs.
+The command is ignored while a board is updating firmware so a partial image is
+never booted.
 
 Note: some keyboards don't send both shifts at the same time properly, that's why the shortcut was changed - to work for everyone. Apologies for the confusion.
 

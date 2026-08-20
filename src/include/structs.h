@@ -14,6 +14,7 @@
 #include "flash.h"
 #include "fw_update.h"
 #include "packet.h"
+#include "reboot_hotkey.h"
 #include "screen.h"
 #include "zoom_tracker.h"
 
@@ -122,6 +123,8 @@ typedef struct {
 
     hid_keyboard_report_t local_kbd_states[MAX_DEVICES]; // Store keyboard states
     hid_keyboard_report_t remote_kbd_state;              // Store combined remote keyboard state
+    reboot_hotkey_sequence_t reboot_hotkey_sequence;     // Guarded reboot tap progress
+    reboot_hotkey_source_t reboot_hotkey_source[MAX_DEVICES]; // Per-keyboard held-Q state
     uint8_t max_kbd_idx;                                 // Store largest kbd_idx seen
     uint8_t local_modifiers;                             // Modifier state from locally attached keyboards
     uint8_t peer_modifiers;                              // Modifier state mirrored by the other Pico

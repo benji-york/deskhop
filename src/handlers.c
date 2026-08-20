@@ -25,6 +25,46 @@ void output_toggle_hotkey_handler(device_t *state, hid_keyboard_report_t *report
     set_active_output(state, state->active_output);
 };
 
+/* Request a graceful reboot only while the currently executing image is
+   intact. Both cores continue running until the watchdog expires, leaving
+   enough time for queued all-up and UART reports to be delivered. */
+static bool request_graceful_reboot(device_t *state, bool notify_peer) {
+    uint8_t request = ENABLE;
+
+    while (true) {
+        firmware_update_lock();
+
+        if (state->fw.upgrade_in_progress || state->fw.image_dirty) {
+            firmware_update_unlock();
+            return false;
+        }
+
+        /* Never wait on a queue while holding the firmware lock: core 0 may
+           need that lock before it can drain the queue. Retrying outside the
+           lock preserves the peer-message-before-local-reboot ordering. */
+        if (notify_peer
+            && !queue_packet_try(&request, REBOOT_MSG, sizeof(request))) {
+            firmware_update_unlock();
+            tight_loop_contents();
+            continue;
+        }
+
+        state->reboot_requested = true;
+        firmware_update_unlock();
+        break;
+    }
+
+    /* Queue host all-up after the reboot decision. Core 0 continues servicing
+       HID and UART queues throughout the watchdog's 500 ms grace period. */
+    release_all_keys(state);
+    return true;
+}
+
+/* The third completed Ctrl+Right Shift+Q tap reboots both DeskHop boards. */
+void reboot_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    request_graceful_reboot(state, true);
+}
+
 void _get_border_position(device_t *state, border_size_t *border) {
     /* To avoid having 2 different keys, if we're above half, it's the top coord */
     if (state->pointer_y > (MAX_SCREEN_COORD / 2))
@@ -353,7 +393,8 @@ void handle_save_config_msg(uart_packet_t *packet, device_t *state) {
 
 /* Process request to reboot the board */
 void handle_reboot_msg(uart_packet_t *packet, device_t *state) {
-    reboot();
+    /* Do not echo: the initiating board has already scheduled its own reboot. */
+    request_graceful_reboot(state, false);
 }
 
 /* Decapsulate and send to the other box */
@@ -412,7 +453,7 @@ void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
     firmware_update_lock();
 
     /* Never expose a slot while this board is replacing or repairing it. */
-    if (state->fw.upgrade_in_progress) {
+    if (state->reboot_requested || state->fw.upgrade_in_progress) {
         firmware_update_unlock();
         return;
     }
@@ -444,6 +485,9 @@ void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
 /* Process response message following a request we sent to read a byte */
 /* state->page_offset and state->page_number are kept locally and compared to returned values */
 static void handle_response_byte_msg_locked(uart_packet_t *packet, device_t *state) {
+    if (state->reboot_requested)
+        return;
+
     uint32_t address = packet->data32[0];
 
     /* Retransmission can produce a late duplicate response. Only the one exact
@@ -502,6 +546,9 @@ static void begin_firmware_pull(device_t *state,
 
 /* Process a request to read a firmware package from flash */
 static void handle_heartbeat_msg_locked(uart_packet_t *packet, device_t *state) {
+    if (state->reboot_requested)
+        return;
+
     uint16_t other_running_version = packet->data16[0];
     uint32_t other_running_checksum = packet->data32[1];
     uint32_t now = time_us_32();

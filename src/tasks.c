@@ -256,7 +256,7 @@ void process_hid_queue_task(device_t *state) {
 
 /* Task that handles copying firmware from the other device to ours */
 static void firmware_upgrade_task_locked(device_t *state) {
-    if (!state->fw.upgrade_in_progress)
+    if (state->reboot_requested || !state->fw.upgrade_in_progress)
         return;
 
     uint32_t now = time_us_32();

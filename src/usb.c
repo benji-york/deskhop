@@ -149,6 +149,9 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         uint8_t device_idx = get_device_index(dev_addr, instance, itf_protocol);
         memset(&global_state.local_kbd_states[device_idx], 0,
                sizeof(hid_keyboard_report_t));
+        reboot_hotkey_reset(&global_state.reboot_hotkey_sequence);
+        memset(global_state.reboot_hotkey_source, 0,
+               sizeof(global_state.reboot_hotkey_source));
         publish_local_modifiers(&global_state);
 
         /* Route the recombined state to whichever output is active. This also
