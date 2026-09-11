@@ -14,7 +14,7 @@
 _Static_assert(sizeof(config_t) <= FLASH_PAGE_SIZE,
                "config_t has grown beyond the configuration flash page");
 _Static_assert(sizeof(config_t) == CONFIG_V8_SIZE_BYTES,
-               "v8-to-v9 migration requires the persisted config layout to remain unchanged");
+               "v8-to-v10 migration requires the persisted config layout to remain unchanged");
 _Static_assert(offsetof(config_t, screensaver_system_timeout_sec) == CONFIG_V8_RESERVED_OFFSET,
                "system timeout must occupy the v8 reserved configuration word");
 
@@ -198,12 +198,23 @@ void load_config(device_t *state) {
 
     bool config_valid = !magic_header_fail && !checksum_fail;
 
-    /* Version 8 reserved exactly the word now used by the global timeout, so
-       migrate it in place without disturbing the user's HID, LED, OS, or
-       screensaver configuration. Persist once so subsequent boots read v9. */
-    if (config_valid && running_config->version == PREVIOUS_CONFIG_VERSION) {
-        running_config->version = CURRENT_CONFIG_VERSION;
-        running_config->screensaver_system_timeout_sec = SCREENSAVER_SYSTEM_TIMEOUT_SEC;
+    /* Version 8 reserved exactly the word now used by the global timeout.
+       Versions 8 and 9 share the current on-flash layout, so migrate them in
+       place without disturbing HID, LED, OS, calibration, or timeout values.
+
+       Version 10 makes Jitter the startup mode on both outputs. This one-time
+       migration enables the requested keep-awake behavior for existing
+       installations; Web Config can subsequently disable it by saving both
+       output modes as Disabled. */
+    if (config_valid
+        && migrate_config_to_current(
+            running_config->version,
+            &running_config->version,
+            &running_config->screensaver_system_timeout_sec,
+            &running_config->output[OUTPUT_A].screensaver.mode,
+            &running_config->output[OUTPUT_B].screensaver.mode,
+            SCREENSAVER_SYSTEM_TIMEOUT_SEC,
+            JITTER)) {
         save_config(state);
         return;
     }

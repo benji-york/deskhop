@@ -63,7 +63,7 @@ hotkey_combo_t hotkeys[] = {
      .acknowledge    = true,
      .action_handler = &toggle_gaming_mode_handler},
 
-    /* Clear inferred macOS Zoom Assist state and relearn wheel direction */
+    /* Clear inferred macOS zoom assist state and relearn wheel direction */
     {.modifier       = KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT,
      .keys           = {HID_KEY_Z},
      .key_count      = 1,

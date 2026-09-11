@@ -22,7 +22,7 @@ typedef struct TU_ATTR_PACKED {
 } zoom_assist_sync_t;
 
 _Static_assert(sizeof(zoom_assist_sync_t) == PACKET_DATA_LENGTH,
-               "Zoom Assist sync packet must fill one UART payload");
+               "zoom assist sync packet must fill one UART payload");
 
 bool zoom_assist_is_active(const device_t *state);
 bool mouse_uses_relative_mode(const device_t *state);

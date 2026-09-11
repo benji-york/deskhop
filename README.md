@@ -126,15 +126,22 @@ To make use of this feature, first set up the OS for each output in config (sinc
 
 If you're gaming, there is a chance your game might not work properly with absolute mouse mode. To address that issue, a **gaming mode** is introduced, toggled by ```LEFT CTRL + RIGHT SHIFT + G```. When in gaming mode, you are locked to the current screen and your mouse behaves like a standard relative mouse. This should also fix various virtual machine issues, currently unsupported operating systems etc.
 
-### Automatic macOS Zoom Assist (experimental)
+### Automatic macOS zoom assist (experimental)
 
 On outputs configured as macOS, DeskHop watches for Command + mouse-wheel accessibility zoom gestures. This assumes macOS Accessibility Zoom is enabled and configured to use Command; the firmware cannot distinguish disabled Zoom or an application-specific Command-scroll action. The first such gesture after boot teaches DeskHop which raw wheel direction means zoom in. It then temporarily uses relative mouse reports and prevents pointer-at-the-edge switching, allowing macOS's zoomed viewport to keep following fast pointer movement all the way to the physical edge. The normal explicit output-switch shortcut remains available.
 
-Zoom Assist turns itself off after the opposite wheel direction has paid back the inferred zoom-in amount, continues for six extra raw wheel units, and then stays quiet for 250 ms. This deliberate overscroll is how the firmware infers that macOS has returned to 1x without requiring any software on either Mac. Manual gaming mode remains independent. Use ```LEFT CTRL + RIGHT SHIFT + Z``` to clear the active output's inference and relearn its wheel direction if the first gesture after a reboot was zoom out rather than zoom in.
+Zoom assist turns itself off after the opposite wheel direction has paid back the inferred zoom-in amount, continues for six extra raw wheel units, and then stays quiet for 250 ms. This deliberate overscroll is how the firmware infers that macOS has returned to 1x without requiring any software on either Mac. Manual gaming mode remains independent. Use ```LEFT CTRL + RIGHT SHIFT + Z``` to clear the active output's inference and relearn its wheel direction if the first gesture after a reboot was zoom out rather than zoom in.
 
 ### Screensaver
 
-Supposedly built in to prevent computer from entering standby, but truth be told - it is just fun to watch. **Off by default**, will make your mouse pointer bounce around the screen like a Pong ball. When enabled, it activates after a period of inactivity defined in user config header and automatically switches off as soon as you send any output towards that screen.
+This keep-awake feature emits synthetic pointer motion after an output has been
+idle for the configured interval. Jitter sends a nearly invisible relative
+movement every ten seconds; Pong visibly bounces the pointer around the screen.
+The Web Config **Auto-start Jitter on both outputs** checkbox enables or disables
+Jitter persistently for both computers, while the keyboard shortcuts remain
+temporary runtime overrides. Real DeskHop input on either computer keeps both
+outputs eligible, and the system idle timeout eventually stops synthetic motion
+after you leave.
 
 Potential usage example - I have a buggy USB dock that won't resume video from standby, so not allowing it to sleep can be a handy workaround.
 
@@ -250,8 +257,9 @@ _Usage_:
 - ```Right CTRL + K``` - Lock/Unlock mouse desktop switching
 - ```Right CTRL + L``` - Lock both outputs at once (set output OS before, see shortcuts below)
 - ~~```Left Shift```~~ ```Left CTRL + Right Shift + G``` - Toggle gaming mode (lock to screen, act as standard mouse)
-- ```Left CTRL + Right Shift + Z``` - Clear/relearn automatic macOS Zoom Assist for the active output
+- ```Left CTRL + Right Shift + Z``` - Clear/relearn automatic macOS zoom assist for the active output
 - ```Left CTRL + Right Shift + S``` - Enable screensaver
+- ```Left CTRL + Right Shift + J``` - Enable low-motion Jitter
 - ```Left CTRL + Right Shift + X``` - Disable screensaver
 - ```Left CTRL + Right Shift + Q``` three times - Reboot both DeskHop boards
 - ```F24``` - Switch between outputs. The former ```Left CTRL + Caps Lock``` command is accepted temporarily for compatibility with existing keyboard firmware; new mappings should use bare F24 so an escaped report cannot latch Caps Lock on the host.

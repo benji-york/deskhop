@@ -58,7 +58,7 @@ bool zoom_tracker_observe(zoom_tracker_t *tracker, int32_t wheel, uint64_t now) 
     }
 
     /* A zoom-out gesture while already believed to be at 1x is harmless and
-       must not activate Zoom Assist. */
+       must not activate zoom assist. */
     if (!tracker->active)
         return false;
 

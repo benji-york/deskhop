@@ -11,12 +11,11 @@
 #pragma once
 
 #include <stdint.h>
+#include "config_migration.h"
 #include "structs.h"
 #include "misc.h"
 #include "screen.h"
 
-#define PREVIOUS_CONFIG_VERSION 8
-#define CURRENT_CONFIG_VERSION  9
 #define CONFIG_V8_SIZE_BYTES     136
 #define CONFIG_V8_RESERVED_OFFSET 128
 

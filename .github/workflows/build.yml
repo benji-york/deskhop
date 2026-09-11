@@ -38,6 +38,7 @@ jobs:
     - name: Run native tests
       shell: bash
       run: |
+        node tests/test_webconfig_autostart.js
         cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
           -Isrc/include \
           tests/test_zoom_tracker.c src/zoom_tracker.c \
@@ -58,6 +59,11 @@ jobs:
           tests/test_reboot_hotkey.c src/reboot_hotkey.c \
           -o /tmp/deskhop-reboot-hotkey-test
         /tmp/deskhop-reboot-hotkey-test
+        cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+          -Isrc/include \
+          tests/test_config_migration.c src/config_migration.c \
+          -o /tmp/deskhop-config-migration-test
+        /tmp/deskhop-config-migration-test
 
     - name: Build firmware
       shell: bash

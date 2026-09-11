@@ -287,7 +287,7 @@ void switch_virtual_desktop(device_t *state, output_t *output, int new_index, in
 void do_screen_switch(device_t *state, int direction) {
     output_t *output = &state->config.output[state->active_output];
 
-    /* Zoom Assist uses relative reports so macOS can keep panning a zoomed
+    /* Zoom assist uses relative reports so macOS can keep panning a zoomed
        viewport at the physical screen edge. Pointer-based switching must stay
        disabled until the user deliberately zooms all the way back out. */
     if (state->switch_lock || state->gaming_mode || zoom_assist_is_active(state))
@@ -357,7 +357,7 @@ mouse_report_t create_mouse_report(device_t *state, mouse_values_t *values) {
     };
 
     /* Workaround for Windows multiple desktops, gaming mode, and inferred
-       macOS Zoom Assist. */
+       macOS zoom assist. */
     if (mouse_uses_relative_mode(state)) {
         mouse_report.x = values->move_x;
         mouse_report.y = values->move_y;
@@ -419,7 +419,7 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
         /* Create the report for the output PC based on the updated values */
         mouse_report_t report = create_mouse_report(state, &values);
 
-        /* A remote mouse may initiate Zoom Assist before the owner's state
+        /* A remote mouse may initiate zoom assist before the owner's state
            mirror makes the round trip. Preserve the raw deltas in that first
            combined Command-scroll report instead of forwarding absolute x/y. */
         if (zoom_scroll) {
@@ -436,7 +436,7 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
        reports forwarded to the active board already carry our coordinates. Relative
        reports carry only deltas, so a separately attached keyboard/mouse button on
        that board would otherwise reuse stale absolute coordinates and make the cursor
-       jump after Zoom Assist exits. Mirror the logical position in both cases. */
+       jump after zoom assist exits. Mirror the logical position in both cases. */
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT
         || (position_changed && (mouse_uses_relative_mode(state) || zoom_scroll)))
         sync_pointer_position(state);

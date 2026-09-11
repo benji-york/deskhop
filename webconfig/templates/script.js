@@ -1,4 +1,7 @@
 const mgmtReportId = 6;
+const jitterMode = 2;
+const disabledMode = 0;
+const screensaverModeKeys = [19, 49];
 var device;
 
 const packetType = {
@@ -75,6 +78,12 @@ window.addEventListener('load', function () {
     document.getElementById('warning').style.display = 'block';
   }
 
+  for (const key of screensaverModeKeys) {
+    const element = document.querySelector(`[data-key="${key}"]`);
+    if (element)
+      element.addEventListener('change', updateAutoStartJitter);
+  }
+
   this.document.getElementById('menu-buttons').addEventListener('click', function (event) {
     window[event.target.dataset.handler]();
   })
@@ -116,11 +125,44 @@ function getValue(element) {
 function setValue(element, value) {
   element.setAttribute('fetched-value', value);
 
-  if (element.type === 'checkbox')
+  if (element.type === 'checkbox') {
     element.checked = value;
-  else
+  }
+  else {
     element.value = value;
     element.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  if (screensaverModeKeys.includes(Number(element.getAttribute('data-key'))))
+    updateAutoStartJitter();
+}
+
+/* The per-output screensaver modes are already persisted and loaded at boot.
+   Present a single convenience control without introducing a second source of
+   truth: checked means both startup modes are Jitter, and unchecked writes
+   Disabled to both. A mixed configuration is shown indeterminate. */
+function updateAutoStartJitter() {
+  const checkbox = document.getElementById('auto-start-jitter');
+  const modes = screensaverModeKeys.map(
+    key => document.querySelector(`[data-key="${key}"]`));
+
+  if (!checkbox || modes.some(element => !element || !element.hasAttribute('fetched-value')))
+    return;
+
+  const jitterCount = modes.filter(element => Number(element.value) === jitterMode).length;
+  checkbox.checked = jitterCount > 0;
+  checkbox.indeterminate = jitterCount > 0 && jitterCount < modes.length;
+}
+
+function autoStartJitterChanged(checkbox) {
+  checkbox.indeterminate = false;
+  const mode = checkbox.checked ? jitterMode : disabledMode;
+
+  for (const key of screensaverModeKeys) {
+    const element = document.querySelector(`[data-key="${key}"]`);
+    if (element)
+      element.value = mode;
+  }
 }
 
 
@@ -197,6 +239,9 @@ async function valueChangedHandler(element) {
     /* Set this as the current value */
     element.setAttribute('fetched-value', newValue);
   }
+
+  if (screensaverModeKeys.includes(Number(key)))
+    updateAutoStartJitter();
 }
 
 async function saveHandler() {

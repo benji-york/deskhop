@@ -113,7 +113,7 @@ void toggle_gaming_mode_handler(device_t *state, hid_keyboard_report_t *report) 
     send_value(state->gaming_mode, GAMING_MODE_MSG);
 };
 
-/* Clear inferred Zoom Assist without changing manually selected gaming mode. */
+/* Clear inferred zoom assist without changing manually selected gaming mode. */
 void clear_zoom_assist_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT)
         clear_zoom_assist(state, state->active_output, true);

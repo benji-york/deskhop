@@ -1,4 +1,4 @@
-/* Native tests for the host-independent Zoom Assist inference state machine. */
+/* Native tests for the host-independent zoom assist inference state machine. */
 #include "zoom_tracker.h"
 
 #include <stdio.h>

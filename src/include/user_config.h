@@ -114,11 +114,9 @@
  * Additionally, this mode can be automatically disabled if the output
  * is the currently-active output.
  *
- * If you only set the ENABLED options below, and leave the rest of
- * the defaults in place, then the screensaver mode will activate
- * after 4 minutes (240 seconds) of inactivity, will continue forever,
- * but will only activate on an output that is not currently
- * active.
+ * With the defaults below, Jitter starts after an output has been idle
+ * for 4 minutes (240 seconds), continues indefinitely while the
+ * system-wide activity gate remains open, and is allowed on either output.
  *
  * */
 
@@ -130,8 +128,8 @@
  *
  * */
 
-#define SCREENSAVER_A_MODE DISABLED
-#define SCREENSAVER_B_MODE DISABLED
+#define SCREENSAVER_A_MODE JITTER
+#define SCREENSAVER_B_MODE JITTER
 
 /**================================================== *
  *
