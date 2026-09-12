@@ -333,6 +333,13 @@ as Disabled. If the advanced per-output Mode controls disagree, the checkbox is
 shown indeterminate. Layer 3 J/S/X only alter the selected output's runtime mode
 and do not save it.
 
+Auto-start was verified on the installed hardware on 2026-09-12 without using
+Layer 3 J. Output A's idle delay was temporarily shortened to 5,000,000 µs, the
+Pico was restarted, and focus was switched to B. macOS's `HIDIdleTime` on A
+reset at approximately 10, 20, 30, and 40 seconds, exactly matching Jitter's
+ten-second cadence. The ordinary 240,000,000 µs delay should be restored after
+this accelerated test.
+
 After no real input on either output for the system timeout (300 seconds by
 default), all synthetic motion stops so the machines may sleep. Set the system
 timeout to `0` for the old unlimited behavior. Input attached directly to a Mac,
@@ -465,7 +472,10 @@ Settings that matter for this installation after a config wipe:
 - Screen positions: B left, A right.
 - `KBD LED as Indicator`: enabled.
 - `Auto-start Jitter on both outputs`: enabled for hands-off keep-awake.
-- System idle timeout: normally 300 seconds; 0 means unlimited keep-awake.
+- `Only If Inactive`: enabled on both outputs.
+- Per-output idle time: 240,000,000 µs (four minutes); maximum time: 0.
+- System idle timeout: 1,800 seconds in the saved installation configuration;
+  the compiled default is 300 seconds and 0 means unlimited keep-awake.
 - Screen count, speed, jump threshold, and edge calibration as appropriate.
 
 Saved settings live only in Pico flash and can differ from `user_config.h`.
@@ -650,7 +660,7 @@ After QMK flashing, test:
 | Pointer snaps to a corner when alternating pointing devices or immediately switches back | Peer has stale X/Y or lacks PR #357 | Install `c68078f` or newer on both Picos. |
 | Zoomed viewport stutters or stops panning at the display edge | Absolute coordinates are clamped at the edge; zoom assist is not active | Confirm output OS is macOS and zoom is initiated with Command-scroll; test gaming mode G, then reset zoom assist direction with Z if necessary. |
 | Edge switching stays disabled after zooming out | Zoom debt was not fully repaid/overscrolled, or manual gaming mode is still on | Command-scroll farther out and pause 250 ms; use Z to clear inference; toggle G separately if gaming mode was enabled. |
-| Other Mac does not stay awake | Auto-start Jitter is off, its per-output idle conditions are not met, or the 300-second global real-idle cutoff was reached | Enable `Auto-start Jitter on both outputs`; inspect idle/max/Only If Inactive/system timeout. |
+| Other Mac does not stay awake | Auto-start Jitter is off, its per-output idle conditions are not met, the host suspended USB before Jitter began, or the configured global real-idle cutoff was reached | Enable `Auto-start Jitter on both outputs`; inspect idle/max/Only If Inactive/system timeout. Temporarily use a 5,000,000 µs idle time and monitor macOS `HIDIdleTime` to test it quickly. |
 | Layer 3 L locks only one Mac | The other output is still configured Linux/Windows | Set both output OS values to macOS, Save, Exit, and retry. |
 | Sofle arrow is constantly `--->` | Caps focus signal is absent, unstable, or treated as B fallback | Enable `KBD LED as Indicator`, confirm current firmware on both Picos and QMK, then reconnect/power-cycle. |
 | Arrow flickers during every DeskHop acknowledgement | QMK LED debounce is missing/too short | Use current QMK with 250 ms settle time; DeskHop ACK transitions are 80 ms. |
