@@ -4,8 +4,9 @@ Fork baseline: `c1e9420a05b32ea67a44f716160dd4286de5f629` (v0.91).
 Upstream baseline: `ce8abb69861c6e5d9ffb731e1df557a128d4c222`.
 Common ancestor: `59577cc53b311e6ede128402fdaf459d92866ba1`.
 
-This project is an isolated checkout at `/Users/benji/Documents/ChatGPT/DeskHop`.
-The previously deployed source remains at
+The full merge was approved and adopted on `main` on 2026-09-13. This project at
+`/Users/benji/Documents/ChatGPT/DeskHop` is now the current development checkout.
+The previously deployed v0.91 source remains at
 `/Users/benji/Documents/Codex/2026-08-13/i/work/deskhop-benji`.
 
 ## Initial merge
@@ -21,8 +22,9 @@ commits absent from the fork (including merge commits). A trial merge on
 
 The trial merge was aborted after recording the conflicts. All three resolution
 strategies were then completed in separate tasks and worktrees. The recommended
-full-merge candidate is now on `integration/upstream-2026-09-13`, with this
-comparison added. Both upstream and the fork baseline are ancestors of it.
+full-merge candidate was placed on `integration/upstream-2026-09-13`, with this
+comparison added, then fast-forwarded into `main` after approval. Both upstream
+and the fork baseline are ancestors of it.
 
 ## Incoming changes
 
@@ -68,11 +70,12 @@ usage. Hardware validation is separate from compilation and native testing.
 | Selective integration | `21d36c7` | Six original suites plus new HID regressions passed | Passed | 149,068 B (56.86%) |
 | Upstream-first replay | `985de2d` | Six original suites plus new HID regressions passed | Passed | 149,068 B (56.86%) |
 
-Recommend **the full merge**. Its merge commit `9e212f9` has the exact fork and
+Selected **the full merge**. Its merge commit `9e212f9` has the exact fork and
 upstream tips as parents; `f980b1f` adds tests and documentation. It preserves
 both histories, incorporates every incoming fix, and avoids replaying the same
 upstream conflicts next time. The initial integration branch was fast-forwarded
-to this candidate; `main` and `origin/main` remain at `c1e9420`.
+to this candidate and comparison commit `75988c6`; `main` then adopted that
+history on approval. The alternate branches remain available for comparison.
 
 The selective candidate preserves the fork's capacity-based parser arithmetic
 while adding upstream's corrected last-usage semantics. It has equivalent
@@ -109,7 +112,9 @@ Detailed full-merge decisions and artifact checksums are in
 - `/Users/benji/.codex/worktrees/9a34/DeskHop/UPSTREAM_SELECTIVE_INTEGRATION.md`
 - `/Users/benji/.codex/worktrees/1f58/DeskHop/INTEGRATION_UPSTREAM_REPLAY.md`
 
-No candidate has been pushed or flashed, and QMK is unchanged. Physical checks
+The experiments involved no push or flash; the selected full merge was then
+approved for adoption on `main` and publication to the fork. QMK and installed
+firmware remain unchanged. Physical checks
 must cover both directions, trackball and keyboard clicks, focus LEDs, zoom
 assist, jitter, coordinated reboot, and firmware propagation before calling
 v0.92 hardware-verified. All alternatives use version 192; switching between

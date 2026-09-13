@@ -1,5 +1,9 @@
 # Full upstream merge candidate — v0.92
 
+Adopted on `main` on 2026-09-13 after comparison with the selective and replay
+approaches. The notes below record the candidate's validation before adoption;
+hardware validation is still pending.
+
 Branch: `integration/upstream-full-merge`.
 Worktree: `/Users/benji/.codex/worktrees/8bf3/DeskHop`.
 

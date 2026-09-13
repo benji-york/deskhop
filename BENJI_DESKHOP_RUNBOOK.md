@@ -6,21 +6,23 @@ the coupled Sofle/QMK firmware, how to build and deploy both, and the failure
 modes already diagnosed. It is intentionally more specific than the upstream
 README.
 
-Snapshot: 2026-09-11
+Snapshot: 2026-09-13
 
 ## Source of truth
 
-| Component | Local repository | Remote | Known-good revision |
+| Component | Local repository | Remote | Source / verified state |
 | --- | --- | --- | --- |
-| DeskHop | `/Users/benji/Documents/Codex/2026-08-13/i/work/deskhop-benji` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.91 with hardware-verified auto-start Jitter |
+| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.92 with upstream `ce8abb6` merged; seven native suites and ARM build pass. Hardware remains on verified v0.91. |
 | Sofle/QMK | `/Users/benji/qmk_firmware` | `git@github.com:benji-york/qmk_firmware.git` | `master` at `469f5dc815` (`Map DeskHop reboot to Layer 3 Q`) |
 | Physical carrier project | n/a | [jfedor2/screen-hopper](https://github.com/jfedor2/screen-hopper) | The installed two-Pico board shown in the setup photo |
 
-Both source-of-truth branches match their `origin`, and both remotes use SSH for
-fetch and push. The numbered QMK checkouts under
+Both remotes use SSH for fetch and push. The numbered QMK checkouts under
 `/Users/benji/projects/qmk_firmware/` are superseded; do not build from them.
-The retained DeskHop topic branch pointers are already ancestors of `main`; there
-is no separate unmerged feature branch to flash.
+The full upstream merge was adopted on `main` on 2026-09-13. Alternative selective
+and replay branches remain for comparison; they are not deployment targets.
+The previous DeskHop clone at
+`/Users/benji/Documents/Codex/2026-08-13/i/work/deskhop-benji` is retained at the
+v0.91 state; build current firmware from the project path in the table above.
 
 Known-good archived binaries are:
 
@@ -31,9 +33,13 @@ The hardware-verified auto-start build is:
 
 - `/Users/benji/Documents/Codex/2026-08-13/i/outputs/deskhop-v0.91-auto-start-jitter.uf2`
 
-For v0.91, build from the current DeskHop working tree. For the last
-hardware-tested v0.90 state, use commit `6d1cd12` or its archived binary rather
-than choosing another older artifact by its descriptive filename.
+The current, not-yet-flashed v0.92 build is:
+
+- `/Users/benji/Documents/ChatGPT/DeskHop/build/deskhop.uf2`
+
+The current working tree builds v0.92. To reproduce hardware-verified v0.91,
+use commit `c1e9420` or its archived binary. For the older hardware-tested v0.90
+state, use commit `6d1cd12` or its archived binary.
 
 ## What the box is doing
 
@@ -504,7 +510,8 @@ and a point below center as the bottom boundary, synchronizes it, and saves it.
 Standard build:
 
 ```sh
-cd /Users/benji/Documents/Codex/2026-08-13/i/work/deskhop-benji
+cd /Users/benji/Documents/ChatGPT/DeskHop
+export PATH=/opt/homebrew/opt/arm-gcc-bin@14/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
 cmake -S . -B build
 cmake --build build --parallel
 ```
@@ -513,7 +520,7 @@ The artifact is `build/deskhop.uf2`. The current Mac has Homebrew's
 `arm-none-eabi-gcc` and binutils available under `/opt/homebrew`.
 
 Every behavior change intended to auto-propagate must also raise
-`VERSION_MINOR` in `CMakeLists.txt`. Internally v0.91 is encoded as 191. A healthy
+`VERSION_MINOR` in `CMakeLists.txt`. Internally v0.92 is encoded as 192. A healthy
 peer starts an automatic pull only when it sees a strictly newer numeric version;
 an equal-version rebuild with different code/checksum will not normally replace
 the peer.
@@ -540,12 +547,12 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc/include tes
 /tmp/deskhop-config-migration-test
 ```
 
-The v0.92 full-merge candidate adds a seventh native HID regression suite for
+The adopted v0.92 full merge adds a seventh native HID regression suite for
 parser usage carry/bounds, full report-ID dispatch, consumer/system payload and
 activity guards, and split NKRO extraction. Run the sanitizer command documented
 in [tests/hid_stubs/README.md](tests/hid_stubs/README.md); CI runs it after the
 six original suites. See [UPSTREAM_FULL_MERGE_NOTES.md](UPSTREAM_FULL_MERGE_NOTES.md)
-for this candidate's integration decisions, build results, and remaining limits.
+for its integration decisions, build results, and remaining hardware checks.
 
 There is not yet an in-repo native regression test for pointer-sync or remote
 non-motion transport; those changes were verified on the real hardware.
