@@ -10,7 +10,8 @@
  */
 #pragma once
 
-#include "main.h"
+#include <stdbool.h>
+#include <stdint.h>
 #include "tusb.h"
 
 /*==============================================================================
@@ -29,7 +30,8 @@
    one narrow block is padding or a stray bit field, several adding up to this are a
    real key bitmap. */
 #define NKRO_MIN_BITS               32
-#define MAX_REPORTS                 24
+#define MAX_REPORTS_PER_IFACE       24
+#define REPORT_ID_MAP_SIZE         256
 #define MAX_KEYBOARDS               5
 #define MAX_SYS_BUTTONS             8
 #define PRIMARY_KEYBOARD            0
@@ -131,6 +133,14 @@ typedef struct TU_ATTR_PACKED {
     uint16_t usage_max;
 } nkro_block_t;
 
+typedef enum {
+    REPORT_RECEIVER_NONE,
+    REPORT_RECEIVER_MOUSE,
+    REPORT_RECEIVER_KEYBOARD,
+    REPORT_RECEIVER_CONSUMER,
+    REPORT_RECEIVER_SYSTEM,
+} receiver_id_t;
+
 /* Defines information about HID report format for the keyboard. */
 typedef struct {
     report_val_t modifier;
@@ -162,7 +172,7 @@ struct hid_interface_t {
     mouse_t mouse;
     report_t consumer;
     report_t system;
-    process_report_f report_handler[MAX_REPORTS];
+    uint8_t report_handler[REPORT_ID_MAP_SIZE];
     uint8_t protocol;
     bool uses_report_id;
 };
@@ -179,7 +189,7 @@ typedef struct {
 
     collection_t collection;
 
-    report_offset_map_t report_offsets[MAX_REPORTS];
+    report_offset_map_t report_offsets[MAX_REPORTS_PER_IFACE];
     uint8_t num_report_offsets;
 
     /* as tag is 4 bits, there can be 16 different tags in global header type */

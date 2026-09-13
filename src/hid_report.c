@@ -200,13 +200,20 @@ static uint8_t *get_next_keyboard_id(hid_interface_t *iface) {
     return &iface->keyboards[MAX_KEYBOARDS - 1].report_id;
 }
 
+const process_report_f report_receivers[] = {
+    [REPORT_RECEIVER_NONE]     = NULL,
+    [REPORT_RECEIVER_MOUSE]    = process_mouse_report,
+    [REPORT_RECEIVER_KEYBOARD] = process_keyboard_report,
+    [REPORT_RECEIVER_CONSUMER] = process_consumer_report,
+    [REPORT_RECEIVER_SYSTEM]   = process_system_report,
+};
 
 void extract_data(hid_interface_t *iface, report_val_t *val) {
     const usage_map_t map[] = {
         {.usage_page   = HID_USAGE_PAGE_BUTTON,
          .global_usage = HID_USAGE_DESKTOP_MOUSE,
          .handler      = handle_buttons,
-         .receiver     = process_mouse_report,
+         .receiver_id  = REPORT_RECEIVER_MOUSE,
          .dst          = &iface->mouse.buttons,
          .get_id       = get_mouse_id},
 
@@ -214,7 +221,7 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
          .global_usage = HID_USAGE_DESKTOP_MOUSE,
          .usage        = HID_USAGE_DESKTOP_X,
          .handler      = _store,
-         .receiver     = process_mouse_report,
+         .receiver_id  = REPORT_RECEIVER_MOUSE,
          .dst          = &iface->mouse.move_x,
          .get_id       = get_mouse_id},
 
@@ -222,7 +229,7 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
          .global_usage = HID_USAGE_DESKTOP_MOUSE,
          .usage        = HID_USAGE_DESKTOP_Y,
          .handler      = _store,
-         .receiver     = process_mouse_report,
+         .receiver_id  = REPORT_RECEIVER_MOUSE,
          .dst          = &iface->mouse.move_y,
          .get_id       = get_mouse_id},
 
@@ -230,7 +237,7 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
          .global_usage = HID_USAGE_DESKTOP_MOUSE,
          .usage        = HID_USAGE_DESKTOP_WHEEL,
          .handler      = _store,
-         .receiver     = process_mouse_report,
+         .receiver_id  = REPORT_RECEIVER_MOUSE,
          .dst          = &iface->mouse.wheel,
          .get_id       = get_mouse_id},
 
@@ -238,27 +245,27 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
          .global_usage = HID_USAGE_DESKTOP_MOUSE,
          .usage        = HID_USAGE_CONSUMER_AC_PAN,
          .handler      = _store,
-         .receiver     = process_mouse_report,
+         .receiver_id  = REPORT_RECEIVER_MOUSE,
          .dst          = &iface->mouse.pan,
          .get_id       = get_mouse_id},
 
         {.usage_page   = HID_USAGE_PAGE_KEYBOARD,
          .global_usage = HID_USAGE_DESKTOP_KEYBOARD,
          .handler      = handle_keyboard_descriptor_values,
-         .receiver     = process_keyboard_report,
+         .receiver_id  = REPORT_RECEIVER_KEYBOARD,
          .get_id       = get_next_keyboard_id},
 
         {.usage_page   = HID_USAGE_PAGE_CONSUMER,
          .global_usage = HID_USAGE_CONSUMER_CONTROL,
          .handler      = handle_consumer_control_values,
-         .receiver     = process_consumer_report,
+         .receiver_id  = REPORT_RECEIVER_CONSUMER,
          .dst          = &iface->consumer.val,
          .get_id       = get_consumer_id},
 
         {.usage_page   = HID_USAGE_PAGE_DESKTOP,
          .global_usage = HID_USAGE_DESKTOP_SYSTEM_CONTROL,
          .handler      = _store,
-         .receiver     = process_system_report,
+         .receiver_id  = REPORT_RECEIVER_SYSTEM,
          .dst          = &iface->system.val,
          .get_id       = get_system_id},
     };
@@ -277,8 +284,7 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
 
             hay->handler(val, hay->dst, iface);
 
-            if (val->report_id < MAX_REPORTS)
-                iface->report_handler[val->report_id] = hay->receiver;
+            iface->report_handler[val->report_id] = hay->receiver_id;
         }
     }
 }

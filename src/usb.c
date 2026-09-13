@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "hid_report.h"
 
 _Static_assert(MAX_DEVICES <= CFG_TUH_DEVICE_MAX,
                "MAX_DEVICES must not exceed CFG_TUH_DEVICE_MAX");
@@ -247,11 +248,16 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
 
 /* Invoked when received report from device via interrupt endpoint */
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len) {
-    uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
-
-    if (dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
+    if (dev_addr == 0 || dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
         return;
 
+    /* No report ID or payload is available yet. Keep polling this valid endpoint. */
+    if (len == 0) {
+        tuh_hid_receive_report(dev_addr, instance);
+        return;
+    }
+
+    uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     hid_interface_t *iface = &global_state.iface[dev_addr-1][instance];
 
     /* Keep report routing and unmount cleanup on the same device-state slot. */
@@ -263,12 +269,10 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         if (iface->uses_report_id)
             report_id = report[0];
 
-        if (report_id < MAX_REPORTS) {
-            process_report_f receiver = iface->report_handler[report_id];
+        process_report_f receiver = report_receivers[iface->report_handler[report_id]];
 
-            if (receiver != NULL)
-                receiver((uint8_t *)report, len, device_idx, iface);
-        }
+        if (receiver != NULL)
+            receiver((uint8_t *)report, len, device_idx, iface);
     }
     else if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         process_keyboard_report((uint8_t *)report, len, device_idx, iface);
