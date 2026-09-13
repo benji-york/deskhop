@@ -518,7 +518,7 @@ peer starts an automatic pull only when it sees a strictly newer numeric version
 an equal-version rebuild with different code/checksum will not normally replace
 the peer.
 
-Six host-native suites cover the custom state machines, configuration migration,
+Six original host-native suites cover the custom state machines, configuration migration,
 and configuration UI:
 
 ```sh
@@ -539,6 +539,13 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc/include tes
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc/include tests/test_config_migration.c src/config_migration.c -o /tmp/deskhop-config-migration-test
 /tmp/deskhop-config-migration-test
 ```
+
+The v0.92 full-merge candidate adds a seventh native HID regression suite for
+parser usage carry/bounds, full report-ID dispatch, consumer/system payload and
+activity guards, and split NKRO extraction. Run the sanitizer command documented
+in [tests/hid_stubs/README.md](tests/hid_stubs/README.md); CI runs it after the
+six original suites. See [UPSTREAM_FULL_MERGE_NOTES.md](UPSTREAM_FULL_MERGE_NOTES.md)
+for this candidate's integration decisions, build results, and remaining limits.
 
 There is not yet an in-repo native regression test for pointer-sync or remote
 non-motion transport; those changes were verified on the real hardware.
@@ -755,7 +762,7 @@ Retro Mechanical Keyboard remain a candidate for that future fix.
   layout, and both repositories' documentation synchronized.
 - Bump the DeskHop firmware version for every deployable behavior change, or the
   peer will not auto-update.
-- Run all six host-native regression suites and an ARM build before flashing.
+- Run all host-native regression suites and an ARM build before flashing.
 - If a config field changes, update its struct layout/version/migration, API map,
   Web Config source, generated HTML, and embedded disk image together.
 - Preserve position-neutral button/wheel transport. Buttons do not contain
@@ -785,6 +792,6 @@ Retro Mechanical Keyboard remain a candidate for that future fix.
 | UART protocol | `src/uart.c`, `src/include/protocol.h`, `src/include/packet.h` |
 | Peer update/recovery | `src/fw_update.c`, `src/tasks.c`, `src/handlers.c`, `src/ramdisk.c`, `src/utils.c` |
 | Config/defaults/API | `src/include/structs.h`, `src/include/config.h`, `src/include/user_config.h`, `src/defaults.c`, `src/protocol.c` |
-| Native regression tests | `tests/test_zoom_tracker.c`, `tests/test_fw_update.c`, `tests/test_screensaver_policy.c`, `tests/test_reboot_hotkey.c`, `tests/test_config_migration.c`, `tests/test_webconfig_autostart.js` |
+| Native regression tests | `tests/test_zoom_tracker.c`, `tests/test_fw_update.c`, `tests/test_screensaver_policy.c`, `tests/test_reboot_hotkey.c`, `tests/test_config_migration.c`, `tests/test_webconfig_autostart.js`, `tests/test_hid_regressions.c` |
 | Web Config | `webconfig/form.py`, `webconfig/templates/`, generated `webconfig/config*.htm`, `disk/disk.img` |
 | Sofle integration | `/Users/benji/qmk_firmware/keyboards/sofle/keymaps/benji/keymap.c`, `config.h`, `rules.mk`, `readme.md` |

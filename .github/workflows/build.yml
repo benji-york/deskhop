@@ -64,6 +64,14 @@ jobs:
           tests/test_config_migration.c src/config_migration.c \
           -o /tmp/deskhop-config-migration-test
         /tmp/deskhop-config-migration-test
+        cc -std=c11 -Wall -Wextra -Werror \
+          -Wno-unused-parameter -Wno-sign-compare \
+          -fsanitize=address,undefined -fno-sanitize-recover=all \
+          -Itests/hid_stubs -Isrc/include -Ipico-sdk/lib/tinyusb/src \
+          tests/test_hid_regressions.c src/hid_parser.c src/hid_report.c \
+          src/keyboard.c src/usb.c src/reboot_hotkey.c \
+          -o /tmp/deskhop-hid-regressions-test
+        /tmp/deskhop-hid-regressions-test
 
     - name: Build firmware
       shell: bash
