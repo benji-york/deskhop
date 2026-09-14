@@ -1,8 +1,10 @@
 # Full upstream merge candidate — v0.92
 
 Adopted on `main` on 2026-09-13 after comparison with the selective and replay
-approaches. The notes below record the candidate's validation before adoption;
-hardware validation is still pending.
+approaches. The notes below record the candidate's validation before adoption.
+Deployment update, 2026-09-14: the selected UF2 was flashed and basic input
+checks were reported normal. See the runbook for the exact evidence and
+remaining hardware checks; the peer version was not independently read back.
 
 Branch: `integration/upstream-full-merge`.
 Worktree: `/Users/benji/.codex/worktrees/8bf3/DeskHop`.
@@ -106,7 +108,8 @@ UF2 is `deskhop-v0.92-full-merge.uf2`.
 
 ## Remaining limitations
 
-This candidate has not been flashed or tested on hardware. Both output
+At the time of candidate validation, this build had not been flashed or tested
+on hardware; see the deployment update above for subsequent checks. Both output
 directions, pointer movement/clicks, LEDs, zoom transitions, keep-awake,
 coordinated reboot, and peer firmware propagation still need the runbook's
 hardware checks before deployment. Native hardware stubs do not exercise USB

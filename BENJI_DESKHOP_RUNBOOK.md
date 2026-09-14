@@ -6,13 +6,13 @@ the coupled Sofle/QMK firmware, how to build and deploy both, and the failure
 modes already diagnosed. It is intentionally more specific than the upstream
 README.
 
-Snapshot: 2026-09-13
+Snapshot: 2026-09-14
 
 ## Source of truth
 
 | Component | Local repository | Remote | Source / verified state |
 | --- | --- | --- | --- |
-| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.92 with upstream `ce8abb6` merged; seven native suites and ARM build pass. Hardware remains on verified v0.91. |
+| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.92 with upstream `ce8abb6` merged; seven native suites and ARM build pass. Flashed 2026-09-14; basic input checks reported normal. Peer version not independently read back. |
 | Sofle/QMK | `/Users/benji/qmk_firmware` | `git@github.com:benji-york/qmk_firmware.git` | `master` at `469f5dc815` (`Map DeskHop reboot to Layer 3 Q`) |
 | Physical carrier project | n/a | [jfedor2/screen-hopper](https://github.com/jfedor2/screen-hopper) | The installed two-Pico board shown in the setup photo |
 
@@ -33,9 +33,19 @@ The hardware-verified auto-start build is:
 
 - `/Users/benji/Documents/Codex/2026-08-13/i/outputs/deskhop-v0.91-auto-start-jitter.uf2`
 
-The current, not-yet-flashed v0.92 build is:
+The v0.92 build flashed on 2026-09-14 is:
 
 - `/Users/benji/Documents/ChatGPT/DeskHop/build/deskhop.uf2`
+
+Its SHA-256 is
+`5f7a6703dab1e0ccb65eba71861ea7fd78c5ca03c435953ff859eab4ba41728d`.
+The local Pico rebooted and re-enumerated as `DeskHop Switch` after the UF2
+transfer, despite macOS copy warnings as the bootloader drive disconnected.
+After a settling period, Benji reported normal operation in response to checks
+of the trackball, switching, and keyboard right-click on both Macs. This is a
+basic deployment smoke test, not an independent readback of both Pico versions.
+Extended v0.92 zoom assist, timed jitter, and coordinated reboot tests have not
+yet been recorded.
 
 The current working tree builds v0.92. To reproduce hardware-verified v0.91,
 use commit `c1e9420` or its archived binary. For the older hardware-tested v0.90

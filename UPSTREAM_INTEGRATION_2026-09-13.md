@@ -113,10 +113,10 @@ Detailed full-merge decisions and artifact checksums are in
 - `/Users/benji/.codex/worktrees/1f58/DeskHop/INTEGRATION_UPSTREAM_REPLAY.md`
 
 The experiments involved no push or flash; the selected full merge was then
-approved for adoption on `main` and publication to the fork. QMK and installed
-firmware remain unchanged. Physical checks
-must cover both directions, trackball and keyboard clicks, focus LEDs, zoom
-assist, jitter, coordinated reboot, and firmware propagation before calling
-v0.92 hardware-verified. All alternatives use version 192; switching between
+approved for adoption on `main` and published to the fork. The selected v0.92
+UF2 was flashed on 2026-09-14; basic input checks were reported normal. QMK is
+unchanged. Peer version readback and extended zoom assist, timed jitter, and
+coordinated reboot checks remain unverified; see the runbook's deployment record.
+All alternatives use version 192; switching between
 their binaries without a version bump would not automatically update an
 equal-version peer.
