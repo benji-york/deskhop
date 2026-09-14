@@ -16,6 +16,10 @@ static sim_sio_hw_t sio;
 sim_sio_hw_t *sio_hw = &sio;
 static uint64_t now_us, busy_until[3], dma_busy_until, last_kick;
 static bool mounted, suspended, stalled[3], fail_report, led, stopped;
+static bool uart_stalled, diagnostic_request_accepted, diagnostic_poll_ready;
+#if SIM_HAS_DIAGNOSTIC_PEER
+static peer_status_result_t diagnostic_result;
+#endif
 static uint8_t protocol[MAX_DEVICES][MAX_INTERFACES], boot[MAX_DEVICES][MAX_INTERFACES];
 static dma_channel_hw_t rx_hw;
 static uint32_t rx_write;
@@ -77,7 +81,7 @@ void reset_usb_boot(uint32_t a,uint32_t b) { stopped=true; emit(5,1,(int)b,NULL,
 void gpio_put(uint32_t pin,bool value) { led=value; }
 bool gpio_get(uint32_t pin) { return led; }
 void pico_get_unique_board_id_string(char *s,uint32_t n) { snprintf(s,n,"SIMULATED-%u",global_state.board_role); }
-bool dma_channel_is_busy(uint32_t channel) { return now_us < dma_busy_until; }
+bool dma_channel_is_busy(uint32_t channel) { return uart_stalled || now_us < dma_busy_until; }
 void dma_channel_transfer_from_buffer_now(uint32_t channel,const void *p,uint32_t n) {
     /* 8N1 serial duration, rounded upwards. Copying/serialization belongs to
        the transport model; RX feeds the real production DMA ring parser. */
@@ -134,8 +138,20 @@ void sim_init(uint8_t role, event_cb_t cb) {
     queue_init(&global_state.uart_tx_queue,sizeof(uart_packet_t),UART_QUEUE_LENGTH);
     queue_init(&global_state.hid_queue_out,sizeof(hid_generic_pkt_t),HID_QUEUE_LENGTH);
     firmware_sync_init(); rx_hw.transfer_count=DMA_RX_BUFFER_SIZE;
+#if SIM_HAS_DIAGNOSTIC_PEER
+    peer_status_snapshot_t identity = {
+        .role = role, .major = 0, .minor = 97, .boot_session = role + 1,
+        .image_crc_at_boot = UINT32_C(0x12345678) + role,
+    };
+    for (unsigned i = 0; i < sizeof(identity.board_id); ++i)
+        identity.board_id[i] = (uint8_t)(role * 16 + i);
+    diagnostic_peer_init(&identity);
+#endif
 }
 void sim_destroy(void) {
+#if SIM_HAS_DIAGNOSTIC_PEER
+    diagnostic_peer_shutdown();
+#endif
     queue_free(&global_state.kbd_queue); queue_free(&global_state.mouse_queue);
     queue_free(&global_state.uart_tx_queue); queue_free(&global_state.hid_queue_out);
 }
@@ -146,6 +162,27 @@ void sim_host(int connect,int suspend) {
     if(changed) { if(connect) tud_mount_cb(); else tud_umount_cb(); }
 }
 void sim_endpoint(int instance,int stall,int reject) { stalled[instance]=stall; fail_report=reject; }
+void sim_uart_stall(int stall) { uart_stalled = stall; }
+/* Core 0's actual bridge API, with scalar introspection instead of relying on
+ * ctypes matching either ARM or the host's structure padding. */
+void sim_diagnostic_request(uint32_t token) {
+#if SIM_HAS_DIAGNOSTIC_PEER
+    diagnostic_request_accepted = diagnostic_peer_request(token, now_us);
+#else
+    diagnostic_request_accepted = false;
+#endif
+    emit(12, (int)token, diagnostic_request_accepted, NULL, 0);
+}
+void sim_diagnostic_poll(void) {
+#if SIM_HAS_DIAGNOSTIC_PEER
+    diagnostic_poll_ready = diagnostic_peer_poll(&diagnostic_result);
+    if (diagnostic_poll_ready)
+        emit(13, (int)diagnostic_result.token, diagnostic_result.outcome,
+             diagnostic_result.snapshot.board_id, sizeof(diagnostic_result.snapshot.board_id));
+#else
+    diagnostic_poll_ready = false;
+#endif
+}
 void sim_mount(uint8_t addr,uint8_t instance,uint8_t proto,const uint8_t *desc,uint16_t len) {
     if (stopped) return;
     assert(addr && addr<=MAX_DEVICES && instance<MAX_INTERFACES);
@@ -213,6 +250,19 @@ int64_t sim_get(int field,int index) {
       case 44:return s->zoom_assist[index].exit_deadline;
       case 50:return s->config_mode_active;
       case 51:return s->config.screensaver_system_timeout_sec;
+      case 60:return diagnostic_request_accepted;
+      case 61:return diagnostic_poll_ready;
+#if SIM_HAS_DIAGNOSTIC_PEER
+      case 62:return diagnostic_result.token;
+      case 63:return diagnostic_result.outcome;
+      case 64:return diagnostic_result.snapshot.role;
+      case 65:return diagnostic_result.snapshot.major;
+      case 66:return diagnostic_result.snapshot.minor;
+      case 67:return diagnostic_result.snapshot.boot_session;
+      case 68:return diagnostic_result.snapshot.uptime_ms;
+      case 69:return diagnostic_result.snapshot.image_crc_at_boot;
+      case 70:assert(index >= 0 && index < 8);return diagnostic_result.snapshot.board_id[index];
+#endif
       default:assert(false);return 0;
     }
 }

@@ -8,7 +8,48 @@ README.
 
 Snapshot: 2026-09-14
 
-## Current deployment: v0.96 disk-free maintenance
+## Current deployment: v0.97 peer status
+
+Pico A was flashed and rebooted on 2026-09-14 at 21:03 UTC using frozen
+`build/flashing/deskhop-v0.97-peer-status.uf2` (SHA-256
+`dfd8ea758d430dd2683186de12b69006b4543d0410e88d74dcc2de20cea5c375`).
+Layer 3 A entered the disk-free PICOBOOT path: only the vendor interface
+appeared, with no mass-storage interface or additional media client. Official
+picotool 2.3.1 selected A's flash UID. Its old firmware matched v0.96; after
+loading, all 262,144 new firmware bytes matched an independent readback, and
+all 4,096 saved-configuration bytes remained unchanged. The post-reboot Mac
+check found no retained RP2 object or inactive/busy media client.
+
+`status` now queries both boards through a bounded, request-correlated UART
+exchange. The connected board prints first, followed by the peer's own
+identity/build/session/uptime or an explicit error. The first query reported
+A running v0.97 and `peer=timeout_or_unsupported`. A subsequent query returned
+B running v0.97. At 21:06 UTC, all six serial smoke snapshots returned
+`peer=ok` with these stable identities and increasing uptimes:
+
+| Board | Physical flash UID | Executing build | Boot session | Sampled uptime range |
+| --- | --- | --- | --- | --- |
+| A | `E6654854574C3E30` | `0.97` | `4d4f8996e257d47d` | 187,376–189,571 ms |
+| B | `E6654854577F2330` | `0.97` | `2440d7c7e9f8cd10` | 166,601–168,796 ms |
+
+Both reported boot CRC metadata `9a2b3827`. Fragmented commands, two queued
+status commands, a brief application read pause, and close/reopen passed on
+`/dev/cu.usbmodem21203`. B's fresh executing identity/build is now confirmed;
+there was no independent readback of B's flash. The CRC field is boot metadata,
+and every status correctly reports `verification=not_implemented`.
+
+The standard `/usr/bin/screen` terminal at 115200 also passed `help` and
+two-board `status`, retaining the same sessions, and closed normally. No
+special client software is required to use the console.
+
+Benji confirmed typing, trackball movement/buttons, and Layer 3 S switching
+on both Macs: "Working great. No replug needed." The v0.97 slice passed its
+interactive input check. Local RAM history is next. See
+the [deployment record](docs/testing/peer-status-v097.md) for evidence and
+[diagnostics.md](docs/diagnostics.md) for the protocol and planned slices.
+The v0.95–v0.97 changes have not been pushed.
+
+## Previous deployment: v0.96 disk-free maintenance
 
 Pico A was flashed and rebooted on 2026-09-14 at 20:39 UTC using frozen
 `build/flashing/deskhop-v0.96-maintenance.uf2` (SHA-256
@@ -32,11 +73,11 @@ was inspected at 20:41 UTC: only the vendor interface (class 255), no mass
 storage interface, and no additional media clients. Direct picotool access
 worked. Pico A returned to normal operation without a flash; its subsequent
 serial check passed and no stale USB/media state remained. This verifies the
-disk-free maintenance path on A. Pico B's executing version remains independently
-unverified. Do not
-assume peer propagation from a successful local flash or local serial response.
-The serial console remains read-only and local-only. Peer status is the next
-feature slice. These changes have not been pushed.
+disk-free maintenance path on A. At this stage, Pico B's executing version
+remained independently unverified, and the serial console was read-only and
+local-only. The v0.97 deployment above subsequently added and verified peer
+status. A successful local flash or local-only response does not establish
+peer propagation.
 
 ## Previous deployment: v0.95 first serial-console slice
 
@@ -50,11 +91,11 @@ busy media clients; Pico A's serial checks passed with session
 Benji confirmed typing, trackball movement/buttons, and Layer 3 S switching on
 both Macs before the v0.96 transition.
 
-The deployed v0.95 firmware has a read-only USB
+The v0.95 firmware added a read-only USB
 serial console in normal and configuration modes. `help` and `status` report
 the connected board's identity, compiled version, metadata CRC captured at boot,
 random boot session, and uptime. Peer queries, history, and flash verification
-are later slices; this candidate explicitly reports them as unimplemented.
+were later slices; v0.95 explicitly reported them as unimplemented.
 The [incremental design and hardware checks](docs/diagnostics.md) record the
 agreed sequence, including both-board defaults and interleaved A/B histories.
 Pico A was flashed and rebooted on 2026-09-14 at 19:35 UTC using the frozen
@@ -72,8 +113,8 @@ the same session was observed at 77 seconds uptime. The executing version was
 `0.95`, boot metadata CRC `237a0b65`, and physical UID `E6654854574C3E30`.
 See the [validation/deployment record](docs/testing/console-v095.md).
 
-Pico B's propagated version is not independently verified yet. Initially the
-trackball was completely dead on both outputs while typing worked. Unplugging
+Pico B's propagated version was not independently verified at this stage.
+Initially the trackball was completely dead on both outputs while typing worked. Unplugging
 and reconnecting only the trackball restored normal operation; Benji reported
 "Works great after replug." This suggests a peripheral re-enumeration issue,
 but its cause is not established. Repeat the check on the next update; the
@@ -720,9 +761,12 @@ than invoking it directly on macOS.
 5. Leave both sides powered for several one-second heartbeat cycles. The older
    peer should pull and install the 256 KiB running image automatically.
 6. Check the trackball, keyboard right-click on both Macs, F24 switching, Pico
-   LEDs, and Sofle arrow direction. Read the executing build on both consoles
-   before declaring both versions independently verified. v0.95/v0.96 `status`
-   is local-only, so input checks alone do not establish the peer's version.
+   LEDs, and Sofle arrow direction. On v0.97+, use repeated `status` commands
+   from one console to confirm both executing builds, distinct identities,
+   stable boot sessions, and increasing uptimes. Require a fresh peer reply;
+   a timeout leaves its build unverified. v0.95/v0.96 `status` is local-only
+   and requires each board's console. Input checks alone do not establish the
+   peer's version, and status CRC metadata does not verify flash integrity.
 
 This path is unavailable on a board still running v0.95 or older. Do not use
 `picotool reboot -u` to obtain disk-free mode: on RP2040 it enables the disk.

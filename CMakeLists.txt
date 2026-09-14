@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 96)
+set(VERSION_MINOR 97)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -59,6 +59,8 @@ target_include_directories(Pico-PIO-USB PRIVATE ${PICO_PIO_USB_DIR})
 set(COMMON_SOURCES
   ${SRC_DIR}/usb_descriptors.c
   ${SRC_DIR}/console.c
+  ${SRC_DIR}/peer_status.c
+  ${SRC_DIR}/diagnostic_peer.c
   ${SRC_DIR}/defaults.c
   ${SRC_DIR}/constants.c
   ${SRC_DIR}/protocol.c

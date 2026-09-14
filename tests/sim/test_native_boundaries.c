@@ -78,6 +78,26 @@ static void wide_motion(void) {
         assert(move_and_keep_on_screen(0,INT32_MIN)==0);
     }
 }
+static void vendor_diagnostics_cannot_enter_core1(void) {
+    const uint8_t kinds[] = {DIAGNOSTIC_STATUS_REQUEST_MSG, DIAGNOSTIC_STATUS_RESPONSE_MSG};
+    for (unsigned proxy = 0; proxy < 2; ++proxy) {
+        for (unsigned i = 0; i < sizeof(kinds); ++i) {
+            uart_packet_t packet = {.type = proxy ? PROXY_PACKET_MSG : kinds[i]};
+            packet.data[0] = proxy ? kinds[i] : 1;
+            packet.data[1] = 0x12;
+            packet.data[4] = 1;
+            packet.checksum = calc_checksum(packet.data, PACKET_DATA_LENGTH);
+            assert(verify_checksum(&packet));
+            assert(!validate_packet(&packet));
+        }
+        /* An otherwise valid configuration read still crosses this boundary. */
+        uart_packet_t allowed = {.type = proxy ? PROXY_PACKET_MSG : GET_VAL_MSG};
+        allowed.data[0] = proxy ? GET_VAL_MSG : 83;
+        allowed.checksum = calc_checksum(allowed.data, PACKET_DATA_LENGTH);
+        assert(verify_checksum(&allowed));
+        assert(validate_packet(&allowed));
+    }
+}
 int main(void) {
     sim_init(0,observe);sim_host(1,0);sim_set_time(1);
     global_state.config.enable_acceleration=0;
@@ -93,6 +113,7 @@ int main(void) {
     }
     sim_task(3);assert(outputs==1);
     wide_motion();
+    vendor_diagnostics_cannot_enter_core1();
     sim_destroy();
-    puts("native boundaries: all 256 mouse IDs, exact truncations, 3-byte boot mouse, invalid output indices passed");
+    puts("native boundaries: all 256 mouse IDs, exact truncations, 3-byte boot mouse, invalid output indices, USB diagnostic core ownership passed");
 }

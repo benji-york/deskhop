@@ -11,8 +11,9 @@ from test_behaviors import SCENARIOS as BEHAVIORS, BACKGROUND_FALSE as BEHAVIOR_
 from test_mouse_buttons import SCENARIOS as MOUSE_BUTTONS
 from test_mouse_extra import SCENARIOS as MOUSE_EXTRA, BACKGROUND_FALSE as MOUSE_BACKGROUND_FALSE
 from test_selection import SCENARIOS as SELECTION
+from test_peer_status import SCENARIOS as PEER_STATUS
 BACKGROUND_FALSE = BEHAVIOR_BACKGROUND_FALSE | MOUSE_BACKGROUND_FALSE
-SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,'generated':scenario_generated}
+SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,**PEER_STATUS,'generated':scenario_generated}
 
 def run_case(name,seed,library=None,artifact_dir=None,core_order=None,expected_gap=False):
     fn=KNOWN_GAPS[name] if expected_gap else SCENARIOS[name]
@@ -84,7 +85,8 @@ def main():
     if a.known_gaps:
         for name in KNOWN_GAPS:run_case(name,a.seed,a.library,a.artifact_dir,expected_gap=True)
     if a.interleavings:
+        interleaving_scenario = 'backpressure' if a.scenario == 'all' else a.scenario
         for order in itertools.permutations(range(4)):
-            run_case('backpressure',a.seed,a.library,a.artifact_dir,list(order))
-        print('PASS all 24 fixed simultaneous core-priority orders at the modeled boundaries')
+            run_case(interleaving_scenario,a.seed,a.library,a.artifact_dir,list(order))
+        print(f'PASS {interleaving_scenario}: all 24 fixed simultaneous core-priority orders at the modeled boundaries')
 if __name__=='__main__':main()

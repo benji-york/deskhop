@@ -5,8 +5,9 @@ python3 tests/usb_stack/run.py
 ```
 
 This hardware-free feasibility prototype builds and runs the checked-in TinyUSB
-`tusb.c`, `tusb_fifo.c`, `usbd.c`, `usbd_control.c`, `hid_device.c`, and
-`msc_device.c`, plus the actual DeskHop `usb_descriptors.c` and `usb.c`. It takes
+`tusb.c`, `tusb_fifo.c`, `usbd.c`, `usbd_control.c`, `hid_device.c`,
+`msc_device.c`, and `cdc_device.c`, plus the actual DeskHop `usb_descriptors.c`,
+`usb.c`, and `console.c`. It takes
 roughly one second on the development Mac and uses ASan and UBSan. It needs Python
 3 and a native C11 compiler (`CC` can select one). All output goes into a temporary
 directory. It does not modify or flash the firmware.
@@ -32,8 +33,8 @@ Verified scenarios include:
 - Bus reset, the initial 8-byte device descriptor, full device descriptor,
   `SET_ADDRESS`, configuration header then complete multi-packet configuration,
   `SET_CONFIGURATION`, and configuration zero.
-- Both normal identity (`1209:c000`, two HID interfaces) and configuration identity
-  (`2e8a:107c`, three HID plus MSC), followed by endpoint opens with independent
+- Both normal identity (`1209:c000`, two HID interfaces plus CDC) and configuration identity
+  (`2e8a:107c`, three HID plus MSC and CDC), followed by endpoint opens with independent
   assertions on address, count, and packet size.
 - All advertised HID report descriptors, product string, unknown string and
   out-of-range interface stalls, and descriptor bounds/interface walking.
@@ -46,6 +47,14 @@ Verified scenarios include:
   and a second enumeration.
 - Actual MSC `GET_MAX_LUN` and reset controls, bulk command/status wrappers,
   SCSI INQUIRY, READ CAPACITY(10), two-block READ(10), and malformed-CBW stalls.
+- Real CDC line coding, DTR and command streams, line editing and malformed input,
+  immutable boot identity, exact framing, and at most 32 RX/64 TX bytes per task.
+- Asynchronous status prints local identity immediately, waits for a mocked peer
+  result, and retains a single frame and prompt. It handles peer timeout, invalid
+  data, a busy request queue, a 600 ms core-1 fallback, and late results after
+  disconnect or during a fresh query. Pending peer/CDC work leaves HID progressing.
+- DTR close, unplug, deconfiguration, and fast reset discard partial commands and
+  unsent output without accidentally rearming CDC buffers as endpoint zero.
 
 MSC backing-store callbacks in this prototype are deliberately modeled. Disk
 capacity and returned bytes are fixtures; this is not a TinyUSB-to-real-flash
@@ -53,6 +62,10 @@ end-to-end test. `tests/storage` separately exercises the real ramdisk callbacks
 NOR effects, UF2 and updater. Peripheral LED writes and peer UART messages are
 observable sinks here, not the dual-node simulator's transport. Those layers must
 not be conflated when reporting coverage.
+The peer status request/result bridge is mocked in this harness; `tests/sim`
+separately drives its real SDK queues, protocol and UART across two independent
+production images, including simultaneous queries, repeat queries, disconnected
+wires, a full stalled UART queue, malformed replies, and continued HID progress.
 
 A useful stack-level finding is captured: in this TinyUSB revision, a HID
 `GET_REPORT` request with a nonzero report ID returns the ID byte even though

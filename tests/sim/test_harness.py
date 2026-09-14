@@ -1,20 +1,46 @@
 #!/usr/bin/env python3
 """Validate the test apparatus against misleading pass/failure behavior."""
 import json
+import contextlib
+import io
+import itertools
+from unittest.mock import patch
+import run as runner
 from simulator import Simulation, ROOT
 from fixtures import attach,keyboard,mouse
 from run import replay, minimize
+from test_peer_status import scenario_peer_status_roundtrip
+
+def check_interleaving_cli_selection():
+    # Exercise argparse and dispatch, with only expensive firmware execution
+    # replaced. A selected scenario must not silently become backpressure.
+    for selected, expected in [('peer_status_roundtrip', 'peer_status_roundtrip'),
+                               ('all', 'backpressure')]:
+        output = io.StringIO()
+        with patch('sys.argv', ['run.py', '--scenario', selected, '--interleavings']), \
+             patch.object(runner, 'run_case') as execute, contextlib.redirect_stdout(output):
+            runner.main()
+        ordinary = len(runner.SCENARIOS) if selected == 'all' else 1
+        assert execute.call_count == ordinary + 24
+        explored = execute.call_args_list[-24:]
+        assert all(call.args[0] == expected for call in explored)
+        assert {tuple(call.args[4]) for call in explored} == set(itertools.permutations(range(4)))
+        assert f'PASS {expected}: all 24' in output.getvalue()
 
 def main():
+    check_interleaving_cli_selection()
     with Simulation(background=False) as s:
         # The new core0 entry must not silently shift manual core1 polls onto
         # the wrong task or mark their callbacks as running on the wrong core.
         for name,core in [('process_mouse_queue_task',0),('process_uart_tx_task',0),
                           ('diagnostic_console_task',0),('usb_host_task',1),
-                          ('packet_receiver_task',1),('heartbeat_output_task',1)]:
+                          ('packet_receiver_task',1),('heartbeat_output_task',1),
+                          ('diagnostic_peer_status_task',1)]:
             task=s.task_id(0,name)
             assert s.nodes[0].sim_task_name(task).decode('ascii')==name
             assert s.nodes[0].sim_task_core(task)==core
+        assert sum(s.nodes[0].sim_task_core(task) == 1
+                   for task in range(s.nodes[0].sim_task_count())) == 9
         s.do(0,'task','diagnostic_console_task')
         assert s.steps[-1]['args']==['diagnostic_console_task']
         assert not s.trace # CDC is disabled at this simulator boundary.
@@ -51,6 +77,11 @@ def main():
         except AssertionError as e:assert 'usb_bytes' in str(e)
         else:raise AssertionError('report-byte oracle accepted an incorrect button mask')
     data=json.loads(path.read_text());assert replay(data)==before
+    with Simulation(seed=73) as s:
+        scenario_peer_status_roundtrip(s)
+        s.save(path)
+        before=s.trace
+    data=json.loads(path.read_text());assert replay(data)==before
     # Deliberately prevent delivery, then require it anyway. Preserve a source
     # position precondition so deleting the physical input cannot manufacture
     # the same final failure. This remains useful after known bugs are fixed.
@@ -68,5 +99,5 @@ def main():
     except AssertionError as e:assert str(e)==data['failure']
     else:raise AssertionError('minimized failure vanished')
     path.with_suffix('.min.json').write_text(json.dumps(small,indent=2)+'\n')
-    print(f'harness: named task/core mapping, isolated globals/reset, callback failures, bounded waits, exact replay, ddmin {len(data["steps"])} -> {len(small["steps"])} steps passed')
+    print(f'harness: CLI interleaving selection, named task/core mapping, isolated globals/reset, callback failures, bounded waits, exact replay, ddmin {len(data["steps"])} -> {len(small["steps"])} steps passed')
 if __name__=='__main__':main()

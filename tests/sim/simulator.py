@@ -22,8 +22,12 @@ FIELDS={'output':0,'x':1,'y':2,'buttons':3,'reboot':4,'stopped':5,'kbd_queue':6,
         'fw_address':19,'fw_dirty':20,'blinks':21,'direct_valid':22,'peer_valid':23,'last_kick':24,
         'config_mode':50,'system_timeout':51,'ss_mode':30,'ss_idle':31,'ss_max':32,'ss_inactive':33,'ss_timeout':34,
         'zoom_debt':40,'zoom_overscroll':41,'zoom_pending':42,'zoom_direction':43,'zoom_deadline':44,
-        'acceleration':35,'speed':36,'os':37,'led_indicator':38}
-KINDS={1:'usb',2:'uart_tx',3:'led',4:'watchdog',5:'reset',6:'yield',7:'erase',8:'program',9:'checkpoint',10:'wake',11:'wait_bound'}
+        'acceleration':35,'speed':36,'os':37,'led_indicator':38,
+        'diagnostic_request_accepted':60,'diagnostic_poll_ready':61,'diagnostic_token':62,
+        'diagnostic_outcome':63,'diagnostic_role':64,'diagnostic_major':65,'diagnostic_minor':66,
+        'diagnostic_boot_session':67,'diagnostic_uptime_ms':68,'diagnostic_crc':69,'diagnostic_board_id':70}
+KINDS={1:'usb',2:'uart_tx',3:'led',4:'watchdog',5:'reset',6:'yield',7:'erase',8:'program',9:'checkpoint',10:'wake',11:'wait_bound',
+       12:'diagnostic_request',13:'diagnostic_result'}
 CALLBACK=C.CFUNCTYPE(None,C.c_int,C.c_int,C.c_int,C.c_void_p,C.c_int)
 
 class Simulation:
@@ -54,6 +58,8 @@ class Simulation:
                 'sim_led':([C.c_uint8],None),'sim_fill':([C.c_int,C.c_int],None),
                 'sim_descriptor':([C.c_int,C.c_int,C.c_void_p],C.c_int),
                 'sim_watchdog':([],None),
+                'sim_uart_stall':([C.c_int],None),
+                'sim_diagnostic_request':([C.c_uint32],None),'sim_diagnostic_poll':([],None),
             }
             for name,(args,ret) in signatures.items():
                 f=getattr(lib,name); f.argtypes=args; f.restype=ret
@@ -185,7 +191,7 @@ class Simulation:
     def do(self,node,op,*args,record=True):
         if record:self.steps.append({'node':node,'op':op,'args':list(args)})
         # Peripheral input and UART handling run on core1; host SET_REPORT on core0.
-        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor') else 1)
+        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll') else 1)
         self.active.append((node,core))
         try:self._invoke(node,op,list(args))
         finally:self.active.pop()

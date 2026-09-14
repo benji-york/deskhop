@@ -6,6 +6,7 @@ SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'key
            'mouse', 'reboot_hotkey', 'screensaver_policy', 'zoom_tracker', 'zoom',
            'tasks', 'handlers', 'led', 'uart', 'usb', 'usb_descriptors', 'utils',
            'fw_update', 'config_migration', 'selection']
+OPTIONAL_SOURCES = ['peer_status', 'diagnostic_peer']
 
 def extract_tasks(main):
     """Keep table order and core ownership from the supplied production image."""
@@ -51,6 +52,10 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
     if coverage: flags += ['-fprofile-instr-generate', '-fcoverage-mapping']
     if platform.system() != 'Darwin': flags += ['-Wl,-Bsymbolic', '-Wl,-z,defs']
     if sanitize: flags += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all']
+    # Historical baseline images predate the diagnostic bridge. Compile the
+    # real queue/protocol code only when the selected source tree owns it.
+    if (source_root/'src/diagnostic_peer.c').exists():
+        flags += ['-DSIM_HAS_DIAGNOSTIC_PEER=1']
     cmd = [os.environ.get('CC', 'cc'), *flags, *([] if executable else ['-shared']),
            '-I'+str(output.parent), '-I'+str(ROOT/'tests/sim/include'), '-I'+str(source_root/'src/include'),
            '-I'+str(ROOT/'pico-sdk/src/common/pico_util/include'),
@@ -58,6 +63,8 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
            str(ROOT/'tests/sim/node.c'), *([str(executable)] if executable else []),
            *[str(source_root/f'src/{s}.c') for s in SOURCES
              if s != 'selection' or (source_root/f'src/{s}.c').exists()],
+           *[str(source_root/f'src/{s}.c') for s in OPTIONAL_SOURCES
+             if (source_root/f'src/{s}.c').exists()],
            str(ROOT/'pico-sdk/src/common/pico_util/queue.c'), '-lm', '-o', str(output)]
     subprocess.run(cmd, check=True)
     return output

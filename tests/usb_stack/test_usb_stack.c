@@ -2,6 +2,7 @@
 #include "main.h"
 #include "device/dcd.h"
 #include "device/usbd_pvt.h"
+#include "peer_status.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -23,6 +24,41 @@ static char cdc_bytes[16384];
 static size_t cdc_count;
 static uint64_t cdc_submitted_bytes, console_now_us;
 static bool no_ep0_out_payload;
+/* The real CDC/console stack crosses the same nonblocking request/result
+ * boundary as core 0. UART and core 1 are tested by the paired simulator. */
+static bool peer_manual, peer_accept = true, peer_pending, peer_result_ready;
+static uint32_t peer_token;
+static uint64_t peer_requested_at;
+static unsigned peer_requests;
+static peer_status_result_t peer_result;
+static const peer_status_snapshot_t peer_snapshot = {
+    .role = 1, .major = 0, .minor = 96,
+    .board_id = {0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10},
+    .boot_session = UINT64_C(0x8877665544332211),
+    .uptime_ms = 7654321, .image_crc_at_boot = UINT32_C(0x12345678),
+};
+bool diagnostic_peer_request(uint32_t token, uint64_t requested_at_us) {
+    ++peer_requests;
+    if (!peer_accept || peer_pending) return false;
+    CHECK(token != 0);
+    peer_token = token; peer_requested_at = requested_at_us; peer_pending = true;
+    return true;
+}
+static void peer_publish(uint32_t token, peer_status_outcome_t outcome) {
+    CHECK(!peer_result_ready);
+    peer_result = (peer_status_result_t){.token = token, .outcome = outcome,
+                                       .snapshot = peer_snapshot};
+    peer_result_ready = true;
+}
+bool diagnostic_peer_poll(peer_status_result_t *result) {
+    if (!peer_manual && peer_pending && !peer_result_ready)
+        peer_publish(peer_token, PEER_STATUS_OK);
+    if (!peer_result_ready) return false;
+    *result = peer_result;
+    peer_result_ready = false;
+    if (result->token == peer_token) peer_pending = false;
+    return true;
+}
 device_t global_state;
 static endpoint_t *endpoint(uint8_t ep) { return &endpoints[(ep >> 7) & 1][ep & 15]; }
 void dcd_init(uint8_t rhport) { CHECK(rhport == 0); }
@@ -299,11 +335,15 @@ static void console_tick(void) {
     }
 }
 
-static void console_drain(void) {
-    for (unsigned tick = 0; tick < 128; ++tick) {
+static void console_pump(unsigned ticks) {
+    for (unsigned tick = 0; tick < ticks; ++tick) {
         console_tick();
         if (endpoint(0x86)->pending) complete(0x86, NULL, 0);
     }
+}
+
+static void console_drain(void) {
+    console_pump(128);
     CHECK(!endpoint(0x86)->pending && tud_cdc_available() == 0);
 }
 
@@ -352,10 +392,16 @@ static void cdc_status_fields(void) {
     CHECK(occurrences("BEGIN status") == 1 && occurrences("END status") == 1);
     CHECK(strstr(cdc_bytes, "board=A") != NULL);
     CHECK(strstr(cdc_bytes, "board_id=0123456789abcdef") != NULL);
-    CHECK(strstr(cdc_bytes, "build=0.95") != NULL);
+    CHECK(strstr(cdc_bytes, "build=0.97") != NULL);
     CHECK(strstr(cdc_bytes, "image_crc_at_boot=89abcdef") != NULL);
     CHECK(strstr(cdc_bytes, "boot_session=1122334455667788") != NULL);
-    CHECK(strstr(cdc_bytes, "peer=not_implemented") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board_id=FEDCBA9876543210") != NULL);
+    CHECK(strstr(cdc_bytes, "build=0.96") != NULL);
+    CHECK(strstr(cdc_bytes, "image_crc_at_boot=12345678") != NULL);
+    CHECK(strstr(cdc_bytes, "boot_session=8877665544332211") != NULL);
+    CHECK(strstr(cdc_bytes, "uptime_ms=7654321") != NULL);
+    CHECK(strstr(cdc_bytes, "peer=ok") != NULL);
     CHECK(strstr(cdc_bytes, "verification=not_implemented") != NULL);
     CHECK(strstr(cdc_bytes, "deskhop> ") != NULL);
 }
@@ -367,7 +413,7 @@ static void cdc_command_stream(void) {
     cdc_send("lp\r\n");
     CHECK(occurrences("deskhop> ") == 1);
     CHECK(strstr(cdc_bytes, "help") && strstr(cdc_bytes, "status"));
-    CHECK(strstr(cdc_bytes, "local") != NULL);
+    CHECK(strstr(cdc_bytes, "both boards") != NULL);
 
     cdc_capture_clear();
     console_now_us = UINT64_C(1234567000);
@@ -431,6 +477,109 @@ static void cdc_command_stream(void) {
     CHECK(occurrences("ERROR") == 1 && occurrences("BEGIN status") == 0);
     cdc_send("status\n");
     cdc_status_fields();
+}
+
+static void cdc_peer_wait_is_local_first(void) {
+    peer_manual = true;
+    cdc_capture_clear();
+    unsigned requests_before = peer_requests;
+    complete_short_out(0x06, "status\nhelp\n", 12);
+    console_pump(32);
+    CHECK(peer_requests == requests_before + 1 && peer_pending);
+    CHECK(occurrences("BEGIN status") == 1);
+    CHECK(strstr(cdc_bytes, "board=A\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "boot_session=1122334455667788") != NULL);
+    CHECK(occurrences("board=B") == 0 && occurrences("END status") == 0);
+    CHECK(occurrences("deskhop> ") == 0 && occurrences("BEGIN help") == 0);
+    CHECK(tud_cdc_available() == 5); /* One open frame owns the console. */
+    size_t before = cdc_count;
+    console_pump(32);
+    CHECK(cdc_count == before && peer_requests == requests_before + 1);
+
+    /* USB HID progresses while core 1 has not produced a peer reply. */
+    uint8_t keys[6] = {HID_KEY_C};
+    CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+    host_count = 0;
+    complete(0x81, NULL, 0);
+    CHECK(host_count == 9 && host_bytes[3] == HID_KEY_C);
+    peer_publish(peer_token, PEER_STATUS_OK);
+    console_drain();
+    cdc_status_fields();
+    CHECK(occurrences("BEGIN help") == 1 && occurrences("deskhop> ") == 2);
+    CHECK(strstr(cdc_bytes, "board=A\r\n") < strstr(cdc_bytes, "board=B\r\n"));
+    CHECK(strstr(cdc_bytes, "END status") < strstr(cdc_bytes, "BEGIN help"));
+    peer_manual = false;
+}
+
+static void cdc_peer_failures_and_fallback(void) {
+    peer_manual = true;
+    const peer_status_outcome_t outcomes[] = {PEER_STATUS_TIMEOUT, PEER_STATUS_INVALID};
+    const char *texts[] = {"peer=timeout_or_unsupported", "peer=invalid"};
+    for (unsigned i = 0; i < 2; ++i) {
+        cdc_capture_clear();
+        cdc_send("status\n");
+        CHECK(peer_pending && occurrences("END status") == 0);
+        console_now_us = peer_requested_at + 500000;
+        peer_publish(peer_token, outcomes[i]);
+        console_drain();
+        CHECK(strstr(cdc_bytes, texts[i]) != NULL);
+        CHECK(occurrences("board=A") == 1 && occurrences("board=B") == 0);
+        CHECK(occurrences("END status") == 1 && occurrences("deskhop> ") == 1);
+    }
+    peer_accept = false;
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(strstr(cdc_bytes, "peer=busy") != NULL);
+    CHECK(occurrences("END status") == 1 && occurrences("deskhop> ") == 1);
+    peer_accept = true;
+
+    /* A paused core 1 cannot strand an open console frame indefinitely. */
+    cdc_capture_clear();
+    cdc_send("status\n");
+    uint32_t abandoned = peer_token;
+    console_now_us = peer_requested_at + 599999;
+    console_pump(32);
+    CHECK(occurrences("END status") == 0);
+    console_now_us++;
+    console_drain();
+    CHECK(strstr(cdc_bytes, "peer=timeout_or_unsupported") != NULL);
+    CHECK(occurrences("END status") == 1 && occurrences("deskhop> ") == 1);
+    /* The late result is consumed without printing a second completion. */
+    peer_publish(abandoned, PEER_STATUS_OK);
+    cdc_capture_clear();
+    console_drain();
+    CHECK(cdc_count == 0 && !peer_pending && !peer_result_ready);
+    peer_manual = false;
+    cdc_send("status\n");
+    cdc_status_fields();
+    CHECK(peer_token != abandoned);
+}
+
+static void cdc_disconnect_discards_peer_result(void) {
+    peer_manual = true;
+    cdc_capture_clear();
+    cdc_send("status\n");
+    uint32_t abandoned = peer_token;
+    CHECK(occurrences("BEGIN status") == 1 && occurrences("END status") == 0);
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    peer_publish(abandoned, PEER_STATUS_OK);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("board=B") == 0 && occurrences("END status") == 0);
+    CHECK(occurrences("deskhop> ") == 1);
+    CHECK(!peer_pending && !peer_result_ready);
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(peer_token != abandoned);
+    /* A stale completion arriving during a new query is also ignored. */
+    peer_publish(abandoned, PEER_STATUS_OK);
+    console_pump(32);
+    CHECK(peer_pending && occurrences("END status") == 0);
+    peer_publish(peer_token, PEER_STATUS_OK);
+    console_drain();
+    cdc_status_fields();
+    peer_manual = false;
 }
 
 static void cdc_backpressure_keeps_hid_working(void) {
@@ -563,6 +712,12 @@ int main(void) {
     cdc_controls(false);
     scenario = "CDC command streams";
     cdc_command_stream();
+    scenario = "CDC asynchronous local-first peer status";
+    cdc_peer_wait_is_local_first();
+    scenario = "CDC peer failure and core-1 fallback";
+    cdc_peer_failures_and_fallback();
+    scenario = "CDC reconnect and stale peer results";
+    cdc_disconnect_discards_peer_result();
     scenario = "CDC backpressure and HID progress";
     cdc_backpressure_keeps_hid_working();
     scenario = "CDC close with pending IN and FIFO";

@@ -6,9 +6,14 @@ for its normal tiers. Start with the [architecture decision](architecture.md)
 and [coverage/fidelity matrix](coverage.md). The optional emulator experiment
 requires a pinned npm download; ordinary tests use checked-in source only.
 The [validation record](validation.md) records the completed local runs and ARM artifact.
-The [diagnostics walking skeleton](../diagnostics.md) describes the v0.95 serial
-console candidate and its staged hardware checks; the
-[v0.95 validation record](console-v095.md) identifies the tested artifact.
+The [diagnostics walking skeleton](../diagnostics.md) describes the staged
+hardware checks. The serial console was deployed in v0.95, and v0.96's disk-free
+maintenance entry passed on Pico A. The [v0.97 peer-status deployment](peer-status-v097.md)
+adds real paired UART/queue checks and asynchronous console tests. The physical
+serial check confirmed both boards executing v0.97 in six successful peer
+queries; Benji confirmed the input check passed with no replug needed. A's firmware was
+independently read back, while B's result establishes its executing identity
+and boot metadata, not flash integrity.
 The device-stack harness now
 also executes real CDC control/bulk transfers and the production console,
 including bounded work, malformed command recovery, and HID progress while a

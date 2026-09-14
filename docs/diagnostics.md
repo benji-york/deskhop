@@ -7,18 +7,19 @@ terminal. Commands remain read-only.
 
 ## Release sequence
 
-Before the peer-status slice, v0.96 adds a small maintenance prerequisite after
+Before the peer-status slice, v0.96 added a small maintenance prerequisite after
 the Mac storage-service panic: routine A/B bootloader shortcuts enter PICOBOOT
-without a USB disk. It adds no console commands. The candidate and the one-time
-transition from older firmware are tracked in
+without a USB disk. It adds no console commands. Pico A's deployment and its
+physical disk-free enumeration check passed; the record is in
 [maintenance-v096.md](testing/maintenance-v096.md).
 
-1. **Serial identity (v0.95 candidate):** normal-mode USB CDC, `help`, and
+1. **Serial identity (v0.95, deployed):** normal-mode USB CDC, `help`, and
    `status` with local identity, executing version, boot metadata CRC, random
    boot-session ID, and uptime. Check terminal discovery, reconnect, slow readers,
    and keyboard/mouse operation.
-2. **Peer status:** extend `status` to query both boards by default through
-   request-correlated UART replies. Print local information immediately; report
+2. **Peer status (v0.97, deployed and input checked):** extend `status`
+   to query both boards by default through request-correlated UART replies.
+   Print local information immediately; report
    unavailable/unsupported peers explicitly. Check actual A/B identities and
    fresh uptimes from one terminal.
 3. **Local history:** a small fixed RAM ring, initially 64 compact records for
@@ -42,13 +43,96 @@ Additional events and counters follow troubleshooting needs discovered during
 these sessions. Histories are volatile across reboot. No peer/history/verification
 commands are advertised before their implementation exists.
 
-## First slice: use and interpretation
+## Peer status slice (v0.97, deployed)
+
+`status` now queries both boards by default. It opens one response frame and
+prints the connected board immediately. A successful peer reply adds a second
+`board=` block with that board's own identity, executing build, boot session,
+boot metadata CRC, and uptime. For example:
+
+```text
+deskhop> status
+BEGIN status
+board=A
+board_id=<A's physical flash UID>
+build=0.97
+image_crc_at_boot=<A's boot metadata>
+boot_session=<A's session>
+uptime_ms=<A's sampled uptime>
+
+board=B
+board_id=<B's physical flash UID>
+build=0.97
+image_crc_at_boot=<B's boot metadata>
+boot_session=<B's session>
+uptime_ms=<B's sampled uptime>
+peer=ok
+verification=not_implemented
+END status
+deskhop>
+```
+
+The placeholders illustrate the format. The 2026-09-14 deployment confirmed
+both installed boards executing v0.97, as recorded below. With a terminal
+on B, B prints first. Builds may differ during propagation. The peer snapshot
+is taken when it accepts the request; the local snapshot is taken when the
+command is processed. Their uptimes have independent boot origins and are not
+timestamps on a shared clock.
+
+An absent, old, or silent peer produces `peer=timeout_or_unsupported` without a
+fabricated board block. A malformed matching reply produces `peer=invalid`;
+an occupied request queue produces `peer=busy`. The frame still ends normally.
+Each status uses a new token; closing/reopening the terminal discards that
+terminal's partial output, and late replies cannot complete a later query.
+No extra `both` command variant or board filter is needed.
+
+Core 0 formats the console and communicates with core 1 through one-entry SDK
+request/result queues. Core 1 owns all protocol state and services the new
+task at 1 kHz. It emits at most one diagnostic UART packet per millisecond,
+using a nonblocking enqueue. Each peer request has a 500 ms lifetime, including
+time waiting in the cross-core request queue. A 600 ms console fallback avoids
+waiting forever for a result; USB backpressure can still delay when text is
+actually delivered. Commands queued by the terminal wait until the current
+response finishes. There are no automatic retries after a request is queued.
+
+The server accepts at most one new request per 200 ms and captures a fixed
+snapshot for the entire reply. The client waits 200 ms after completion before
+starting a queued query, so fast consecutive status commands remain valid.
+The server transfer also expires after 500 ms if its TX queue cannot progress.
+The peer service remains available when the local USB console is disabled.
+
+UART types 36/37 carry a request token and 13 three-byte response chunks. The
+39-byte snapshot encodes fields explicitly in little endian, with a protocol
+version, board role, CRC32 over the first 34 bytes, and zero padding. Chunk
+indices, duplicate consistency, role, token, padding, and CRC are checked before
+accepting a result. This CRC protects diagnostic transport; it is not the flash
+integrity check still planned for the later `verify` slice.
+
+Pico A was flashed at 21:03 UTC on 2026-09-14 through the verified v0.96
+PICOBOOT-only entry. All 262,144 firmware bytes matched an independent readback;
+all 4,096 saved-configuration bytes were unchanged. The Mac's post-reboot check
+found no retained RP2 object or inactive/busy media client. The first status
+returned A immediately with an explicit peer timeout; a later query returned B.
+Six subsequent status snapshots all returned `peer=ok`, both executing build
+0.97, stable distinct sessions, increasing uptimes, and boot metadata CRC
+`9a2b3827`. A's UID is `E6654854574C3E30`; B's is `E6654854577F2330`.
+
+The physical serial check also passed fragmented and queued commands, a brief
+application read pause, and terminal close/reopen. These observations confirm
+B's executing identity and boot metadata, without an independent B flash
+readback or flash-integrity check. Benji confirmed the ordinary input/switching
+check on both Macs: "Working great. No replug needed." The terminal open/closed
+phases were not separately reported. Local RAM history is next. See the [v0.97 deployment record](testing/peer-status-v097.md) for
+the sessions, evidence, and remaining checks.
+
+## Console use and first-slice interpretation
 
 The default firmware enables `DH_CONSOLE`, independently of `DH_DEBUG`. The
 normal USB device retains its VID/PID, serial number, and HID report interfaces,
 and adds a CDC ACM serial function. Configuration mode also includes the console.
 The device descriptor advertises the composite IAD class for the CDC function.
-macOS enumeration and Karabiner behavior still require a hardware check.
+macOS enumeration passed in the deployed releases. The v0.97 interactive
+input and switching check passed with no replug needed.
 
 On macOS, find the new `/dev/cu.usbmodem*` device and open it with the existing
 terminal program (replace the example path with the discovered one):
@@ -62,6 +146,9 @@ Use a terminal that asserts DTR, with local echo disabled (the firmware echoes).
 The CDC line rate does not change the board-to-board UART baud rate.
 `Ctrl-A`, then `K`, then `Y` exits `screen`. Closing the terminal does not reset
 the Pico. USB suspend/resume or closing/reopening starts a fresh console session.
+
+The first, local-only v0.95 release produced the following format; v0.97 uses
+the two-board status shown above.
 
 ```text
 deskhop> help

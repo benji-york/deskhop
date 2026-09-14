@@ -30,6 +30,9 @@
 #include "tasks.h"
 #include "watchdog.h"
 #include "zoom.h"
+#if SIM_HAS_DIAGNOSTIC_PEER
+#include "diagnostic_peer.h"
+#endif
 
 #define PICO_DEFAULT_LED_PIN 25
 #define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8

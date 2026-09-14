@@ -15,9 +15,8 @@
 
 #include "main.h"
 #include "console.h"
-#if DH_CONSOLE
+#include "diagnostic_peer.h"
 #include "pico/rand.h"
-#endif
 
 /* ================================================== *
  * Perform initial UART setup
@@ -242,12 +241,21 @@ void initial_setup(device_t *state) {
     /* Initialize UART queue */
     queue_init(&state->uart_tx_queue, sizeof(uart_packet_t), UART_QUEUE_LENGTH);
 
-#if DH_CONSOLE
     /* Capture identity before any peer update can replace flash metadata.
      * A random session distinguishes warm resets as well as power cycles. */
+    uint64_t boot_session = get_rand_64();
+    pico_unique_board_id_t physical_id;
+    pico_get_unique_board_id(&physical_id);
+    peer_status_snapshot_t identity = {
+        .role = state->board_role, .major = VERSION_MAJOR, .minor = VERSION_MINOR,
+        .boot_session = boot_session, .image_crc_at_boot = _firmware_metadata.checksum,
+    };
+    memcpy(identity.board_id, physical_id.id, sizeof(identity.board_id));
+    diagnostic_peer_init(&identity);
+#if DH_CONSOLE
     char board_id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
     pico_get_unique_board_id_string(board_id, sizeof(board_id));
-    console_init(state->board_role, board_id, get_rand_64(), _firmware_metadata.checksum);
+    console_init(state->board_role, board_id, boot_session, _firmware_metadata.checksum);
 #endif
 
     /* Initialize and configure TinyUSB Device */
