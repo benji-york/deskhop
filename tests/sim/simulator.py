@@ -209,6 +209,10 @@ class Simulation:
             lo,hi=args;ok=lo<=self.now<=hi
         elif predicate=='usb_count':
             node,report_id,count=args;ok=len(self.reports(node,report_id))==count
+        elif predicate=='reset_count':
+            node,reason,disable_mask,count=args
+            ok=sum(x['kind']=='reset' and x['node']==node
+                   and x['a']==reason and x['b']==disable_mask for x in self.trace)==count
         elif predicate=='usb_bytes':
             node,report_id,index,offset,hexdata=args
             reports=self.reports(node,report_id);expected=bytes.fromhex(hexdata)

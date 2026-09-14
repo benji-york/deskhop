@@ -7,6 +7,12 @@ terminal. Commands remain read-only.
 
 ## Release sequence
 
+Before the peer-status slice, v0.96 adds a small maintenance prerequisite after
+the Mac storage-service panic: routine A/B bootloader shortcuts enter PICOBOOT
+without a USB disk. It adds no console commands. The candidate and the one-time
+transition from older firmware are tracked in
+[maintenance-v096.md](testing/maintenance-v096.md).
+
 1. **Serial identity (v0.95 candidate):** normal-mode USB CDC, `help`, and
    `status` with local identity, executing version, boot metadata CRC, random
    boot-session ID, and uptime. Check terminal discovery, reconnect, slow readers,

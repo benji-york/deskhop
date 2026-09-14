@@ -98,9 +98,10 @@ void screen_border_hotkey_handler(device_t *state, hid_keyboard_report_t *report
     queue_packet((uint8_t *)&snapshot, SYNC_BORDERS_MSG, sizeof(snapshot));
 };
 
-/* This key combo puts board A in firmware upgrade mode */
+/* Routine maintenance uses PICOBOOT only: bit 0 disables the ROM USB disk.
+   Physical BOOTSEL still provides the usual UF2 recovery drive. */
 void fw_upgrade_hotkey_handler_A(device_t *state, hid_keyboard_report_t *report) {
-    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
 };
 
 /* This key combo puts board B in firmware upgrade mode */
@@ -406,9 +407,9 @@ void handle_output_select_sync_msg(uart_packet_t *packet, device_t *state) {
     receive_output_selection(packet, state, false);
 }
 
-/* On firmware upgrade message, reboot into the BOOTSEL fw upgrade mode */
+/* Apply the same disk-free maintenance mode to the peer request. */
 void handle_fw_upgrade_msg(uart_packet_t *packet, device_t *state) {
-    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
 }
 
 /* Comply with request to turn mouse zoom mode on/off  */

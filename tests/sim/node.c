@@ -72,7 +72,8 @@ void flash_range_program(uint32_t off,const uint8_t *data,size_t n) {
 }
 void hw_write_masked(uint32_t *p,uint32_t a,uint32_t mask) { *p=(*p&~mask)|(a&mask); }
 void watchdog_update(void) { last_kick=now_us; }
-void reset_usb_boot(uint32_t a,uint32_t b) { stopped=true; emit(5,1,0,NULL,0); }
+/* Reset reason 1 means ROM USB boot; retain the interface-disable mask. */
+void reset_usb_boot(uint32_t a,uint32_t b) { stopped=true; emit(5,1,(int)b,NULL,0); }
 void gpio_put(uint32_t pin,bool value) { led=value; }
 bool gpio_get(uint32_t pin) { return led; }
 void pico_get_unique_board_id_string(char *s,uint32_t n) { snprintf(s,n,"SIMULATED-%u",global_state.board_role); }

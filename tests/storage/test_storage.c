@@ -8,6 +8,7 @@ static const char *scenario;
 static uint64_t now;
 static unsigned current_core, lock_owner[4], lock_depth[4], next_lock;
 static unsigned interrupts[2], erases, programs, resets, watchdog_kicks;
+static uint32_t reset_disable_mask;
 static unsigned sector_erases[STORAGE_SIZE / FLASH_SECTOR_SIZE];
 static unsigned page_programs[STAGING_PAGES_CNT];
 static unsigned active_operation, cut_at_operation, cut_bytes;
@@ -128,7 +129,12 @@ uint32_t time_us_32(void) { return (uint32_t)now; }
 uint64_t time_us_64(void) { return now; }
 void watchdog_update(void) { ++watchdog_kicks; event("watchdog-kick", watchdog_kicks); }
 uint8_t toggle_led(void) { return 0; }
-void reset_usb_boot(uint32_t gpio, uint32_t disable) { ++resets; event("rom-recovery-request", resets); }
+void reset_usb_boot(uint32_t gpio, uint32_t disable) {
+    ++resets;
+    reset_disable_mask = disable;
+    event("rom-recovery-request", resets);
+    event("rom-interface-disable-mask", disable);
+}
 
 static void before_flash(uint32_t offset, size_t length) {
     CHECK(!lock_depth[3]); /* RAM snapshots never hold their lock through flash. */
@@ -204,6 +210,7 @@ static void fresh(const char *name) {
     memset(sector_erases, 0, sizeof(sector_erases));
     memset(page_programs, 0, sizeof(page_programs));
     erases = programs = resets = watchdog_kicks = active_operation = cut_at_operation = 0;
+    reset_disable_mask = UINT32_MAX;
     current_core = 0;
     now = 1000000;
     global_state.config = default_config;
@@ -329,6 +336,7 @@ static void uf2_reject_invalid_and_mixed(void) {
     make_image(alternate_image, 193, 0x42);
     for (unsigned i = 0; i < STAGING_PAGES_CNT; ++i) host_block(i, i == 333 ? alternate_image : image);
     CHECK(resets == 1 && !global_state.reboot_requested);
+    CHECK(reset_disable_mask == 0); /* Invalid-image recovery keeps UF2 and PICOBOOT. */
     CHECK(global_state.fw.image_dirty);
     for (unsigned i = 0; i < FLASH_SECTOR_SIZE; ++i) CHECK(storage_flash[i] == 0xff);
 }
@@ -382,6 +390,7 @@ static void actual_peer_transfer(bool corrupt, bool intermittent_loss) {
     CHECK(!global_state.fw.upgrade_in_progress && programs == STAGING_PAGES_CNT);
     if (corrupt) {
         CHECK(resets == 1 && !global_state.reboot_requested);
+        CHECK(reset_disable_mask == 0);
         CHECK(global_state.fw.image_dirty);
     } else {
         CHECK(!resets && global_state.reboot_requested && !global_state.fw.image_dirty);

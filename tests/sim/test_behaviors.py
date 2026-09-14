@@ -48,6 +48,41 @@ def at(s, timestamp):
     s.advance(timestamp - s.now)
 
 
+def maintenance_boot(s, target):
+    attach(s)
+    # The maintenance target is independent of which Mac currently has focus.
+    survivor = 1 - target
+    s.do(0, 'select', survivor)
+    s.advance(5000)
+    last_kick = s.get(survivor, 'last_kick')
+    # Actual Layer 3 A/B report: both shifts, F12, and the selected letter.
+    key(s, 0x22, 0x45, 0x04 + target)
+    key(s)
+    s.advance(10000)
+    s.expect(target, 'stopped', 1)
+    s.expect(survivor, 'stopped', 0)
+    s.check('reset_count', target, 1, 1, 1)
+    if target == 1:
+        # The existing peer request remains wire-compatible: type 4, ENABLE.
+        requests = [bytes.fromhex(x['data']) for x in s.trace
+                    if x['kind'] == 'uart_tx' and x['node'] == 0
+                    and bytes.fromhex(x['data'])[2] == 4]
+        assert len(requests) == 1 and requests[0][3:] == bytes([1] + [0] * 7 + [1])
+    # Pass one full watchdog deadline; the board left running still services
+    # its cores after the target has left the firmware and UART link.
+    s.advance(510000)
+    s.expect(survivor, 'stopped', 0)
+    s.check('range', survivor, 'last_kick', 0, last_kick + 1, s.now)
+
+
+def scenario_maintenance_a_picoboot_only(s):
+    maintenance_boot(s, 0)
+
+
+def scenario_maintenance_b_picoboot_only(s):
+    maintenance_boot(s, 1)
+
+
 def scenario_reboot_three_completed_taps(s):
     attach(s)
     # Put a genuine held modifier on each host, then focus the second host.
@@ -410,5 +445,6 @@ SCENARIOS = {
 }
 BACKGROUND_FALSE = set(SCENARIOS) - {
     'reboot_three_completed_taps', 'reboot_rejects_extra_modifiers',
-    'f24_releases_held_modifiers',
+    'f24_releases_held_modifiers', 'maintenance_a_picoboot_only',
+    'maintenance_b_picoboot_only',
 }

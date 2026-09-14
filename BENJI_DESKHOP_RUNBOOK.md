@@ -8,9 +8,49 @@ README.
 
 Snapshot: 2026-09-14
 
-## Current deployment: v0.95 first serial-console slice
+## Current deployment: v0.96 disk-free maintenance
 
-The current feature worktree contains v0.95 with a read-only USB
+Pico A was flashed and rebooted on 2026-09-14 at 20:39 UTC using frozen
+`build/flashing/deskhop-v0.96-maintenance.uf2` (SHA-256
+`4e36e037ebb30c03c1707b8cd04c59bc79b227051aff4980285f7e732e17402e`).
+Its old firmware exactly matched the v0.95 artifact. The new firmware passed
+picotool verification and independent comparison of all 262,144 bytes; all
+4,096 saved-configuration bytes remained unchanged. Configuration format is 10.
+
+The local serial check confirms executing build `0.96`, boot CRC metadata
+`d4fdee05`, fresh boot session `13d7da4d302c9de8`, and uptime increasing from
+15,282 to 17,021 ms. UID remains `E6654854574C3E30`, port
+`/dev/cu.usbmodem21203`. This transition used the old disk-enabled bootloader,
+but it disappeared cleanly: no retained RP2 object and no inactive/busy media
+clients were present after reboot. This does not establish that the earlier
+Mac panic cannot recur. See the [deployment record](docs/testing/maintenance-v096.md).
+
+The A/B maintenance entry points now request PICOBOOT without USB mass storage.
+Physical BOOTSEL and invalid-image recovery still provide the UF2 disk.
+Benji reported "Works well" after the input check. A second Layer 3 A entry
+was inspected at 20:41 UTC: only the vendor interface (class 255), no mass
+storage interface, and no additional media clients. Direct picotool access
+worked. Pico A returned to normal operation without a flash; its subsequent
+serial check passed and no stale USB/media state remained. This verifies the
+disk-free maintenance path on A. Pico B's executing version remains independently
+unverified. Do not
+assume peer propagation from a successful local flash or local serial response.
+The serial console remains read-only and local-only. Peer status is the next
+feature slice. These changes have not been pushed.
+
+## Previous deployment: v0.95 first serial-console slice
+
+After v0.95 the Mac panicked on an inactive `IOMediaBSDClient` timeout two
+minutes after wake. An older bootloader disk had already remained inactive/busy
+for hours. A flashing-related storage teardown issue is a credible suspect,
+not proven attribution. See the [panic investigation](docs/testing/macos-panic-20260914.md).
+The subsequent 20:33 UTC health check found no retained RP2 object or inactive/
+busy media clients; Pico A's serial checks passed with session
+`3152032dc4f341dd` and uptime 2,336,528–2,338,263 ms. Its reset cause is unknown.
+Benji confirmed typing, trackball movement/buttons, and Layer 3 S switching on
+both Macs before the v0.96 transition.
+
+The deployed v0.95 firmware has a read-only USB
 serial console in normal and configuration modes. `help` and `status` report
 the connected board's identity, compiled version, metadata CRC captured at boot,
 random boot session, and uptime. Peer queries, history, and flash verification
@@ -669,17 +709,26 @@ than invoking it directly on macOS.
 
 ## Flashing DeskHop and peer propagation
 
-### Preferred update path
+### Preferred update path after v0.96 is installed
 
 1. Build and test a firmware with a higher version number.
 2. Keep both DeskHop Picos powered and UART-connected.
-3. Use Layer 3 C for the `DESKHOP` configuration drive, or Layer 3 A/B for the
-   selected Pico's `RPI-RP2` ROM bootloader drive.
-4. Copy the new `deskhop.uf2` to the mounted volume and let it reboot/eject.
+3. Use Layer 3 A/B for the selected Pico's PICOBOOT-only ROM bootloader. No
+   `RPI-RP2` volume should appear. Identify the physical flash UID before writing.
+4. Use official picotool to back up the firmware/settings, load and verify the
+   frozen candidate, read back the firmware/settings, and reboot normally.
 5. Leave both sides powered for several one-second heartbeat cycles. The older
    peer should pull and install the 256 KiB running image automatically.
-6. Verify the trackball, keyboard right-click on both Macs, F24 switching, Pico
-   LEDs, and Sofle arrow direction before declaring propagation successful.
+6. Check the trackball, keyboard right-click on both Macs, F24 switching, Pico
+   LEDs, and Sofle arrow direction. Read the executing build on both consoles
+   before declaring both versions independently verified. v0.95/v0.96 `status`
+   is local-only, so input checks alone do not establish the peer's version.
+
+This path is unavailable on a board still running v0.95 or older. Do not use
+`picotool reboot -u` to obtain disk-free mode: on RP2040 it enables the disk.
+Physical BOOTSEL, automatic invalid-image recovery, and the Layer 3 C
+configuration drive still expose mass storage. They remain recovery/configuration
+facilities, not the routine flashing path on this Mac after the storage panic.
 
 Layer 3 A/B uses the canonical keyboard-on-A topology: A enters the local Pico's
 bootloader, while B asks the peer over UART. If the topology or UART is broken,
@@ -720,8 +769,9 @@ it.
 
 Symptoms include a dead B-side trackball, no LED after reconnecting B, or a Sofle
 right-click that works on A but never appears on B. Leave both sides powered for
-at least the 30-second stall/recovery interval. If it remains bad, put B into
-`RPI-RP2` and flash the same UF2 explicitly. Do not casually remove power from a
+at least the 30-second stall/recovery interval. If it remains bad, identify B's
+version and use the appropriate direct flashing/recovery procedure; an older B
+may still expose `RPI-RP2` when its hotkey is used. Do not casually remove power from a
 current receiver that may be executing from RAM with a partial flash image. A
 plain power cycle historically fixed the pre-v0.85 case in which every page had
 already arrived but finalization was waiting forever; it is not the generic
