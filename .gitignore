@@ -1,3 +1,7 @@
 build
 
 .idea/
+
+# Native test runner caches
+__pycache__/
+*.pyc

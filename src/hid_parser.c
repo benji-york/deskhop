@@ -67,11 +67,11 @@ uint16_t get_usage(parser_state_t *parser, int i) {
         idx = i;
     }
 
-    uint16_t *slot = parser->p_usage + idx;
-    if (slot >= parser->usages + HID_MAX_USAGES)
-        slot = parser->usages + HID_MAX_USAGES - 1;
+    unsigned slot = (unsigned)(parser->p_usage - parser->usages) + (unsigned)idx;
+    if (slot >= HID_MAX_USAGES)
+        slot = HID_MAX_USAGES - 1;
 
-    return *slot;
+    return parser->usages[slot];
 }
 
 void store_element(parser_state_t *parser, report_val_t *val, uint16_t usage, uint32_t data, uint16_t size, hid_interface_t *iface) {
@@ -99,6 +99,10 @@ void store_element(parser_state_t *parser, report_val_t *val, uint16_t usage, ui
 
 void handle_global_item(parser_state_t *parser, item_t *item) {
     if (item->hdr.tag == RI_GLOBAL_REPORT_ID) {
+        if (item->val == 0 || item->val >= REPORT_ID_MAP_SIZE) {
+            parser->invalid = true;
+            return;
+        }
         parser->report_id = item->val;
     }
 
@@ -114,7 +118,7 @@ void handle_local_item(parser_state_t *parser, item_t *item) {
         if(IS_BLOCK_END)
             parser->global_usage = item->val;
 
-        else if (parser->p_usage + parser->usage_count + 1 < parser->usages + HID_MAX_USAGES)
+        else if (parser->usage_count + 1 < (unsigned)(parser->usages + HID_MAX_USAGES - parser->p_usage))
             *(parser->p_usage + parser->usage_count++) = item->val;
     }
 }
@@ -123,6 +127,15 @@ void handle_main_input(parser_state_t *parser, item_t *item, hid_interface_t *if
     uint32_t size  = parser->globals[RI_GLOBAL_REPORT_SIZE].val;
     uint32_t count = parser->globals[RI_GLOBAL_REPORT_COUNT].val;
     report_val_t val = {0};
+
+    /* Neither zero-width items nor unrepresentable arithmetic may wrap an
+     * offset or drive an effectively unbounded loop. Ignore empty fields. */
+    if (!size || !count)
+        return;
+    if (size > UINT16_MAX || count > UINT16_MAX / size) {
+        parser->invalid = true;
+        return;
+    }
 
     /* Swap count and size for 1-bit variables, it makes sense to process e.g. NKRO with
        size = 1 and count = 240 in one go instead of doing 240 iterations
@@ -136,6 +149,13 @@ void handle_main_input(parser_state_t *parser, item_t *item, hid_interface_t *if
     uint32_t *current_offset = get_or_create_report_offset(parser, parser->report_id);
     if (!current_offset)
         return;
+
+    if (size * count > UINT16_MAX - *current_offset
+        || count > HID_MAX_INPUT_ELEMENTS - parser->input_elements) {
+        parser->invalid = true;
+        return;
+    }
+    parser->input_elements += count;
 
     for (int i = 0; i < count; i++) {
         store_element(parser, &val, get_usage(parser, i), item->val, size, iface);
@@ -153,7 +173,7 @@ void handle_main_input(parser_state_t *parser, item_t *item, hid_interface_t *if
 
     /* Advance the usage cursor and carry the last usage of this block.
        Pin to the last slot if the array is full. */
-    if (parser->p_usage + parser->usage_count < parser->usages + HID_MAX_USAGES) {
+    if (parser->usage_count < (unsigned)(parser->usages + HID_MAX_USAGES - parser->p_usage)) {
         parser->p_usage += parser->usage_count;
 
         /* Carry the last usage of this block to the new location */
@@ -166,10 +186,18 @@ void handle_main_input(parser_state_t *parser, item_t *item, hid_interface_t *if
 void handle_main_item(parser_state_t *parser, item_t *item, hid_interface_t *iface) {
     switch (item->hdr.tag) {
         case RI_MAIN_COLLECTION:
+            if (parser->collection.start == UINT8_MAX) {
+                parser->invalid = true;
+                break;
+            }
             parser->collection.start++;
             break;
 
         case RI_MAIN_COLLECTION_END:
+            if (parser->collection.end >= parser->collection.start) {
+                parser->invalid = true;
+                break;
+            }
             parser->collection.end++;
             break;
 
@@ -200,9 +228,31 @@ void parse_report_descriptor(hid_interface_t *iface,
     /* Wipe parser_state clean */
     memset(&parser_state, 0, sizeof(parser_state_t));
     parser_state.p_usage = parser_state.usages;
+    iface->descriptor_invalid = false;
 
-    while (desc_len > 0) {
-        item.hdr = *(header_t *)report++;
+    if (desc_len <= 0 || !report)
+        parser_state.invalid = true;
+
+    while (desc_len > 0 && !parser_state.invalid) {
+        /* Long items carry a length and tag after 0xfe. They are unsupported
+         * semantically, but their payload must not be parsed as short items. */
+        if (*report == 0xfe) {
+            if (desc_len < 3 || report[1] > desc_len - 3) {
+                parser_state.invalid = true;
+                break;
+            }
+            int consumed = report[1] + 3;
+            report += consumed;
+            desc_len -= consumed;
+            continue;
+        }
+        memcpy(&item.hdr, report, sizeof(item.hdr));
+        unsigned item_size = SIZE_LOOKUP[item.hdr.size];
+        if (item_size > (unsigned)(desc_len - 1)) {
+            parser_state.invalid = true;
+            break;
+        }
+        report++;
         item.val = get_descriptor_value(report, item.hdr.size);
 
         switch (item.hdr.type) {
@@ -221,5 +271,15 @@ void parse_report_descriptor(hid_interface_t *iface,
         /* Move to the next position and decrement size by header length + data length */
         report += SIZE_LOOKUP[item.hdr.size];
         desc_len -= (SIZE_LOOKUP[item.hdr.size] + 1);
+    }
+
+    if (parser_state.collection.start != parser_state.collection.end)
+        parser_state.invalid = true;
+    if (parser_state.invalid) {
+        /* A malformed suffix must not leave a live partial receiver map. */
+        uint8_t protocol = iface->protocol;
+        memset(iface, 0, sizeof(*iface));
+        iface->protocol = protocol;
+        iface->descriptor_invalid = true;
     }
 }

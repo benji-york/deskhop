@@ -8,6 +8,32 @@ README.
 
 Snapshot: 2026-09-14
 
+## Hardware-free validation framework (v0.93 candidate)
+
+The `codex/hardware-free-test-framework` branch adds the executable framework
+in [docs/testing/README.md](docs/testing/README.md). It builds a v0.93 candidate
+with configuration format 10; this candidate has not been flashed. The deployed
+v0.92/main snapshot below remains the hardware record.
+
+Run `python3 tests/run.py fast` before ordinary changes, `python3 tests/run.py deep`
+for generated workloads, bounded core orders and source mutations, and
+`python3 tests/run.py arm` for a hardware firmware build. `python3 tests/coverage.py`
+produces source coverage. All commands run on the development computer/CI with
+no software installed on either target Mac.
+
+Read the [architecture decision](docs/testing/architecture.md) and
+[coverage/fidelity matrix](docs/testing/coverage.md). Two isolated production-C
+Picos, actual SDK queues and UART framing run under virtual time; separate tests
+execute the real TinyUSB device/host stacks and production storage/update code.
+An executable two-emulator UART experiment confirms that topology is feasible,
+but current emulator peripheral/core limitations prevent full firmware boot.
+
+The new tests also expose unresolved button aggregation, lost selection-message
+convergence and arbitrary update power-cut recovery gaps. A passing software tier
+does not establish macOS/Karabiner behavior or physical PIO USB timing. The
+v0.93 candidate's production changes are bounded HID/input hardening found by
+these tests; the deployed behavior and QMK checkout have not been changed.
+
 ## Source of truth
 
 | Component | Local repository | Remote | Source / verified state |
@@ -47,7 +73,8 @@ basic deployment smoke test, not an independent readback of both Pico versions.
 Extended v0.92 zoom assist, timed jitter, and coordinated reboot tests have not
 yet been recorded.
 
-The current working tree builds v0.92. To reproduce hardware-verified v0.91,
+The deployed/main snapshot builds v0.92 (the test-framework branch builds the
+v0.93 candidate described above). To reproduce hardware-verified v0.91,
 use commit `c1e9420` or its archived binary. For the older hardware-tested v0.90
 state, use commit `6d1cd12` or its archived binary.
 

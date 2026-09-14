@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include <math.h>
+#include <limits.h>
 
 #define MACOS_SWITCH_MOVE_X 10
 #define MACOS_SWITCH_MOVE_COUNT 5
@@ -42,10 +43,10 @@ enum screen_pos_e is_screen_switch_needed(output_t *output, int position, int of
     /* Local switches (virtual desktop changes) have no gap, only cross-output jumps use threshold */
     uint16_t threshold = get_jump_threshold(output, direction);
 
-    if (position + offset < MIN_SCREEN_COORD - threshold)
+    if ((int64_t)position + offset < MIN_SCREEN_COORD - threshold)
         return LEFT;
 
-    if (position + offset > MAX_SCREEN_COORD + threshold)
+    if ((int64_t)position + offset > MAX_SCREEN_COORD + threshold)
         return RIGHT;
 
     return NONE;
@@ -54,11 +55,11 @@ enum screen_pos_e is_screen_switch_needed(output_t *output, int position, int of
 /* Move mouse coordinate 'position' by 'offset', but don't fall off the screen */
 int32_t move_and_keep_on_screen(int position, int offset) {
     /* Lowest we can go is 0 */
-    if (position + offset < MIN_SCREEN_COORD)
+    if ((int64_t)position + offset < MIN_SCREEN_COORD)
         return MIN_SCREEN_COORD;
 
     /* Highest we can go is MAX_SCREEN_COORD */
-    else if (position + offset > MAX_SCREEN_COORD)
+    else if ((int64_t)position + offset > MAX_SCREEN_COORD)
         return MAX_SCREEN_COORD;
 
     /* We're still on screen, all good */
@@ -89,7 +90,7 @@ float calculate_mouse_acceleration_factor(int32_t offset_x, int32_t offset_y) {
         return 1.0;
 
     // Calculate the 2D movement magnitude
-    const float movement_magnitude = sqrtf((float)(offset_x * offset_x) + (float)(offset_y * offset_y));
+    const float movement_magnitude = sqrtf((float)offset_x * offset_x + (float)offset_y * offset_y);
 
     if (movement_magnitude <= acceleration[0].value)
         return acceleration[0].factor;
@@ -118,6 +119,25 @@ float calculate_mouse_acceleration_factor(int32_t offset_x, int32_t offset_y) {
     return lower->factor + interpolation_pos * (upper->factor - lower->factor);
 }
 
+/* Keep descriptor/config extremes from overflowing float-to-int conversion.
+   Ordinary mouse deltas retain their existing rounding and acceleration. */
+static int scaled_mouse_offset(int32_t delta, float factor, int32_t speed) {
+    double scaled = round(delta * factor * speed);
+    if (scaled >= INT_MAX)
+        return INT_MAX;
+    if (scaled <= INT_MIN)
+        return INT_MIN;
+    return (int)scaled;
+}
+
+static int32_t canonical_mouse_axis(int32_t value) {
+    if (value > INT16_MAX)
+        return INT16_MAX;
+    if (value < INT16_MIN)
+        return INT16_MIN;
+    return value;
+}
+
 /* Returns LEFT if need to jump left, RIGHT if right, NONE otherwise */
 enum screen_pos_e update_mouse_position(device_t *state, mouse_values_t *values) {
     output_t *current    = &state->config.output[state->active_output];
@@ -129,8 +149,8 @@ enum screen_pos_e update_mouse_position(device_t *state, mouse_values_t *values)
 
     /* Calculate movement */
     float acceleration_factor = calculate_mouse_acceleration_factor(values->move_x, values->move_y);
-    int offset_x = round(values->move_x * acceleration_factor * (current->speed_x >> reduce_speed));
-    int offset_y = round(values->move_y * acceleration_factor * (current->speed_y >> reduce_speed));
+    int offset_x = scaled_mouse_offset(values->move_x, acceleration_factor, current->speed_x >> reduce_speed);
+    int offset_y = scaled_mouse_offset(values->move_y, acceleration_factor, current->speed_y >> reduce_speed);
 
     /* Determine if our upcoming movement would stay within the screen */
     enum screen_pos_e switch_direction = is_screen_switch_needed(current, state->pointer_x, offset_x);
@@ -314,8 +334,11 @@ void do_screen_switch(device_t *state, int direction) {
 
 static inline bool extract_value(bool uses_id, int32_t *dst, report_val_t *src, uint8_t *raw_report, int len) {
     /* If HID Report ID is used, the report is prefixed by the report ID so we have to move by 1 byte */
-    if (uses_id && (*raw_report++ != src->report_id))
-        return false;
+    if (uses_id) {
+        if (len <= 0 || *raw_report++ != src->report_id)
+            return false;
+        len--;
+    }
 
     *dst = get_report_value(raw_report, len, src);
     return true;
@@ -324,13 +347,15 @@ static inline bool extract_value(bool uses_id, int32_t *dst, report_val_t *src, 
 void extract_report_values(uint8_t *raw_report, int len, device_t *state, mouse_values_t *values, hid_interface_t *iface) {
     /* Interpret values depending on the current protocol used. */
     if (iface->protocol == HID_PROTOCOL_BOOT) {
-        hid_mouse_report_t *mouse_report = (hid_mouse_report_t *)raw_report;
-
-        values->move_x  = mouse_report->x;
-        values->move_y  = mouse_report->y;
-        values->wheel   = mouse_report->wheel;
-        values->pan     = mouse_report->pan;
-        values->buttons = mouse_report->buttons;
+        /* USB boot mouse guarantees only buttons, X and Y. Wheels are common
+           extensions, but reading them from a three-byte transfer is invalid. */
+        if (!raw_report || len < 3)
+            return;
+        values->buttons = raw_report[0];
+        values->move_x  = (int8_t)raw_report[1];
+        values->move_y  = (int8_t)raw_report[2];
+        values->wheel   = len > 3 ? (int8_t)raw_report[3] : 0;
+        values->pan     = len > 4 ? (int8_t)raw_report[4] : 0;
         return;
     }
     mouse_t *mouse = &iface->mouse;
@@ -367,12 +392,45 @@ mouse_report_t create_mouse_report(device_t *state, mouse_values_t *values) {
     return mouse_report;
 }
 
+/* A partial transfer is neither a zero-motion report nor a button release.
+   Validate all fields belonging to this ID before changing state/activity. */
+static bool mouse_report_complete(const uint8_t *raw_report, int len, const hid_interface_t *iface) {
+    if (!raw_report || len <= 0)
+        return false;
+    if (iface->protocol == HID_PROTOCOL_BOOT)
+        return len >= 3;
+    int payload_len = len - iface->uses_report_id;
+    if (payload_len <= 0)
+        return false;
+    const mouse_t *mouse = &iface->mouse;
+    const report_val_t *fields[] = {&mouse->buttons, &mouse->move_x, &mouse->move_y,
+                                   &mouse->wheel, &mouse->pan};
+    bool found = false;
+    for (unsigned i = 0; i < ARRAY_SIZE(fields); i++) {
+        const report_val_t *field = fields[i];
+        if (!field->size || (iface->uses_report_id && field->report_id != raw_report[0]))
+            continue;
+        if (field->size > 32 || (uint32_t)field->offset + field->size > (uint64_t)payload_len * 8)
+            return false;
+        found = true;
+    }
+    return found;
+}
+
 void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interface_t *iface) {
     mouse_values_t values = {0};
     device_t *state = &global_state;
 
+    if (!mouse_report_complete(raw_report, len, iface))
+        return;
+
     /* Interpret the mouse HID report, extract and save values we need. */
     extract_report_values(raw_report, len, state, &values, iface);
+
+    /* The output protocol carries signed 16-bit motion; saturate wider HID
+       fields once so local and forwarded relative reports cannot wrap. */
+    values.move_x = canonical_mouse_axis(values.move_x);
+    values.move_y = canonical_mouse_axis(values.move_y);
 
     /* DeskHop's device and UART mouse reports carry an int8 wheel. Clamp a
        wider source field once so local and forwarded inference see identical

@@ -131,7 +131,7 @@ static uint8_t get_device_index(uint8_t dev_addr, uint8_t instance, uint8_t itf_
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     uint8_t itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
-    if (dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
+    if (dev_addr == 0 || dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
         return;
 
     hid_interface_t *iface = &global_state.iface[dev_addr-1][instance];
@@ -183,7 +183,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_report, uint16_t desc_len) {
     uint8_t itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
-    if (dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
+    if (dev_addr == 0 || dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
         return;
 
     /* Get interface information */
@@ -260,6 +260,14 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     hid_interface_t *iface = &global_state.iface[dev_addr-1][instance];
 
+    /* A rejected descriptor cannot safely select the report-protocol fallback
+       layout, even on a boot-capable keyboard interface. Explicitly negotiated
+       boot protocol has its own fixed layout and remains available. */
+    if (iface->descriptor_invalid && iface->protocol != HID_PROTOCOL_BOOT) {
+        tuh_hid_receive_report(dev_addr, instance);
+        return;
+    }
+
     /* Keep report routing and unmount cleanup on the same device-state slot. */
     uint8_t device_idx = get_device_index(dev_addr, instance, itf_protocol);
 
@@ -287,7 +295,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 
 /* Set protocol in a callback. This is tied to an interface, not a specific report ID */
 void tuh_hid_set_protocol_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t protocol) {
-    if (dev_addr > MAX_DEVICES || idx >= MAX_INTERFACES)
+    if (dev_addr == 0 || dev_addr > MAX_DEVICES || idx >= MAX_INTERFACES)
         return;
 
     hid_interface_t *iface = &global_state.iface[dev_addr-1][idx];

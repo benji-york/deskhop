@@ -313,6 +313,8 @@ void handle_pointer_sync_msg(uart_packet_t *packet, device_t *state) {
 
 /* Function handles request to switch output  */
 void handle_output_select_msg(uart_packet_t *packet, device_t *state) {
+    if (packet->data[0] >= NUM_SCREENS)
+        return;
     state->active_output = packet->data[0];
     if (state->tud_connected)
         release_all_keys(state);
@@ -629,6 +631,8 @@ void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
 
 /* Update output variable, set LED on/off and notify the other board so they are in sync. */
 void set_active_output(device_t *state, uint8_t new_output) {
+    if (new_output >= NUM_SCREENS)
+        return;
     state->active_output = new_output;
     restore_leds(state);
 

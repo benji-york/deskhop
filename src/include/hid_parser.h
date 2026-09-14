@@ -35,6 +35,10 @@
 #define MAX_KEYBOARDS               5
 #define MAX_SYS_BUTTONS             8
 #define PRIMARY_KEYBOARD            0
+/* Bound descriptor work as well as storage. Physical interrupt reports are
+ * limited to 64 bytes; retain room for large vendor descriptors without letting
+ * a four-byte Report Count monopolize the USB host core. */
+#define HID_MAX_INPUT_ELEMENTS       4096
 /*==============================================================================
  *  Data Structures
  *==============================================================================*/
@@ -175,6 +179,7 @@ struct hid_interface_t {
     uint8_t report_handler[REPORT_ID_MAP_SIZE];
     uint8_t protocol;
     bool uses_report_id;
+    bool descriptor_invalid; // Report-protocol input must not use a rejected layout.
 };
 
 typedef struct {
@@ -191,6 +196,8 @@ typedef struct {
 
     report_offset_map_t report_offsets[MAX_REPORTS_PER_IFACE];
     uint8_t num_report_offsets;
+    uint32_t input_elements;
+    bool invalid;
 
     /* as tag is 4 bits, there can be 16 different tags in global header type */
     item_t globals[16];

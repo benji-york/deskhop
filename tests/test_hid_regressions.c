@@ -175,21 +175,20 @@ static void parse_receiver(hid_interface_t *iface, uint8_t id, receiver_id_t rec
 }
 
 static void test_all_report_id_receivers(void) {
-    const uint8_t ids[] = {0, 23, 24, 255};
     const process_report_f expected[] = {
         NULL, process_mouse_report, process_keyboard_report,
         process_consumer_report, process_system_report
     };
-    for (unsigned i = 0; i < sizeof(ids); i++) {
+    for (unsigned i = 0; i < 256; i++) {
         for (receiver_id_t kind = REPORT_RECEIVER_MOUSE; kind <= REPORT_RECEIVER_SYSTEM; kind++) {
             reset();
-            uint8_t id = ids[i];
+            uint8_t id = (uint8_t)i;
             hid_interface_t *iface = &global_state.iface[0][0];
             parse_receiver(iface, id, kind);
             assert(iface->uses_report_id == (id != 0));
             assert(iface->report_handler[id] == kind);
             assert(report_receivers[iface->report_handler[id]] == expected[kind]);
-            assert(iface->report_handler[254] == REPORT_RECEIVER_NONE);
+            assert(iface->report_handler[(uint8_t)(id + 1)] == REPORT_RECEIVER_NONE);
 
             uint8_t report[9] = {0};
             unsigned offset = id != 0;
@@ -380,7 +379,32 @@ static void test_nkro_aggregate_threshold(void) {
     assert(iface.keyboards[0].nkro_bits == 48);
 }
 
+static void test_rejected_descriptor_cannot_fallback_to_keys(void) {
+    reset();
+    host_protocol = HID_ITF_PROTOCOL_KEYBOARD;
+    hid_interface_t *iface = &global_state.iface[0][0];
+    iface->protocol = HID_PROTOCOL_REPORT;
+    const uint8_t incomplete[] = {0x05,1,0x09,6,0xa1,1,0x05,7,0x19,0,0x29,0x65,
+                                  0x75,8,0x95,8,0x81,0}; /* no End Collection */
+    parse_report_descriptor(iface,incomplete,sizeof(incomplete));
+    assert(iface->descriptor_invalid);
+    const uint8_t report[] = {1,0,HID_KEY_A,0,0,0,0,0};
+    tuh_hid_report_received_cb(1,0,report,sizeof(report));
+    assert(activity_count==0 && keyboard_count==0 && receive_count==1);
+    /* The actual negotiated boot protocol remains an independent fixed layout. */
+    iface->protocol = HID_PROTOCOL_BOOT;
+    tuh_hid_report_received_cb(1,0,report,sizeof(report));
+    assert(activity_count==1 && keyboard_count==1 && receive_count==2);
+    reset(); host_protocol=HID_ITF_PROTOCOL_KEYBOARD;
+    iface=&global_state.iface[0][0]; iface->protocol=HID_PROTOCOL_REPORT;
+    parse_report_descriptor(iface,NULL,0);
+    assert(iface->descriptor_invalid);
+    tuh_hid_report_received_cb(1,0,report,sizeof(report));
+    assert(activity_count==0 && keyboard_count==0 && receive_count==1);
+}
+
 int main(void) {
+    test_rejected_descriptor_cannot_fallback_to_keys();
     test_carry_last_usage();
     test_empty_and_oversized_usage_lists();
     test_all_report_id_receivers();

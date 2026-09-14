@@ -1,0 +1,66 @@
+{
+  "package": "rp2040js",
+  "version": "1.3.4",
+  "armInstructions": 2,
+  "r0": 43,
+  "coreInstances": [
+    "core"
+  ],
+  "cpuid": 0,
+  "multicoreFifo": {
+    "before": 4294967295,
+    "after": 4294967295,
+    "read": 4294967295
+  },
+  "pioBlocks": 2,
+  "uartBlocks": 2,
+  "usbControllerPresent": true,
+  "completeDeskHopEligible": false,
+  "warnings": [
+    "Read from invalid SIO address: 50",
+    "Write to invalid SIO address: 54, value=12345678",
+    "Read from invalid SIO address: 50",
+    "Read from invalid SIO address: 58"
+  ],
+  "pairedUart": {
+    "instances": 2,
+    "cpuCountPerInstance": [
+      1,
+      1
+    ],
+    "armInstructionsPerInstance": 4,
+    "receivedInArmRegisterR2": [
+      66,
+      65
+    ],
+    "idealLinkBaud": 3686400,
+    "wireByteNs": 2713,
+    "chosenPropagationNs": 1000,
+    "trace": [
+      {
+        "at_ns": 48,
+        "event": "tx",
+        "from": 0,
+        "byte": 65
+      },
+      {
+        "at_ns": 88,
+        "event": "tx",
+        "from": 1,
+        "byte": 66
+      },
+      {
+        "at_ns": 3761,
+        "event": "rx",
+        "to": 1,
+        "byte": 65
+      },
+      {
+        "at_ns": 3801,
+        "event": "rx",
+        "to": 0,
+        "byte": 66
+      }
+    ]
+  }
+}

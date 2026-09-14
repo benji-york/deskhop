@@ -1,0 +1,49 @@
+name: Deep firmware tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deep:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Select matching LLVM compiler and coverage tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+      - name: Select Xcode LLVM tools
+        if: runner.os == 'macOS'
+        run: dirname "$(xcrun --find clang)" >> "$GITHUB_PATH"
+      - name: Scenarios, interleavings, generated inputs and mutations
+        run: python3 tests/run.py deep
+      - name: Source coverage
+        run: python3 tests/coverage.py
+      - name: Retain evidence and replay files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-test-evidence-${{ matrix.os }}
+          path: |
+            build/tests/results*.json
+            build/tests/last-hid-input.hex
+            build/tests/failures/
+            build/tests/model-traces/
+            build/tests/mutation-traces/
+            build/tests/coverage/

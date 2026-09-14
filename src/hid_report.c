@@ -13,41 +13,20 @@
 
 /* Given a value struct with size and offset in bits, find and return a value from the HID report */
 int32_t get_report_value(uint8_t *report, int len, report_val_t *val) {
-    /* Calculate the bit offset within the byte */
-    uint16_t offset_in_bits = val->offset % 8;
-
-    /* Calculate the remaining bits in the first byte */
-    uint16_t remaining_bits = 8 - offset_in_bits;
-
-    /* Calculate the byte offset in the array */
-    uint16_t byte_offset = val->offset >> 3;
-
-    if (byte_offset >= len)
+    if (!report || !val || len <= 0 || val->size == 0 || val->size > 32
+        || (uint32_t)val->offset + val->size > (uint64_t)(unsigned)len * 8)
         return 0;
-
-    /* Create a mask for the specified number of bits */
-    uint32_t mask = (1u << val->size) - 1;
-
-    /* Initialize the result value with the bits from the first byte */
-    int32_t result = report[byte_offset] >> offset_in_bits;
-
-    /* Move to the next byte and continue fetching bits until the desired length is reached */
-    while (val->size > remaining_bits && byte_offset < len) {
-        result |= report[++byte_offset] << remaining_bits;
-        remaining_bits += 8;
-    }
-
-    /* Apply the mask to retain only the desired number of bits */
-    result = result & mask;
-
-    /* Special case if our result is negative.
-       Check if the most significant bit of 'val' is set */
-    if (result & ((mask >> 1) + 1)) {
-        /* If it is set, sign-extend 'val' by filling the higher bits with 1s */
-        result |= (0xFFFFFFFFU << val->size);
-    }
-
-    return result;
+    unsigned shift = val->offset & 7;
+    unsigned first = val->offset >> 3;
+    unsigned count = (shift + val->size + 7) / 8;
+    uint64_t gathered = 0;
+    for (unsigned i = 0; i < count; i++)
+        gathered |= (uint64_t)report[first + i] << (8 * i);
+    uint32_t mask = UINT32_MAX >> (32 - val->size);
+    uint32_t result = (uint32_t)(gathered >> shift) & mask;
+    if (result & (UINT32_C(1) << (val->size - 1)))
+        result |= ~mask;
+    return (int32_t)result;
 }
 
 /* After processing the descriptor, assign the values so we can later use them to interpret reports */
@@ -316,6 +295,8 @@ int32_t extract_bit_variable(nkro_block_t *block, uint8_t *raw_report, int len, 
 }
 
 int32_t _extract_kbd_boot(uint8_t *raw_report, int len, hid_keyboard_report_t *report) {
+    if (!raw_report || len < KBD_REPORT_LENGTH)
+        return -1;
     uint8_t *src = raw_report;
 
     /* In case keyboard still uses report ID in this, just pick the last 8 bytes */
@@ -327,15 +308,25 @@ int32_t _extract_kbd_boot(uint8_t *raw_report, int len, hid_keyboard_report_t *r
 }
 
 int32_t _extract_kbd_other(uint8_t *raw_report, int len, hid_interface_t *iface, hid_keyboard_report_t *report) {
+    if (!raw_report || len <= iface->uses_report_id)
+        return -1;
     keyboard_t *kb = get_keyboard(iface, raw_report[0]);
     uint8_t *src = raw_report;
 
-    if (iface->uses_report_id)
+    if (iface->uses_report_id) {
         src++;
+        len--;
+    }
 
     if (kb->modifier.offset_idx >= len)
         return -1;
 
+    /* Check every represented key before changing output state. A short report
+     * is not an all-up event, and must not count as real keyboard activity. */
+    for (int i = 0; i < MAX_KEYS; i++) {
+        if (kb->key_array[i] && i >= len)
+            return -1;
+    }
     report->modifier = src[kb->modifier.offset_idx];
     for (int i=0, j=0; i < MAX_KEYS && j < KEYS_IN_USB_REPORT; i++) {
         if(kb->key_array[i])
@@ -346,6 +337,8 @@ int32_t _extract_kbd_other(uint8_t *raw_report, int len, hid_interface_t *iface,
 }
 
 int32_t _extract_kbd_nkro(uint8_t *raw_report, int len, hid_interface_t *iface, hid_keyboard_report_t *report) {
+    if (!raw_report || len <= iface->uses_report_id)
+        return -1;
     keyboard_t *kb = get_keyboard(iface, raw_report[0]);
     uint8_t *ptr = raw_report;
     int key_count = 0;
@@ -379,10 +372,11 @@ int32_t _extract_kbd_nkro(uint8_t *raw_report, int len, hid_interface_t *iface, 
 
 int32_t extract_kbd_data(
     uint8_t *raw_report, int len, uint8_t itf, hid_interface_t *iface, hid_keyboard_report_t *report) {
-    keyboard_t *keyboard = get_keyboard(iface, raw_report[0]);
-
     /* Clear the report to start fresh */
     memset(report, 0, KBD_REPORT_LENGTH);
+    if (!raw_report || len <= iface->uses_report_id)
+        return -1;
+    keyboard_t *keyboard = get_keyboard(iface, raw_report[0]);
 
     /* If we're in boot protocol mode, then it's easy to decide. */
     if (iface->protocol == HID_PROTOCOL_BOOT)
