@@ -23,7 +23,9 @@ Firmware/config backups and readback logs are retained under `build/flashing`
 in the isolated worktree. The main checkout remains at its prior version;
 no QMK firmware or target-Mac settings were changed. Pico B is expected to pull
 v0.94 automatically, but its version has not been independently read back.
-Hardware behavior checks remain pending user feedback.
+Benji reported "Looks good" after the post-flash input/switching check. This is
+a basic hardware smoke result, not an independent readback of Pico B's version
+or an extended test of every mode.
 
 The user entered A's bootloader with Layer 3 A. macOS retained a stale busy
 `RPI-RP2` disk and failed to mount the new one, so the update used Raspberry Pi's

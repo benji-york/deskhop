@@ -16,9 +16,11 @@ previous image was v0.92/192 with a valid CRC `0x92f56c36`.
 
 Pico A (flash ID `E6654854574C3E30`) rebooted and re-enumerated as `DeskHop Switch`
 at the same USB location. Pico B's automatic update is not independently
-version-verified; functional checks are pending user feedback. Backups and
-load/readback logs are under `build/flashing`. No push, main-branch merge, QMK
-flash or target-Mac configuration change was performed.
+version-verified. Benji subsequently reported "Looks good" after the post-flash
+input/switching check; this records a basic hardware smoke result, not extended
+validation of every mode. Backups and load/readback logs are under
+`build/flashing`. No main-branch merge, QMK flash or target-Mac configuration
+change was performed.
 
 ## Completed runs
 
@@ -86,4 +88,4 @@ integration. Real macOS/Karabiner/Zoom/idle behavior, PIO USB timing, electrical
 behavior, and brownout/ROM startup require further evidence.
 
 Linux/macOS CI is configured, including matching LLVM tools and replay artifact
-retention. The branch has not been published, so no remote CI success is claimed.
+retention. This record reports local validation; it does not claim remote CI success.
