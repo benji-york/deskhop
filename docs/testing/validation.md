@@ -3,8 +3,22 @@
 Date: 2026-09-14. Branch: `codex/hardware-free-test-framework`, based on local
 `d42c930` (v0.92). The candidate is v0.94 with configuration format 10, following
 the v0.93 test framework at `fdc0f48`. All runs
-below used the isolated worktree. Nothing was flashed, pushed or merged to main;
+below used the isolated worktree. At validation time nothing was flashed, pushed or merged to main;
 the Sofle/QMK checkout and target Macs were not changed.
+
+## Deployment follow-up
+
+On the user's subsequent request, Pico A was flashed on 2026-09-14 at 18:41 UTC.
+Raspberry Pi picotool v2.3.1 loaded and verified the exact UF2 documented below,
+then an independent 262,144-byte readback matched `deskhop.bin` byte-for-byte.
+The 4 KiB configuration sector matched its pre-flash backup unchanged. The
+previous image was v0.92/192 with a valid CRC `0x92f56c36`.
+
+Pico A (flash ID `E6654854574C3E30`) rebooted and re-enumerated as `DeskHop Switch`
+at the same USB location. Pico B's automatic update is not independently
+version-verified; functional checks are pending user feedback. Backups and
+load/readback logs are under `build/flashing`. No push, main-branch merge, QMK
+flash or target-Mac configuration change was performed.
 
 ## Completed runs
 

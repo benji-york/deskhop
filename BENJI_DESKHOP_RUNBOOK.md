@@ -8,12 +8,37 @@ README.
 
 Snapshot: 2026-09-14
 
-## Hardware-free validation framework (v0.93 candidate)
+## Current deployment: v0.94 regression fixes
+
+On 2026-09-14 at 18:41 UTC, Pico A was flashed from commit `6ddc1e1` on
+`codex/hardware-free-test-framework`, using
+`build/arm-validation/deskhop.uf2` in this task's worktree. Its SHA-256 is
+`8e1471c435f38feebf1e4f9bb48e1eb9e07cc9fff4e807fbd748ee183e3be507`.
+All 262,144 firmware bytes were read back and matched the validated v0.94 binary;
+all 4,096 saved-configuration bytes were unchanged. Pico A then rebooted and
+re-enumerated as `DeskHop Switch`, serial `E6654854574C3E30`.
+
+The previous image was independently read as v0.92 (192), CRC `0x92f56c36`.
+Firmware/config backups and readback logs are retained under `build/flashing`
+in the isolated worktree. The main checkout remains at its prior version;
+no QMK firmware or target-Mac settings were changed. Pico B is expected to pull
+v0.94 automatically, but its version has not been independently read back.
+Hardware behavior checks remain pending user feedback.
+
+The user entered A's bootloader with Layer 3 A. macOS retained a stale busy
+`RPI-RP2` disk and failed to mount the new one, so the update used Raspberry Pi's
+official picotool v2.3.1 via direct USB. `picotool --ser` selected the flash ID
+`E6654854574C3E30`; the ROM USB serial `E0C9125B0D9B` does not select this device.
+The tool was unpacked temporarily, without a system installation.
+
+## Hardware-free validation framework (v0.94)
 
 The `codex/hardware-free-test-framework` branch adds the executable framework
-in [docs/testing/README.md](docs/testing/README.md). It builds a v0.93 candidate
-with configuration format 10; this candidate has not been flashed. The deployed
-v0.92/main snapshot below remains the hardware record.
+in [docs/testing/README.md](docs/testing/README.md). It builds v0.94 with
+configuration format 10. Fast, deep, six-layer coverage and ARM validation all
+passed before the Pico A deployment above. The v0.92 notes below retain the
+previous main-branch/hardware snapshot; the deployment note above supersedes
+their version status.
 
 Run `python3 tests/run.py fast` before ordinary changes, `python3 tests/run.py deep`
 for generated workloads, bounded core orders and source mutations, and
@@ -28,11 +53,12 @@ execute the real TinyUSB device/host stacks and production storage/update code.
 An executable two-emulator UART experiment confirms that topology is feasible,
 but current emulator peripheral/core limitations prevent full firmware boot.
 
-The new tests also expose unresolved button aggregation, lost selection-message
-convergence and arbitrary update power-cut recovery gaps. A passing software tier
-does not establish macOS/Karabiner behavior or physical PIO USB timing. The
-v0.93 candidate's production changes are bounded HID/input hardening found by
-these tests; the deployed behavior and QMK checkout have not been changed.
+The new tests drove fixes for HID/input bounds, mouse-button aggregation and
+handoff/detach, lost selection-message recovery, and configuration save races.
+Both Picos need v0.94 for the full new protocol semantics. Arbitrary update
+power-cut recovery and multiple keyboard report collections remain limitations.
+A passing software tier does not establish macOS/Karabiner behavior or physical
+PIO USB timing. See the [validation record](docs/testing/validation.md).
 
 ## Source of truth
 
@@ -73,8 +99,8 @@ basic deployment smoke test, not an independent readback of both Pico versions.
 Extended v0.92 zoom assist, timed jitter, and coordinated reboot tests have not
 yet been recorded.
 
-The deployed/main snapshot builds v0.92 (the test-framework branch builds the
-v0.93 candidate described above). To reproduce hardware-verified v0.91,
+The main snapshot builds v0.92; Pico A now runs the test-framework branch's
+v0.94 described above. To reproduce hardware-verified v0.91,
 use commit `c1e9420` or its archived binary. For the older hardware-tested v0.90
 state, use commit `6d1cd12` or its archived binary.
 
@@ -104,7 +130,8 @@ This is deliberately not a software KVM:
   unpowered, cross-Pico input routing, coordinated reboot, and firmware
   propagation cannot work.
 
-Both Picos select output A after a reboot.
+Both Picos default to output A at a cold start. With v0.94 on both sides, a
+rebooted Pico can rejoin the surviving peer's selected output.
 
 ## Physical topology
 
@@ -217,16 +244,18 @@ state. The old Ctrl+Caps chord remains accepted only for transition compatibilit
 
 On every output change, the initiating Pico updates its state, restores LEDs,
 blocking-queues `OUTPUT_SELECT_MSG`, and clears keyboard state on its locally
-attached host. The receiving Pico adopts the selection without echoing it,
-clears its own locally attached host if connected, and then restores its LEDs.
-The paired handling therefore clears both hosts.
+attached host. In v0.94, versioned generation/origin tokens reject older
+selections; accepted changes are mirrored and periodically reconciled through
+the heartbeat. Duplicate synchronization does not repeatedly release held keys.
+Actual focus changes also release both mouse HID interfaces while retaining
+physical source button masks for subsequent input on the new host.
 
-The output-selection UART message uses a blocking queue so a momentarily full
-queue cannot leave the two Picos routing to different computers. The critical
-all-up report waits up to 100 ms for a keyboard queue slot. If it still cannot be
-enqueued—typically because a stalled endpoint has filled the queue—the board
-requests a watchdog reboot instead of silently dropping the release and risking
-a stuck key.
+The immediate output-selection message uses a blocking queue; periodic
+reconciliation repairs lost wire messages when both upgraded peers resume
+delivery. Critical keyboard and switch/detach mouse releases wait up to 100 ms
+for a queue slot. If one cannot be enqueued—typically because a stalled endpoint
+has filled the queue—the board requests a watchdog reboot instead of silently
+dropping that release.
 
 If Caps-like behavior remains after DeskHop is physically unplugged and clears
 only after restarting Karabiner, the bad state is in the Mac's virtual input
@@ -591,8 +620,10 @@ in [tests/hid_stubs/README.md](tests/hid_stubs/README.md); CI runs it after the
 six original suites. See [UPSTREAM_FULL_MERGE_NOTES.md](UPSTREAM_FULL_MERGE_NOTES.md)
 for its integration decisions, build results, and remaining hardware checks.
 
-There is not yet an in-repo native regression test for pointer-sync or remote
-non-motion transport; those changes were verified on the real hardware.
+The test-framework branch now adds paired production-code regression coverage
+for pointer-sync, remote non-motion transport, button ownership and handoff,
+selection reconciliation and other behaviors. See `tests/sim` and the detailed
+[coverage matrix](docs/testing/coverage.md).
 
 If configuration fields/UI change, update the generated web configuration and
 the embedded disk image as well as C source. CI runs `make` in `webconfig/`, then
