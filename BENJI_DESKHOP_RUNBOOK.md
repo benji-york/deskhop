@@ -8,7 +8,40 @@ README.
 
 Snapshot: 2026-09-14
 
-## Current deployment: v0.94 regression fixes
+## Current deployment: v0.95 first serial-console slice
+
+The current feature worktree contains v0.95 with a read-only USB
+serial console in normal and configuration modes. `help` and `status` report
+the connected board's identity, compiled version, metadata CRC captured at boot,
+random boot session, and uptime. Peer queries, history, and flash verification
+are later slices; this candidate explicitly reports them as unimplemented.
+The [incremental design and hardware checks](docs/diagnostics.md) record the
+agreed sequence, including both-board defaults and interleaved A/B histories.
+Pico A was flashed and rebooted on 2026-09-14 at 19:35 UTC using the frozen
+`build/flashing/deskhop-v0.95-console.uf2` artifact. Its SHA-256 is
+`c08d7237d442ef23465b2e7ab1ba7517152c02a19ca6089c801c464e55ff1cf5`.
+All 262,144 firmware bytes matched the independent readback; all 4,096 saved
+configuration bytes remained unchanged. Configuration format remains 10.
+
+macOS bound the new CDC function to its built-in AppleUSBACM driver and exposed
+`/dev/cu.usbmodem21203`. Read-only physical serial checks passed for fragmented
+help/status, stable identity, increasing uptime, a brief paused reader, and
+close/reopen discarding a partial command without changing the boot session.
+The standard `/usr/bin/screen` terminal also displayed help/status correctly;
+the same session was observed at 77 seconds uptime. The executing version was
+`0.95`, boot metadata CRC `237a0b65`, and physical UID `E6654854574C3E30`.
+See the [validation/deployment record](docs/testing/console-v095.md).
+
+Pico B's propagated version is not independently verified yet. Initially the
+trackball was completely dead on both outputs while typing worked. Unplugging
+and reconnecting only the trackball restored normal operation; Benji reported
+"Works great after replug." This suggests a peripheral re-enumeration issue,
+but its cause is not established. Repeat the check on the next update; the
+passing serial checks alone do not establish input correctness.
+The v0.94 entry below is retained
+as deployment history. The remote branch has not yet been updated for v0.95.
+
+## Previous deployment: v0.94 regression fixes
 
 On 2026-09-14 at 18:41 UTC, Pico A was flashed from commit `6ddc1e1` on
 `codex/hardware-free-test-framework`, using
@@ -126,8 +159,9 @@ This is deliberately not a software KVM:
 - Nothing needs to run on either computer for normal operation.
 - Clipboard and arbitrary data are never shared between computers.
 - The host-facing sides are galvanically isolated.
-- The only normal host-to-peripheral information DeskHop accepts is the standard
-  one-byte keyboard LED report.
+- Before v0.95, normal host input to DeskHop was the standard one-byte
+  keyboard LED report. v0.95 also accepts read-only serial
+  diagnostic commands; those commands do not control the keyboard or mouse.
 - Both computers normally need to power their respective Pico. If one side is
   unpowered, cross-Pico input routing, coordinated reboot, and firmware
   propagation cannot work.

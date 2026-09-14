@@ -156,22 +156,34 @@ void sim_unmount(uint8_t addr,uint8_t instance) { if (stopped) return; tuh_hid_u
 void sim_vendor(const uint8_t *data,uint16_t len) { if(stopped)return; GUARDED(tud_hid_set_report_cb(ITF_NUM_HID_VENDOR,REPORT_ID_VENDOR,HID_REPORT_TYPE_OUTPUT,data,len)); }
 void sim_led(uint8_t value) { if (stopped) return; tud_hid_set_report_cb(0,REPORT_ID_KEYBOARD,HID_REPORT_TYPE_OUTPUT,&value,1); }
 void sim_select(uint8_t output) { if (stopped) return; GUARDED(set_active_output(&global_state,output)); }
-/* Task IDs/frequencies are generated from production main.c at build time. */
+/* Task IDs, names, frequencies and core split come from production main.c.
+   This boundary leaves CDC disabled: the console task is a no-op here. Real
+   CDC/console transactions are exercised by the separate USB stack harness. */
 #include "task_tables.inc"
+int sim_task_count(void) { return (int)ARRAY_SIZE(sim_tasks); }
+int sim_task_core(int id) {
+    assert(id>=0 && id<sim_task_count());
+    return id>=SIM_CORE0_TASK_COUNT;
+}
+const char *sim_task_name(int id) {
+    assert(id>=0 && id<sim_task_count());
+    return sim_task_names[id];
+}
 void sim_task(int id) {
     assert(id>=0 && id<(int)ARRAY_SIZE(sim_tasks));
     if(stopped) return;
-    if(id>=6) global_state.core1_last_loop_pass=time_us_32();
+    if(sim_task_core(id)) global_state.core1_last_loop_pass=time_us_32();
     GUARDED(task_scheduler(&global_state,&sim_tasks[id]));
 }
 void sim_core_step(int core) {
     if (stopped) return;
     assert(core==0 || core==1);
-    int begin=core ? 6 : 0, end=core ? (int)ARRAY_SIZE(sim_tasks) : 6;
+    int begin=core ? SIM_CORE0_TASK_COUNT : 0;
+    int end=core ? (int)ARRAY_SIZE(sim_tasks) : SIM_CORE0_TASK_COUNT;
     if(core) global_state.core1_last_loop_pass=time_us_32();
     GUARDED(for(int id=begin;id<end;id++) task_scheduler(&global_state,&sim_tasks[id]));
 }
-uint64_t sim_frequency(int id) { return sim_tasks[id].frequency; }
+uint64_t sim_frequency(int id) { assert(id>=0 && id<sim_task_count()); return sim_tasks[id].frequency; }
 void sim_watchdog(void) {
     if(!stopped && (now_us-last_kick>=WATCHDOG_TIMEOUT*1000 || *(uint32_t *)(sim_ppb+0xed0c))) {
         stopped=true; emit(5,0,0,NULL,0);

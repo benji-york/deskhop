@@ -14,8 +14,10 @@ CTRL_SHIFT = 0x21
 COMMAND = 0x08
 Q, G, Z, F24 = 0x14, 0x0A, 0x1D, 0x73
 KEYBOARD_ID, ABS_MOUSE_ID, REL_MOUSE_ID = 1, 2, 5
-KBD_TASK, MOUSE_TASK, TX_TASK, RX_TASK = 2, 3, 5, 7
-BLINK_TASK, LED_TASK, SAVER_TASK, HEARTBEAT_TASK, ZOOM_TASK = 8, 9, 10, 12, 13
+KBD_TASK, MOUSE_TASK = 'process_kbd_queue_task', 'process_mouse_queue_task'
+TX_TASK, RX_TASK = 'process_uart_tx_task', 'packet_receiver_task'
+BLINK_TASK, LED_TASK = 'led_blinking_task', 'led_sync_task'
+SAVER_TASK, HEARTBEAT_TASK, ZOOM_TASK = 'screensaver_task', 'heartbeat_output_task', 'zoom_assist_task'
 
 
 def host_mouse(*, buttons=0, x=0, y=0, wheel=0, pan=0, relative=False):

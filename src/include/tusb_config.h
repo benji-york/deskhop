@@ -88,14 +88,13 @@
  *  Settings for the CDC (Communication Device Class) for serial communication.
  *==============================================================================*/
 
-#ifdef DH_DEBUG
+/* The production console does not enable debug printing or bootloader commands. */
+#ifndef DH_CONSOLE
+#define DH_CONSOLE 1
+#endif
 
-// Enable CDC class for debugging over serial.
+#if DH_CONSOLE || defined(DH_DEBUG)
 #define CFG_TUD_CDC           1
-
-// Use a custom debug printf function.
-#define CFG_TUSB_DEBUG_PRINTF dh_debug_printf
-extern int dh_debug_printf(const char *__restrict __format, ...);
 
 // Buffer sizes for CDC RX and TX.
 #define CFG_TUD_CDC_RX_BUFSIZE 64
@@ -108,6 +107,11 @@ extern int dh_debug_printf(const char *__restrict __format, ...);
 #else
 // Disable CDC class when not debugging.
 #define CFG_TUD_CDC 0
+#endif
+
+#ifdef DH_DEBUG
+#define CFG_TUSB_DEBUG_PRINTF dh_debug_printf
+extern int dh_debug_printf(const char *__restrict __format, ...);
 #endif
 
 /*==============================================================================

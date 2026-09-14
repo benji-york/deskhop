@@ -94,8 +94,8 @@ char const *string_desc_arr[] = {
     "DeskHop Helper",           // 4: Mouse Helper Interface
     "DeskHop Config",           // 5: Vendor Interface
     "DeskHop Disk",             // 6: Disk Interface
-#ifdef DH_DEBUG
-    "DeskHop Debug",            // 7: Debug Interface
+#if CFG_TUD_CDC
+    "DeskHop Console",          // 7: Serial Interface
 #endif
 };
 
@@ -108,7 +108,7 @@ enum {
     STRID_MOUSE,
     STRID_VENDOR,
     STRID_DISK,
-    STRID_DEBUG,
+    STRID_CDC,
 };
 
 static uint16_t _desc_str[32];
@@ -168,7 +168,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 #define EPNUM_MSC_OUT    0x04
 #define EPNUM_MSC_IN     0x84
 
-#ifndef DH_DEBUG
+#if !CFG_TUD_CDC
 
 #define ITF_NUM_TOTAL 2
 #define ITF_NUM_TOTAL_CONFIG 4
@@ -214,10 +214,10 @@ uint8_t const desc_configuration[] = {
                        EPNUM_HID_REL_M,
                        CFG_TUD_HID_EP_BUFSIZE,
                        1),
-#ifdef DH_DEBUG
+#if CFG_TUD_CDC
     // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
     TUD_CDC_DESCRIPTOR(
-        ITF_NUM_CDC, STRID_DEBUG, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+        ITF_NUM_CDC, STRID_CDC, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
 #endif
 };
 
@@ -255,10 +255,10 @@ uint8_t const desc_configuration_config[] = {
                        EPNUM_MSC_OUT,
                        EPNUM_MSC_IN,
                        64),
-#ifdef DH_DEBUG
+#if CFG_TUD_CDC
     // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
     TUD_CDC_DESCRIPTOR(
-        ITF_NUM_CDC_CONFIG, STRID_DEBUG, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+        ITF_NUM_CDC_CONFIG, STRID_CDC, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
 #endif
 };
 

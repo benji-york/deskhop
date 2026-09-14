@@ -6,6 +6,21 @@ from fixtures import attach,keyboard,mouse
 from run import replay, minimize
 
 def main():
+    with Simulation(background=False) as s:
+        # The new core0 entry must not silently shift manual core1 polls onto
+        # the wrong task or mark their callbacks as running on the wrong core.
+        for name,core in [('process_mouse_queue_task',0),('process_uart_tx_task',0),
+                          ('diagnostic_console_task',0),('usb_host_task',1),
+                          ('packet_receiver_task',1),('heartbeat_output_task',1)]:
+            task=s.task_id(0,name)
+            assert s.nodes[0].sim_task_name(task).decode('ascii')==name
+            assert s.nodes[0].sim_task_core(task)==core
+        s.do(0,'task','diagnostic_console_task')
+        assert s.steps[-1]['args']==['diagnostic_console_task']
+        assert not s.trace # CDC is disabled at this simulator boundary.
+        try:s.task_id(0,s.nodes[0].sim_task_count())
+        except ValueError:pass
+        else:raise AssertionError('invalid task index reached the C adapter')
     with Simulation() as s:
         attach(s)
         # Each image owns globals and static endpoint state independently.
@@ -53,5 +68,5 @@ def main():
     except AssertionError as e:assert str(e)==data['failure']
     else:raise AssertionError('minimized failure vanished')
     path.with_suffix('.min.json').write_text(json.dumps(small,indent=2)+'\n')
-    print(f'harness: isolated globals/reset, callback failures, bounded waits, exact replay, ddmin {len(data["steps"])} -> {len(small["steps"])} steps passed')
+    print(f'harness: named task/core mapping, isolated globals/reset, callback failures, bounded waits, exact replay, ddmin {len(data["steps"])} -> {len(small["steps"])} steps passed')
 if __name__=='__main__':main()

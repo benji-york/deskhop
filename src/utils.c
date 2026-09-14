@@ -377,7 +377,7 @@ bool validate_packet(uart_packet_t *packet) {
 /* ================================================== *
  * Debug functions
  * ================================================== */
-#ifdef DH_DEBUG
+#if defined(DH_DEBUG) && !DH_CONSOLE
 
 // Based on: https://github.com/raspberrypi/pico-sdk/blob/a1438dff1d38bd9c65dbd693f0e5db4b9ae91779/src/rp2_common/pico_stdio_usb/stdio_usb.c#L100-L130
 static void cdc_write_str(const char *str) {

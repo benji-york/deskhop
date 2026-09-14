@@ -30,9 +30,9 @@
 {.bLength         = sizeof(tusb_desc_device_t),\
   .bDescriptorType = TUSB_DESC_DEVICE,\
   .bcdUSB          = 0x0200,\
-  .bDeviceClass    = 0x00,\
-  .bDeviceSubClass = 0x00,\
-  .bDeviceProtocol = 0x00,\
+  .bDeviceClass    = CFG_TUD_CDC ? TUSB_CLASS_MISC : 0x00,\
+  .bDeviceSubClass = CFG_TUD_CDC ? MISC_SUBCLASS_COMMON : 0x00,\
+  .bDeviceProtocol = CFG_TUD_CDC ? MISC_PROTOCOL_IAD : 0x00,\
   .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,\
   .idVendor  = vid,\
   .idProduct = pid,\

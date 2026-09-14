@@ -14,6 +14,10 @@
  * ================================================== */
 
 #include "main.h"
+#include "console.h"
+#if DH_CONSOLE
+#include "pico/rand.h"
+#endif
 
 /* ================================================== *
  * Perform initial UART setup
@@ -237,6 +241,14 @@ void initial_setup(device_t *state) {
 
     /* Initialize UART queue */
     queue_init(&state->uart_tx_queue, sizeof(uart_packet_t), UART_QUEUE_LENGTH);
+
+#if DH_CONSOLE
+    /* Capture identity before any peer update can replace flash metadata.
+     * A random session distinguishes warm resets as well as power cycles. */
+    char board_id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
+    pico_get_unique_board_id_string(board_id, sizeof(board_id));
+    console_init(state->board_role, board_id, get_rand_64(), _firmware_metadata.checksum);
+#endif
 
     /* Initialize and configure TinyUSB Device */
     tud_init(BOARD_TUD_RHPORT);

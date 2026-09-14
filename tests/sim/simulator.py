@@ -32,7 +32,7 @@ class Simulation:
         self.rng=random.Random(seed); self.now=0; self.serial=itertools.count()
         self.events=[]; self.trace=[]; self.steps=[]; self.active=[]; self.error=None
         self.link=[{'delay':0,'drop':0,'xor':0,'truncate':0,'duplicate':False} for _ in range(2)]
-        self.pause_until={}; self.callbacks=[]; self.nodes=[]; self.schedule_count=0
+        self.pause_until={}; self.callbacks=[]; self.nodes=[]; self.task_ids=[]; self.schedule_count=0
         self.checkpoint_actions=[]
         self.tmp=tempfile.TemporaryDirectory(prefix='deskhop-sim-')
         library=pathlib.Path(library or ROOT/'build/tests/sim/node.so')
@@ -45,6 +45,8 @@ class Simulation:
                 'sim_set_time':([C.c_uint64],None),'sim_get':([C.c_int,C.c_int],C.c_int64),
                 'sim_set':([C.c_int,C.c_int,C.c_int64],None),'sim_task':([C.c_int],None),
                 'sim_core_step':([C.c_int],None),'sim_frequency':([C.c_int],C.c_uint64),'sim_rx_byte':([C.c_uint8],None),
+                'sim_task_count':([],C.c_int),'sim_task_core':([C.c_int],C.c_int),
+                'sim_task_name':([C.c_int],C.c_char_p),
                 'sim_host':([C.c_int,C.c_int],None),'sim_endpoint':([C.c_int,C.c_int,C.c_int],None),
                 'sim_mount':([C.c_uint8,C.c_uint8,C.c_uint8,C.c_void_p,C.c_uint16],None),
                 'sim_report':([C.c_uint8,C.c_uint8,C.c_void_p,C.c_uint16],None),
@@ -57,6 +59,8 @@ class Simulation:
                 f=getattr(lib,name); f.argtypes=args; f.restype=ret
             cb=CALLBACK(lambda kind,a,b,p,n,r=role:self._callback(r,kind,a,b,p,n))
             self.callbacks.append(cb); self.nodes.append(lib); lib.sim_init(role,cb)
+            self.task_ids.append({lib.sim_task_name(index).decode('ascii'): index
+                                  for index in range(lib.sim_task_count())})
         if background:
             for node in range(2):
                 for core in range(2): self._schedule(0,node,core,'core',[core])
@@ -135,8 +139,9 @@ class Simulation:
                 self.nodes[node].sim_core_step(core)
                 self._schedule(self.now+self.quantum,node,core,op,args)
             elif op=='task':
-                self.nodes[node].sim_task(args[0])
-                freq=self.nodes[node].sim_frequency(args[0]) or self.quantum
+                task=self.task_id(node,args[0])
+                self.nodes[node].sim_task(task)
+                freq=self.nodes[node].sim_frequency(task) or self.quantum
                 self._schedule(self.now+freq,node,core,op,args)
             elif op=='rx':
                 self.nodes[node].sim_rx_byte(args[0])
@@ -158,12 +163,19 @@ class Simulation:
                 and (report_id is None or x['b']==report_id)]
     def descriptor(self,node,type,index=0):
         out=C.create_string_buffer(1024); n=self.nodes[node].sim_descriptor(type,index,out);return out.raw[:n]
+    def task_id(self,node,task):
+        """Resolve a stable task name, or validate an image-local numeric index."""
+        if isinstance(task,str):return self.task_ids[node][task]
+        if not isinstance(task,int) or not 0<=task<self.nodes[node].sim_task_count():
+            raise ValueError(f'invalid task index: {task!r}')
+        return task
     def _invoke(self,node,op,args):
         lib=self.nodes[node]
         if op in ('report','mount','vendor'):
             raw=bytes.fromhex(args[-1]); data=C.create_string_buffer(raw)
             getattr(lib,'sim_'+op)(*args[:-1],data,len(raw))
         elif op=='set':lib.sim_set(FIELDS[args[0]],args[1],args[2])
+        elif op=='task':lib.sim_task(self.task_id(node,args[0]))
         elif op=='fault':self.link[node].update(args[0])
         elif op=='pause': self.pause_until[(node,args[0])]=self.now+args[1]
         elif op=='checkpoint':self.checkpoint_actions.append(tuple(args))
@@ -173,7 +185,7 @@ class Simulation:
     def do(self,node,op,*args,record=True):
         if record:self.steps.append({'node':node,'op':op,'args':list(args)})
         # Peripheral input and UART handling run on core1; host SET_REPORT on core0.
-        core=(0 if args[0]<6 else 1) if op=='task' else (0 if op in ('host','led','endpoint','vendor') else 1)
+        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor') else 1)
         self.active.append((node,core))
         try:self._invoke(node,op,list(args))
         finally:self.active.pop()

@@ -60,7 +60,7 @@ def scenario_mouse_asymmetric_capability(s):
     attach(s)
     # Only B has sent its heartbeat. A knows B supports explicit messages, but
     # B has not yet learned A's capabilities. This needs no corrupted packets.
-    s.do(1, 'task', 12)
+    s.do(1, 'task', 'heartbeat_output_task')
     pump(s)
     s.do(0, 'report', 1, 1, mouse(buttons=1))
     # B constructs its ordinary report before A's newly queued mirror arrives.

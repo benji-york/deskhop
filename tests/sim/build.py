@@ -6,16 +6,40 @@ SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'key
            'mouse', 'reboot_hotkey', 'screensaver_policy', 'zoom_tracker', 'zoom',
            'tasks', 'handlers', 'led', 'uart', 'usb', 'usb_descriptors', 'utils',
            'fw_update', 'config_migration', 'selection']
+
+def extract_tasks(main):
+    """Keep table order and core ownership from the supplied production image."""
+    tables = re.findall(r'static\s+task_t\s+tasks_core([01])\s*\[\s*\]\s*=\s*\{(.*?)^\s*\};',
+                        main, re.S | re.M)
+    assert len(tables) == 2 and {core for core, _ in tables} == {'0', '1'}, \
+        'expected one production task table for each core'
+    pattern = (r'\[(\d+)\]\s*=\s*\{\s*\.exec\s*=\s*&([a-zA-Z_]\w*)\s*,'
+               r'\s*\.frequency\s*=\s*([_A-Z0-9()]+)\s*\}')
+    per_core = []
+    for core, table in sorted(tables):
+        entries = re.findall(pattern, table)
+        assert entries and len(entries) == len(re.findall(r'\.exec\s*=', table)), \
+            f'unrecognized production task initializer on core {core}'
+        entries.sort(key=lambda entry: int(entry[0]))
+        assert [int(entry[0]) for entry in entries] == list(range(len(entries))), \
+            f'noncontiguous production task indices on core {core}'
+        per_core.append([(name, frequency) for _, name, frequency in entries])
+    names = [name for entries in per_core for name, _ in entries]
+    assert len(names) == len(set(names)), 'task names must be unique for named test scheduling'
+    return per_core
+
+
 def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=False):
     output = pathlib.Path(output).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
     main = (source_root/'src/main.c').read_text()
-    tables = re.findall(r'static task_t tasks_core[01]\[\] = \{(.*?)\n    \};', main, re.S)
-    pattern = r'\.exec = &([a-z_]+),\s*\.frequency = ([_A-Z0-9()]+)'
-    per_core = [re.findall(pattern, table) for table in tables]
-    assert [len(items) for items in per_core] == [6, 8], 'production core task grouping changed; update the native adapter'
+    per_core = extract_tasks(main)
     entries = [entry for items in per_core for entry in items]
-    assert len(entries) == 14, 'production task table changed; update simulator core mapping'
-    (output.parent/'task_tables.inc').write_text('static task_t sim_tasks[] = {\n'+''.join('{.exec=&%s,.frequency=%s},\n' % e for e in entries)+'};\n')
+    (output.parent/'task_tables.inc').write_text(
+        'enum { SIM_CORE0_TASK_COUNT = %d, SIM_CORE1_TASK_COUNT = %d };\n' % tuple(map(len, per_core))
+        + 'static task_t sim_tasks[] = {\n'
+        + ''.join('{.exec=&%s,.frequency=%s},\n' % e for e in entries) + '};\n'
+        + 'static const char *const sim_task_names[] = {\n'
+        + ''.join('"%s",\n' % name for name, _ in entries) + '};\n')
     flags = ['-std=c11', '-g', '-O1', '-fPIC', '-fno-common', '-Wall', '-Wextra', '-Werror',
              '-Wno-unused-parameter', '-Wno-sign-compare', '-Wno-pointer-to-int-cast',
              '-Wno-incompatible-function-pointer-types', '-Wno-deprecated-non-prototype']

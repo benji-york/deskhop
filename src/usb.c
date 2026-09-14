@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "console.h"
 #include "hid_report.h"
 
 _Static_assert(MAX_DEVICES <= CFG_TUH_DEVICE_MAX,
@@ -84,11 +85,19 @@ void tud_hid_set_report_cb(uint8_t instance,
 /* Invoked when device is mounted */
 void tud_mount_cb(void) {
     global_state.tud_connected = true;
+#if DH_CONSOLE && CFG_TUD_CDC
+    /* A USB bus reset need not call unmount, and re-enumeration can finish
+     * before the console's next poll. Never retain the old partial command. */
+    console_disconnect();
+#endif
 }
 
 /* Invoked when device is unmounted */
 void tud_umount_cb(void) {
     global_state.tud_connected = false;
+#if DH_CONSOLE && CFG_TUD_CDC
+    console_disconnect();
+#endif
 }
 
 #ifdef DH_DEBUG_CDC_FLASH

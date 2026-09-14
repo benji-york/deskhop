@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "console.h"
 
 _Static_assert(ACTIVITY_OUTPUT_COUNT == NUM_SCREENS,
                "activity synchronization must cover every DeskHop output");
@@ -49,6 +50,13 @@ void kick_watchdog_task(device_t *state) {
 
 void usb_device_task(device_t *state) {
     tud_task();
+}
+
+void diagnostic_console_task(device_t *state) {
+    (void)state;
+#if DH_CONSOLE && CFG_TUD_CDC
+    console_task(time_us_64());
+#endif
 }
 
 void usb_host_task(device_t *state) {

@@ -18,7 +18,7 @@ def selection_frame(output, counter, origin, *, joined=True, joining=False, pend
 
 def inject(s, node, wire):
     s.do(node, 'raw', wire)
-    s.do(node, 'task', 7)  # Actual UART receiver/parser/handler.
+    s.do(node, 'task', 'packet_receiver_task')  # Actual UART receiver/parser/handler.
 
 
 def isolated_start(s):

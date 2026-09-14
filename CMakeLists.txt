@@ -3,11 +3,15 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 94)
+set(VERSION_MINOR 95)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
 option(DH_DEBUG_CDC_FLASH "Enable CDC command to trigger bootloader mode" OFF)
+option(DH_CONSOLE "Enable the read-only USB diagnostic console" ON)
+if (DH_DEBUG_CDC_FLASH AND (DH_CONSOLE OR NOT DH_DEBUG))
+  message(FATAL_ERROR "DH_DEBUG_CDC_FLASH requires DH_DEBUG=ON and DH_CONSOLE=OFF")
+endif()
 
 ## Hardware Configuration
 set(DP_PIN_DEFAULT 14 CACHE STRING "Default USB D+ Pin Number")
@@ -54,6 +58,7 @@ target_include_directories(Pico-PIO-USB PRIVATE ${PICO_PIO_USB_DIR})
 ## Source Files
 set(COMMON_SOURCES
   ${SRC_DIR}/usb_descriptors.c
+  ${SRC_DIR}/console.c
   ${SRC_DIR}/defaults.c
   ${SRC_DIR}/constants.c
   ${SRC_DIR}/protocol.c
@@ -100,6 +105,7 @@ set(COMMON_LINK_LIBRARIES
   tinyusb_host
   pico_multicore
   pico_unique_id
+  pico_rand
   Pico-PIO-USB
 )
 set(binary deskhop)
@@ -119,6 +125,7 @@ target_compile_definitions(${binary}
     PRIVATE
     VERSION_MAJOR=${VERSION_MAJOR}
     VERSION_MINOR=${VERSION_MINOR}
+    DH_CONSOLE=$<BOOL:${DH_CONSOLE}>
     PIO_USB_USE_TINYUSB=${PIO_USE_TINYUSB}
     PIO_USB_DP_PIN_DEFAULT=${DP_PIN_DEFAULT}
     __disk_file_path__="${DISK_BIN}"

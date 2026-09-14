@@ -6,6 +6,14 @@ for its normal tiers. Start with the [architecture decision](architecture.md)
 and [coverage/fidelity matrix](coverage.md). The optional emulator experiment
 requires a pinned npm download; ordinary tests use checked-in source only.
 The [validation record](validation.md) records the completed local runs and ARM artifact.
+The [diagnostics walking skeleton](../diagnostics.md) describes the v0.95 serial
+console candidate and its staged hardware checks; the
+[v0.95 validation record](console-v095.md) identifies the tested artifact.
+The device-stack harness now
+also executes real CDC control/bulk transfers and the production console,
+including bounded work, malformed command recovery, and HID progress while a
+serial reader is stalled. The paired adapter derives task names and core
+ownership from each firmware's tables, including older baseline builds.
 
 ## Commands
 
