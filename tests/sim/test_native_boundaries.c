@@ -7,6 +7,8 @@ void sim_destroy(void);
 void sim_host(int,int);
 void sim_set_time(uint64_t);
 void sim_task(int);
+void sim_mount(uint8_t,uint8_t,uint8_t,const uint8_t *,uint16_t);
+void sim_unmount(uint8_t,uint8_t);
 float calculate_mouse_acceleration_factor(int32_t,int32_t);
 int32_t move_and_keep_on_screen(int,int);
 static unsigned outputs;
@@ -98,6 +100,145 @@ static void vendor_diagnostics_cannot_enter_core1(void) {
         assert(validate_packet(&allowed));
     }
 }
+
+#if SIM_HAS_DIAGNOSTIC_HISTORY
+/* Unlike the isolated HID/host executables, this uses the actual history
+ * store, SDK-lock bridge, and production event hooks with CDC disabled. */
+static uint64_t history_next(void) {
+    return diagnostic_history_window(HISTORY_CAPACITY).end_seq;
+}
+
+static void expect_history(uint64_t seq, history_type_t type,
+                           uint8_t a, uint8_t b, uint32_t value) {
+    history_event_t event;
+    assert(diagnostic_history_read(seq, &event));
+    assert(event.seq == seq && event.time_us == time_us_64());
+    assert(event.type == type && event.a == a && event.b == b);
+    assert(event.value == value && event.reserved == 0);
+}
+
+static void history_hooks(void) {
+    sim_destroy();
+    sim_init(OUTPUT_A, observe);
+    history_window_t initial = diagnostic_history_window(HISTORY_CAPACITY);
+    assert(initial.count == 1 && initial.first_seq == 1 && initial.end_seq == 2);
+    expect_history(1, HISTORY_BOOT, OUTPUT_A, 0, 98);
+    sim_set_time(10);
+
+    /* The hotkey mutates active_output before set_active_output sees it. */
+    uint64_t seq = history_next();
+    output_toggle_hotkey_handler(&global_state, NULL);
+    assert(global_state.active_output == OUTPUT_B && history_next() == seq + 1);
+    expect_history(seq, HISTORY_OUTPUT_LOCAL, OUTPUT_A, OUTPUT_B, 0);
+    seq = history_next();
+    set_active_output(&global_state, OUTPUT_B);
+    assert(history_next() == seq); /* No fabricated change for same output. */
+
+    selection_state_t incoming = global_state.selection;
+    selection_request(&incoming, OUTPUT_A, OUTPUT_B);
+    uart_packet_t selected = {.type = OUTPUT_SELECT_SYNC_MSG};
+    selection_encode(&incoming, selected.data);
+    selected.checksum = calc_checksum(selected.data, PACKET_DATA_LENGTH);
+    process_packet(&selected, &global_state);
+    assert(global_state.active_output == OUTPUT_A && history_next() == seq + 1);
+    expect_history(seq, HISTORY_OUTPUT_PEER, OUTPUT_B, OUTPUT_A, 0);
+    seq = history_next();
+    process_packet(&selected, &global_state);
+    assert(history_next() == seq); /* Repeated peer reconciliation is quiet. */
+
+    sim_host(0, 0);
+    expect_history(seq++, HISTORY_USB_UNMOUNT, 0, 0, 0);
+    sim_host(1, 0);
+    expect_history(seq++, HISTORY_USB_MOUNT, 0, 0, 0);
+    assert(history_next() == seq);
+
+    global_state.config.enforce_ports = false;
+    sim_mount(1, 0, HID_ITF_PROTOCOL_MOUSE, descriptor, sizeof(descriptor));
+    expect_history(seq++, HISTORY_HID_MOUNT, 1, 0, HID_ITF_PROTOCOL_MOUSE | 512u);
+    sim_unmount(1, 0);
+    expect_history(seq++, HISTORY_HID_UNMOUNT, 1, 0, HID_ITF_PROTOCOL_MOUSE | 512u);
+    assert(history_next() == seq);
+
+    /* Enumeration is observable even if enforced-port policy declines input
+       from this interface. It must not claim that reports were accepted. */
+    global_state.config.enforce_ports = true;
+    sim_mount(3, 1, HID_ITF_PROTOCOL_MOUSE, descriptor, sizeof(descriptor));
+    expect_history(seq++, HISTORY_HID_MOUNT, 3, 1, HID_ITF_PROTOCOL_MOUSE | 512u);
+    assert(!global_state.mouse_connected && history_next() == seq);
+    sim_unmount(3, 1);
+    expect_history(seq++, HISTORY_HID_UNMOUNT, 3, 1, HID_ITF_PROTOCOL_MOUSE | 512u);
+    global_state.config.enforce_ports = false;
+
+    /* A rejected report descriptor is recorded once at enumeration, rather
+       than once per subsequently ignored report. */
+    const uint8_t truncated[] = {0x75};
+    sim_mount(2, 3, HID_ITF_PROTOCOL_NONE, truncated, sizeof(truncated));
+    expect_history(seq++, HISTORY_HID_MOUNT, 2, 3, HID_ITF_PROTOCOL_NONE);
+    expect_history(seq++, HISTORY_DESCRIPTOR_REJECTED, 2, 3, 0);
+    assert(global_state.iface[1][3].descriptor_invalid);
+    const uint8_t report[] = {0, 1, 0, 0, 0};
+    tuh_hid_report_received_cb(2, 3, report, sizeof(report));
+    assert(history_next() == seq);
+    tuh_hid_mount_cb(0, 0, descriptor, sizeof(descriptor));
+    tuh_hid_umount_cb(MAX_DEVICES + 1, 0);
+    assert(history_next() == seq); /* Invalid addresses never become events. */
+
+    uart_packet_t bad = {.type = MOUSE_REPORT_MSG, .checksum = 1};
+    process_packet(&bad, &global_state);
+    expect_history(seq++, HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, MOUSE_REPORT_MSG);
+
+    /* The shared packet dispatcher also validates USB configuration packets.
+       A checksum error must not falsely attribute this traffic to UART. */
+    global_state.config_mode_active = true;
+    const config_t saved_config = global_state.config;
+    const unsigned hid_before = queue_get_level(&global_state.hid_queue_out);
+    uart_packet_t config_read = {.type = GET_VAL_MSG, .data = {83}};
+    uint8_t raw[RAW_PACKET_LENGTH];
+    write_raw_packet(raw, &config_read);
+    raw[RAW_PACKET_LENGTH - 1] ^= 1;
+    tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                          HID_REPORT_TYPE_OUTPUT, raw, sizeof(raw));
+    expect_history(seq++, HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, GET_VAL_MSG);
+    assert(history_next() == seq);
+    assert(queue_get_level(&global_state.hid_queue_out) == hid_before);
+    assert(memcmp(&global_state.config, &saved_config, sizeof(saved_config)) == 0);
+    raw[RAW_PACKET_LENGTH - 1] ^= 1;
+    tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                          HID_REPORT_TYPE_OUTPUT, raw, sizeof(raw));
+    assert(queue_get_level(&global_state.hid_queue_out) == hid_before + 1);
+    assert(history_next() == seq); /* Valid read reaches the same USB path. */
+    global_state.config_mode_active = false;
+
+    uart_packet_t filler = {.type = FLASH_LED_MSG};
+    while (queue_try_add(&global_state.uart_tx_queue, &filler)) { }
+    const uint8_t enabled = ENABLE;
+    assert(!queue_packet_try(&enabled, FLASH_LED_MSG, sizeof(enabled)));
+    assert(history_next() == seq); /* A retryable refusal is not a drop. */
+    queue_packet(&enabled, FLASH_LED_MSG, sizeof(enabled));
+    expect_history(seq++, HISTORY_UART_DROPPED, 0, 0, FLASH_LED_MSG);
+    assert(history_next() == seq);
+
+    /* Snapshot bounds stay fixed when subsequent real error hooks overwrite
+       old slots; the console can identify lost rows without stale copies. */
+    const history_window_t before = diagnostic_history_window(HISTORY_CAPACITY);
+    for (unsigned i = 0; i < HISTORY_CAPACITY; ++i)
+        process_packet(&bad, &global_state);
+    const history_window_t after = diagnostic_history_window(HISTORY_CAPACITY);
+    assert(before.end_seq == seq && after.end_seq == seq + HISTORY_CAPACITY);
+    assert(after.count == HISTORY_CAPACITY && after.oldest_seq == seq);
+    assert(after.overwritten == before.end_seq - 1);
+    history_event_t retained = {.seq = UINT64_C(0xfeedface)};
+    assert(!diagnostic_history_read(before.first_seq, &retained));
+    assert(retained.seq == UINT64_C(0xfeedface));
+    expect_history(after.first_seq, HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, MOUSE_REPORT_MSG);
+
+    diagnostic_history_init();
+    assert(diagnostic_history_window(HISTORY_CAPACITY).count == 0);
+    diagnostic_history_record(HISTORY_BOOT, OUTPUT_A, 0, 98);
+    expect_history(1, HISTORY_BOOT, OUTPUT_A, 0, 98);
+    puts("history hooks: real store/bridge, output changes, USB/HID callbacks, ignored-port enumeration, descriptor rejection, USB/UART checksum errors, retry/drop distinction, overwrite and reset passed");
+}
+#endif
 int main(void) {
     sim_init(0,observe);sim_host(1,0);sim_set_time(1);
     global_state.config.enable_acceleration=0;
@@ -114,6 +255,9 @@ int main(void) {
     sim_task(3);assert(outputs==1);
     wide_motion();
     vendor_diagnostics_cannot_enter_core1();
+#if SIM_HAS_DIAGNOSTIC_HISTORY
+    history_hooks();
+#endif
     sim_destroy();
     puts("native boundaries: all 256 mouse IDs, exact truncations, 3-byte boot mouse, invalid output indices, USB diagnostic core ownership passed");
 }

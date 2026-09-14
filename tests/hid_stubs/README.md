@@ -14,10 +14,14 @@ cc -std=c11 -Wall -Wextra -Werror \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
   -Itests/hid_stubs -Isrc/include -Ipico-sdk/lib/tinyusb/src \
   tests/test_hid_regressions.c src/hid_parser.c src/hid_report.c \
-  src/keyboard.c src/usb.c src/reboot_hotkey.c \
+  src/keyboard.c src/usb.c src/reboot_hotkey.c tests/history_stub.c \
   -o /tmp/deskhop-hid-regressions-test
 /tmp/deskhop-hid-regressions-test
 ```
+
+The history recorder is an explicit no-op boundary in this isolated input
+suite. Actual history capture is covered by the simulator's native boundary
+suite; the console tests use the production ring with a native bridge.
 
 The two warning exceptions accommodate existing production callbacks and loops.
 Sanitizer failures terminate the suite. Coverage includes:

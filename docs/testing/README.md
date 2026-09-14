@@ -14,6 +14,16 @@ serial check confirmed both boards executing v0.97 in six successful peer
 queries; Benji confirmed the input check passed with no replug needed. A's firmware was
 independently read back, while B's result establishes its executing identity
 and boot metadata, not flash integrity.
+The [v0.98 local-history deployment](history-v098.md) adds a fixed RAM ring,
+production event-hook checks, and streamed console history with explicit gaps.
+Its disk-free A flash passed full firmware readback and unchanged-settings
+checks. Seven serial status snapshots confirmed both executing builds; four
+history responses preserved the same six A-tagged records across reconnect.
+Standard macOS `screen` also passed help/history/status. Benji subsequently
+confirmed the requested input/switch/history check. B's history was not retrieved;
+its flash was not independently read back. Native coverage now includes the peer/history modules
+in their relevant layers and keeps the isolated history stub outside the
+production-source denominator.
 The device-stack harness now
 also executes real CDC control/bulk transfers and the production console,
 including bounded work, malformed command recovery, and HID progress while a

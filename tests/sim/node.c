@@ -138,6 +138,12 @@ void sim_init(uint8_t role, event_cb_t cb) {
     queue_init(&global_state.uart_tx_queue,sizeof(uart_packet_t),UART_QUEUE_LENGTH);
     queue_init(&global_state.hid_queue_out,sizeof(hid_generic_pkt_t),HID_QUEUE_LENGTH);
     firmware_sync_init(); rx_hw.transfer_count=DMA_RX_BUFFER_SIZE;
+#if SIM_HAS_DIAGNOSTIC_HISTORY
+    /* The store and its cross-core bridge remain production code even when
+       this test boundary disables CDC. Initialize before any USB callback. */
+    diagnostic_history_init();
+    diagnostic_history_record(HISTORY_BOOT, global_state.active_output, 0, 98);
+#endif
 #if SIM_HAS_DIAGNOSTIC_PEER
     peer_status_snapshot_t identity = {
         .role = role, .major = 0, .minor = 97, .boot_session = role + 1,

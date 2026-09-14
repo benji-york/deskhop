@@ -9,7 +9,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 TINYUSB = ROOT / "pico-sdk/lib/tinyusb/src"
-SOURCES = [ROOT / "tests/usb_host/test_usb_host.c"]
+SOURCES = [ROOT / "tests/usb_host/test_usb_host.c", ROOT / "tests/history_stub.c"]
 SOURCES += [ROOT / "src" / source for source in [
     "usb.c", "hid_parser.c", "hid_report.c", "keyboard.c", "reboot_hotkey.c"]]
 SOURCES += [TINYUSB / source for source in [

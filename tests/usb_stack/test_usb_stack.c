@@ -3,6 +3,7 @@
 #include "device/dcd.h"
 #include "device/usbd_pvt.h"
 #include "peer_status.h"
+#include "diagnostic_history.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -24,6 +25,20 @@ static char cdc_bytes[16384];
 static size_t cdc_count;
 static uint64_t cdc_submitted_bytes, console_now_us;
 static bool no_ep0_out_payload;
+/* Exercise the production ring; only the Pico lock/time adapter is replaced. */
+static history_store_t history_store;
+static unsigned history_reads;
+void diagnostic_history_init(void) { history_store_init(&history_store); }
+void diagnostic_history_record(history_type_t type, uint8_t a, uint8_t b, uint32_t value) {
+    history_store_record(&history_store, console_now_us, type, a, b, value);
+}
+history_window_t diagnostic_history_window(unsigned limit) {
+    return history_store_window(&history_store, limit);
+}
+bool diagnostic_history_read(uint64_t seq, history_event_t *event) {
+    ++history_reads;
+    return history_store_read(&history_store, seq, event);
+}
 /* The real CDC/console stack crosses the same nonblocking request/result
  * boundary as core 0. UART and core 1 are tested by the paired simulator. */
 static bool peer_manual, peer_accept = true, peer_pending, peer_result_ready;
@@ -323,7 +338,9 @@ static void console_tick(void) {
     uint32_t rx_before = tud_cdc_available();
     int64_t space_before = tud_cdc_write_available();
     uint64_t submitted_before = cdc_submitted_bytes;
+    unsigned reads_before = history_reads;
     console_task(console_now_us);
+    CHECK(history_reads - reads_before <= 1);
     if (connected) {
         uint32_t rx_after = tud_cdc_available();
         CHECK(rx_after <= rx_before && rx_before - rx_after <= 32);
@@ -343,7 +360,7 @@ static void console_pump(unsigned ticks) {
 }
 
 static void console_drain(void) {
-    console_pump(128);
+    console_pump(512);
     CHECK(!endpoint(0x86)->pending && tud_cdc_available() == 0);
 }
 
@@ -392,7 +409,7 @@ static void cdc_status_fields(void) {
     CHECK(occurrences("BEGIN status") == 1 && occurrences("END status") == 1);
     CHECK(strstr(cdc_bytes, "board=A") != NULL);
     CHECK(strstr(cdc_bytes, "board_id=0123456789abcdef") != NULL);
-    CHECK(strstr(cdc_bytes, "build=0.97") != NULL);
+    CHECK(strstr(cdc_bytes, "build=0.98") != NULL);
     CHECK(strstr(cdc_bytes, "image_crc_at_boot=89abcdef") != NULL);
     CHECK(strstr(cdc_bytes, "boot_session=1122334455667788") != NULL);
     CHECK(strstr(cdc_bytes, "board=B\r\n") != NULL);
@@ -414,6 +431,9 @@ static void cdc_command_stream(void) {
     CHECK(occurrences("deskhop> ") == 1);
     CHECK(strstr(cdc_bytes, "help") && strstr(cdc_bytes, "status"));
     CHECK(strstr(cdc_bytes, "both boards") != NULL);
+    CHECK(strstr(cdc_bytes, "history [count]") != NULL);
+    CHECK(strstr(cdc_bytes, "History is local in this release") != NULL);
+    CHECK(occurrences("END help") == 1); /* The complete help fits the fixed TX buffer. */
 
     cdc_capture_clear();
     console_now_us = UINT64_C(1234567000);
@@ -477,6 +497,216 @@ static void cdc_command_stream(void) {
     CHECK(occurrences("ERROR") == 1 && occurrences("BEGIN status") == 0);
     cdc_send("status\n");
     cdc_status_fields();
+}
+
+static void history_fill(unsigned count) {
+    diagnostic_history_init();
+    for (unsigned i = 0; i < count; ++i) {
+        console_now_us = (uint64_t)(i + 1) * 1000;
+        diagnostic_history_record(HISTORY_OUTPUT_LOCAL, i & 1, (i + 1) & 1, 0);
+    }
+}
+
+static void history_frame(unsigned returned, uint64_t overwritten) {
+    char expected[96];
+    CHECK(occurrences("BEGIN history") == 1 && occurrences("END history") == 1);
+    CHECK(strstr(cdc_bytes, "board=A\r\nboot_session=1122334455667788\r\n"
+                            "scope=local\r\npeer=not_implemented\r\ncapacity=64\r\n") != NULL);
+    snprintf(expected, sizeof(expected), "returned=%u\r\noverwritten=%llu\r\n",
+             returned, (unsigned long long)overwritten);
+    CHECK(strstr(cdc_bytes, expected) != NULL);
+    CHECK(strstr(cdc_bytes, "END history\r\ndeskhop> ") != NULL);
+    CHECK(occurrences("ERROR") == 0);
+}
+
+static void history_rows(uint64_t first, uint64_t end, bool allow_gaps) {
+    const char *p = strstr(cdc_bytes, "BEGIN history");
+    CHECK(p != NULL);
+    p = strstr(p, "\r\noverwritten=");
+    CHECK(p != NULL);
+    p = strstr(p + 2, "\r\n") + 2;
+    for (uint64_t expected = first; expected < end; ++expected) {
+        unsigned long long seq, uptime;
+        int width = 0;
+        if (strncmp(p, "GAP ", 4) == 0) {
+            CHECK(allow_gaps);
+            CHECK(sscanf(p, "GAP board=A seq=%llu%n", &seq, &width) == 1);
+            CHECK(p[width] == '\r' && p[width + 1] == '\n');
+        } else {
+            CHECK(sscanf(p, "board=A seq=%llu uptime_ms=%llu event=%n", &seq, &uptime, &width) == 2);
+            CHECK(width > 0 && uptime == seq); /* Our fixture time is seq milliseconds. */
+            CHECK(strncmp(p + width, "output_local old=", 17) == 0);
+        }
+        CHECK(seq == expected);
+        p = strstr(p, "\r\n");
+        CHECK(p != NULL);
+        p += 2;
+    }
+    CHECK(strncmp(p, "END history\r\n", 13) == 0);
+}
+
+static void cdc_history_count_and_wrap(void) {
+    history_fill(0);
+    cdc_capture_clear();
+    cdc_send("history\n");
+    history_frame(0, 0);
+    CHECK(occurrences(" seq=") == 0 && occurrences("deskhop> ") == 1);
+
+    history_fill(80);
+    cdc_capture_clear();
+    cdc_send("his");
+    CHECK(occurrences("BEGIN history") == 0);
+    cdc_send("tory\r\n");
+    history_frame(16, 16);
+    history_rows(65, 81, false);
+    CHECK(occurrences("deskhop> ") == 1);
+
+    cdc_capture_clear();
+    cdc_send("history 1\n");
+    history_frame(1, 16);
+    history_rows(80, 81, false);
+
+    cdc_capture_clear();
+    cdc_send("history 64\n");
+    history_frame(64, 16);
+    history_rows(17, 81, false);
+    CHECK(occurrences("event=") == 64);
+
+    static const char *invalid[] = {
+        "history 0\n", "history -1\n", "history +1\n", "history 65\n",
+        "history \n", "history  1\n", "history 1 \n", "history 1 2\n",
+        "history 1x\n", "history 0x10\n", "history 4294967297\n",
+        "history 18446744073709551617\n", "history 1.5\n", "history both\n",
+    };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        cdc_capture_clear();
+        cdc_send(invalid[i]);
+        CHECK(occurrences("ERROR usage: history [count] (decimal 1..64)") == 1);
+        CHECK(occurrences("BEGIN history") == 0 && occurrences("deskhop> ") == 1);
+    }
+    cdc_capture_clear();
+    cdc_send("history 0001\n");
+    history_frame(1, 16);
+    history_rows(80, 81, false);
+    CHECK(!global_state.reboot_requested && !global_state.config_mode_active);
+}
+
+static void cdc_history_event_fields(void) {
+    diagnostic_history_init();
+    console_now_us = 1000000;
+    diagnostic_history_record(HISTORY_BOOT, 1, 0, (2u << 16) | 98);
+    diagnostic_history_record(HISTORY_OUTPUT_LOCAL, 0, 1, 0);
+    diagnostic_history_record(HISTORY_OUTPUT_PEER, 1, 0, 0);
+    diagnostic_history_record(HISTORY_USB_MOUNT, 0, 0, 0);
+    diagnostic_history_record(HISTORY_USB_UNMOUNT, 0, 0, 0);
+    diagnostic_history_record(HISTORY_HID_MOUNT, 17, 3, 2 | 0x300);
+    diagnostic_history_record(HISTORY_HID_UNMOUNT, 17, 3, 1 | 0x100);
+    diagnostic_history_record(HISTORY_DESCRIPTOR_REJECTED, 18, 4, 0);
+    diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, 36);
+    diagnostic_history_record(HISTORY_UART_DROPPED, 0, 0, 37);
+    cdc_capture_clear();
+    cdc_send("history\n");
+    history_frame(10, 0);
+    static const char *expected[] = {
+        "boot build=2.98 output=B", "output_local old=A new=B", "output_peer old=B new=A",
+        "usb_mount", "usb_unmount", "hid_mount device=17 instance=3 protocol=2 keyboard=1 mouse=1",
+        "hid_unmount device=17 instance=3 protocol=1 keyboard=1 mouse=0",
+        "descriptor_rejected device=18 instance=4", "packet_checksum_error packet_type=36",
+        "uart_dropped packet_type=37",
+    };
+    for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        char row[256];
+        snprintf(row, sizeof(row), "board=A seq=%u uptime_ms=1000 event=%s\r\n", i + 1, expected[i]);
+        CHECK(strstr(cdc_bytes, row) != NULL);
+    }
+    CHECK(occurrences("board=A seq=") == 10 && occurrences("board=B seq=") == 0);
+
+    /* Keep full-width formatting even though real boot uptime starts small. */
+    console_now_us = UINT64_C(18446744073709551000);
+    diagnostic_history_record(HISTORY_UART_DROPPED, 0, 0, UINT32_MAX);
+    cdc_capture_clear();
+    cdc_send("history 1\n");
+    CHECK(strstr(cdc_bytes, "uptime_ms=18446744073709551 event=uart_dropped packet_type=4294967295") != NULL);
+    console_now_us = 2000000;
+
+    /* A terminal attached to B must label every row B as well as the header. */
+    console_init(OUTPUT_B, "fedcba9876543210", UINT64_C(0x8877665544332211), UINT32_C(0x12345678));
+    cdc_capture_clear();
+    cdc_send("history 1\n");
+    CHECK(strstr(cdc_bytes, "board=B\r\nboot_session=8877665544332211\r\n") != NULL);
+    CHECK(occurrences("board=B seq=") == 1 && occurrences("board=A seq=") == 0);
+    CHECK(occurrences("END history") == 1);
+    console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
+    console_drain();
+}
+
+static void cdc_history_stalled_reader_and_hid(void) {
+    history_fill(64);
+    cdc_capture_clear();
+    complete_short_out(0x06, "history 64\nstatus\n", 18);
+    for (unsigned tick = 0; tick < 64; ++tick) console_tick();
+    CHECK(endpoint(0x86)->pending && tud_cdc_available() == 7);
+    uint8_t keys[6] = {HID_KEY_C};
+    CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+    host_count = 0;
+    complete(0x81, NULL, 0);
+    CHECK(host_count == 9 && host_bytes[3] == HID_KEY_C);
+    uint8_t leds = 4;
+    unsigned before = led_peer_messages;
+    CHECK(control(0x21, HID_REQ_CONTROL_SET_REPORT, (HID_REPORT_TYPE_OUTPUT << 8) | REPORT_ID_KEYBOARD, 0, 1, &leds));
+    CHECK(led_peer_messages == before + 1 && last_led == 4);
+    CHECK(endpoint(0x86)->pending);
+
+    /* Producers lap every remaining requested event while the host is paused.
+     * New events must not extend the frozen command window or silently replace
+     * the requested sequence numbers. */
+    for (unsigned i = 0; i < 80; ++i) {
+        console_now_us = (uint64_t)(65 + i) * 1000;
+        diagnostic_history_record(HISTORY_OUTPUT_LOCAL, 0, 1, 0);
+    }
+    console_drain();
+    history_frame(64, 0); /* Counts describe the window at command start. */
+    history_rows(1, 65, true);
+    CHECK(occurrences("GAP board=A seq=") != 0);
+    CHECK(occurrences("board=A seq=") == 64);
+    CHECK(strstr(cdc_bytes, "END history") < strstr(cdc_bytes, "BEGIN status"));
+    cdc_status_fields();
+    CHECK(occurrences("deskhop> ") == 2);
+
+    cdc_capture_clear();
+    cdc_send("status\nhistory 1\n");
+    cdc_status_fields();
+    history_frame(1, 80);
+    history_rows(144, 145, false);
+    CHECK(strstr(cdc_bytes, "END status") < strstr(cdc_bytes, "BEGIN history"));
+    CHECK(occurrences("deskhop> ") == 2);
+}
+
+static void cdc_history_close_discards_window(void) {
+    history_fill(64);
+    cdc_capture_clear();
+    complete_short_out(0x06, "history 64\nstatus", 17);
+    for (unsigned tick = 0; tick < 64; ++tick) console_tick();
+    CHECK(endpoint(0x86)->pending && tud_cdc_available() == 6);
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    CHECK(!tud_cdc_connected() && tud_cdc_available() == 0);
+    /* The controller owns one already submitted IN transfer until completion. */
+    complete(0x86, NULL, 0);
+    if (endpoint(0x86)->pending) {
+        CHECK(endpoint(0x86)->length == 0);
+        complete(0x86, NULL, 0);
+    }
+    console_drain();
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("deskhop> ") == 1);
+    CHECK(occurrences(" seq=") == 0 && occurrences("END history") == 0);
+    cdc_capture_clear();
+    cdc_send("history 1\n");
+    history_frame(1, 0);
+    history_rows(64, 65, false);
+    CHECK(occurrences("BEGIN status") == 0);
 }
 
 static void cdc_peer_wait_is_local_first(void) {
@@ -667,6 +897,21 @@ static void cdc_bus_reset_discards_partial(void) {
     cdc_capture_clear();
     cdc_send("status\n");
     cdc_status_fields();
+
+    history_fill(64);
+    cdc_capture_clear();
+    complete_short_out(0x06, "history 64\nstatus", 17);
+    for (unsigned tick = 0; tick < 64; ++tick) console_tick();
+    CHECK(endpoint(0x86)->pending && tud_cdc_available() == 6);
+    enumerate(false);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("deskhop> ") == 1 && occurrences(" seq=") == 0);
+    CHECK(occurrences("END history") == 0 && occurrences("BEGIN status") == 0);
+    cdc_capture_clear();
+    cdc_send("status\n");
+    cdc_status_fields();
 }
 
 static void msc_bulk_command(uint8_t opcode, uint32_t bytes, unsigned expected_payload) {
@@ -701,6 +946,7 @@ static void msc_bulk(void) {
     CHECK(endpoint(0x04)->stalled && endpoint(0x84)->stalled);
 }
 int main(void) {
+    diagnostic_history_init();
     console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
     console_now_us = 1000000;
     CHECK(tusb_init());
@@ -712,6 +958,14 @@ int main(void) {
     cdc_controls(false);
     scenario = "CDC command streams";
     cdc_command_stream();
+    scenario = "CDC history counts and ring wrap";
+    cdc_history_count_and_wrap();
+    scenario = "CDC history event fields";
+    cdc_history_event_fields();
+    scenario = "CDC history stalled reader and HID progress";
+    cdc_history_stalled_reader_and_hid();
+    scenario = "CDC history close discards frozen window";
+    cdc_history_close_discards_window();
     scenario = "CDC asynchronous local-first peer status";
     cdc_peer_wait_is_local_first();
     scenario = "CDC peer failure and core-1 fallback";

@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "diagnostic_history.h"
 
 /* =================================================== *
  * ============  Hotkey Handler Routines  ============ *
@@ -382,11 +383,14 @@ static void receive_output_selection(uart_packet_t *packet, device_t *state, boo
     }
     if (accepted)
         state->active_output = state->selection.output;
-    bool changed = previous_output != state->active_output;
+    uint8_t selected_output = state->active_output;
+    bool changed = previous_output != selected_output;
     firmware_update_unlock();
 
     if (!accepted)
         return;
+    if (changed)
+        diagnostic_history_record(HISTORY_OUTPUT_PEER, previous_output, selected_output, 0);
     /* Queue and USB operations can wait; never perform them under the state lock. */
     if (changed || legacy) {
         if (state->tud_connected)
@@ -733,11 +737,14 @@ void set_active_output(device_t *state, uint8_t new_output) {
     firmware_update_lock();
     /* output_toggle_hotkey_handler historically updates active_output first;
      * the accepted token still records the previous selection here. */
-    bool changed = state->selection.output != new_output;
+    uint8_t previous_output = state->selection.output;
+    bool changed = previous_output != new_output;
     selection_request(&state->selection, new_output, state->board_role);
     state->active_output = new_output;
     selection_encode(&state->selection, payload);
     firmware_update_unlock();
+    if (changed)
+        diagnostic_history_record(HISTORY_OUTPUT_LOCAL, previous_output, new_output, 0);
     restore_leds(state);
 
     /* A dropped selection packet leaves the two Picos routing reports to

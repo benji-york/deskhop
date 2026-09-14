@@ -55,6 +55,13 @@ Verified scenarios include:
   disconnect or during a fresh query. Pending peer/CDC work leaves HID progressing.
 - DTR close, unplug, deconfiguration, and fast reset discard partial commands and
   unsent output without accidentally rearming CDC buffers as endpoint zero.
+- Local history uses the production 64-record ring, with default/1/64 counts,
+  strict argument validation, ring wrap, all event fields, A/B row labels,
+  and full-width timestamps. A paused CDC reader can lose requested records;
+  explicit gaps preserve the original command window. Queued status/history
+  commands, DTR close/reopen, and bus reset preserve response boundaries.
+  Each tick reads at most one event and retains the same RX/TX budgets;
+  keyboard reports and LED control requests progress while CDC is stalled.
 
 MSC backing-store callbacks in this prototype are deliberately modeled. Disk
 capacity and returned bytes are fixtures; this is not a TinyUSB-to-real-flash
@@ -66,6 +73,9 @@ The peer status request/result bridge is mocked in this harness; `tests/sim`
 separately drives its real SDK queues, protocol and UART across two independent
 production images, including simultaneous queries, repeat queries, disconnected
 wires, a full stalled UART queue, malformed replies, and continued HID progress.
+The history bridge here substitutes a native clock and unlocked access to the
+real ring. The paired/native-boundary suite exercises the actual capture bridge
+and event hooks with SDK lock doubles; neither proves physical lock timing.
 
 A useful stack-level finding is captured: in this TinyUSB revision, a HID
 `GET_REPORT` request with a nonzero report ID returns the ID byte even though

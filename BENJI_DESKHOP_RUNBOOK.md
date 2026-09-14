@@ -8,7 +8,49 @@ README.
 
 Snapshot: 2026-09-14
 
-## Current deployment: v0.97 peer status
+## Current deployment: v0.98 local RAM history
+
+Pico A was flashed and rebooted on 2026-09-14 at 21:28 UTC using frozen
+`build/flashing/deskhop-v0.98-history.uf2` (SHA-256
+`2214e8a1e206f3e6b7e14c7b69f0b4560842cbd1f8c6bab7ee8d6644b917bf55`).
+Layer 3 A entered disk-free PICOBOOT: vendor interface class 255, no
+mass-storage interface. All 262,144 firmware bytes matched an independent
+readback, and all 4,096 saved-settings bytes remained unchanged. The Mac had
+five media clients, all active and not busy, before and after; no RP2 boot
+object remained after reboot.
+
+All seven serial status snapshots returned `peer=ok` and increasing uptimes:
+
+| Board | Physical flash UID | Executing build | Boot session | Sampled uptime range |
+| --- | --- | --- | --- | --- |
+| A | `E6654854574C3E30` | `0.98` | `4d718a3937cb36d7` | 31,765–35,140 ms |
+| B | `E6654854577F2330` | `0.98` | `19877e4a63cdaeae` | 11,086–14,461 ms |
+
+Both reported boot CRC metadata `4e15626f`. B's executing identity/build is
+confirmed; there was no independent B flash readback or integrity check.
+
+This slice adds `history [count]` for the connected board, backed by 64
+compact records in RAM. Each event/gap row names its board; closing the
+terminal preserves the history, and reboot clears it. Peer history follows
+in the next slice. Four serial history responses, including after reconnect,
+returned the same six A-tagged records: boot at 17 ms, USB mount at 268 ms,
+HID interfaces 0/1/2 at 543/548/555 ms, and a peer output change A to B at
+841 ms. The overwrite count was zero. No B history was retrieved.
+
+Fragmented and queued status commands, invalid count rejection, brief read
+pauses, and terminal close/reopen passed. Standard macOS `/usr/bin/screen` at
+115200 also displayed help, the same local history, and two-board status with
+the same sessions, then closed normally. Benji confirmed "looks good" after
+the requested typing, trackball/buttons, and Layer 3 S switch-and-back/history
+check. Those later history rows were user-reviewed; replugging was not
+separately reported.
+See the [deployment record](docs/testing/history-v098.md).
+
+The 36-step deep tier, all six native coverage layers, and ARM build passed;
+v0.98 has completed user input acceptance.
+The v0.95–v0.98 changes have not been pushed.
+
+## Previous accepted deployment: v0.97 peer status
 
 Pico A was flashed and rebooted on 2026-09-14 at 21:03 UTC using frozen
 `build/flashing/deskhop-v0.97-peer-status.uf2` (SHA-256
@@ -44,7 +86,7 @@ special client software is required to use the console.
 
 Benji confirmed typing, trackball movement/buttons, and Layer 3 S switching
 on both Macs: "Working great. No replug needed." The v0.97 slice passed its
-interactive input check. Local RAM history is next. See
+interactive input check before the v0.98 local-history deployment above. See
 the [deployment record](docs/testing/peer-status-v097.md) for evidence and
 [diagnostics.md](docs/diagnostics.md) for the protocol and planned slices.
 The v0.95–v0.97 changes have not been pushed.

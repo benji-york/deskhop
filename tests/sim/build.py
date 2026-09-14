@@ -6,7 +6,7 @@ SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'key
            'mouse', 'reboot_hotkey', 'screensaver_policy', 'zoom_tracker', 'zoom',
            'tasks', 'handlers', 'led', 'uart', 'usb', 'usb_descriptors', 'utils',
            'fw_update', 'config_migration', 'selection']
-OPTIONAL_SOURCES = ['peer_status', 'diagnostic_peer']
+OPTIONAL_SOURCES = ['peer_status', 'diagnostic_peer', 'history', 'diagnostic_history']
 
 def extract_tasks(main):
     """Keep table order and core ownership from the supplied production image."""
@@ -56,6 +56,8 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
     # real queue/protocol code only when the selected source tree owns it.
     if (source_root/'src/diagnostic_peer.c').exists():
         flags += ['-DSIM_HAS_DIAGNOSTIC_PEER=1']
+    if (source_root/'src/diagnostic_history.c').exists():
+        flags += ['-DSIM_HAS_DIAGNOSTIC_HISTORY=1']
     cmd = [os.environ.get('CC', 'cc'), *flags, *([] if executable else ['-shared']),
            '-I'+str(output.parent), '-I'+str(ROOT/'tests/sim/include'), '-I'+str(source_root/'src/include'),
            '-I'+str(ROOT/'pico-sdk/src/common/pico_util/include'),

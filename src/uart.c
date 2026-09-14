@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "diagnostic_peer.h"
+#include "diagnostic_history.h"
 
 /* ================================================== *
  * ===============  Sending Packets  ================ *
@@ -37,7 +38,8 @@ bool queue_packet_try(const uint8_t *data, enum packet_type_e packet_type, int l
 }
 
 void queue_packet(const uint8_t *data, enum packet_type_e packet_type, int length) {
-    queue_packet_try(data, packet_type, length);
+    if (!queue_packet_try(data, packet_type, length))
+        diagnostic_history_record(HISTORY_UART_DROPPED, 0, 0, packet_type);
 }
 
 /* Firmware receivers prior to v0.85 have no timeout. Never silently drop the
@@ -129,8 +131,10 @@ const uart_handler_t uart_handler[] = {
 };
 
 void process_packet(uart_packet_t *packet, device_t *state) {
-    if (!verify_checksum(packet))
+    if (!verify_checksum(packet)) {
+        diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, packet->type);
         return;
+    }
 
     for (int i = 0; i < ARRAY_SIZE(uart_handler); i++) {
         if (uart_handler[i].type == packet->type) {

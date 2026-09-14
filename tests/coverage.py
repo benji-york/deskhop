@@ -19,7 +19,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 LAYERS = ('paired', 'storage', 'hid', 'policies', 'usb_device', 'usb_host')
-POLICIES = ('zoom_tracker', 'fw_update', 'screensaver_policy', 'reboot_hotkey', 'config_migration', 'selection')
+POLICIES = ('zoom_tracker', 'fw_update', 'screensaver_policy', 'reboot_hotkey',
+            'config_migration', 'selection', 'peer_status', 'history')
 METRICS = ('lines', 'branches', 'functions', 'regions')
 
 
@@ -67,6 +68,8 @@ def build_and_run(name, output, hid_iterations):
         run([sys.executable, ROOT / 'tests/sim/run.py', '--library', library, '--known-gaps'], environment)
         run([native], environment)
         sources = [ROOT / f'src/{source}.c' for source in sim.SOURCES]
+        sources += [ROOT / f'src/{source}.c' for source in sim.OPTIONAL_SOURCES
+                    if (ROOT / f'src/{source}.c').exists()]
         sources += [ROOT / 'pico-sdk/src/common/pico_util/queue.c']
         return [library, native], sources
     if name == 'storage':
@@ -80,8 +83,11 @@ def build_and_run(name, output, hid_iterations):
         flags = ['-Wno-unused-parameter', '-Wno-sign-compare',
                  '-I' + str(ROOT / 'tests/hid_stubs'),
                  '-I' + str(ROOT / 'pico-sdk/lib/tinyusb/src')]
-        regression = compile_native(output / 'hid-regression', 'tests/test_hid_regressions.c', sources, flags)
-        properties = compile_native(output / 'hid-properties', 'tests/hid_fuzz.c', sources, flags)
+        # The capture boundary is replaced here, but must not enter the
+        # production-source coverage denominator returned below.
+        linked_sources = [*sources, ROOT / 'tests/history_stub.c']
+        regression = compile_native(output / 'hid-regression', 'tests/test_hid_regressions.c', linked_sources, flags)
+        properties = compile_native(output / 'hid-properties', 'tests/hid_fuzz.c', linked_sources, flags)
         run([regression], environment)
         run([properties, '--seed', '0x484944', '--iterations', hid_iterations], environment)
         return [regression, properties], sources

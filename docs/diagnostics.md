@@ -22,7 +22,7 @@ physical disk-free enumeration check passed; the record is in
    Print local information immediately; report
    unavailable/unsupported peers explicitly. Check actual A/B identities and
    fresh uptimes from one terminal.
-3. **Local history:** a small fixed RAM ring, initially 64 compact records for
+3. **Local history (v0.98 deployed and input checked):** a small fixed RAM ring, initially 64 compact records for
    boot, output selection, USB attach/detach, and errors. Add `history [count]`.
    Check recognizable interactions, wraparound, and slow readers.
 4. **Peer history:** `history` collects both boards by default in bounded chunks.
@@ -43,7 +43,34 @@ Additional events and counters follow troubleshooting needs discovered during
 these sessions. Histories are volatile across reboot. No peer/history/verification
 commands are advertised before their implementation exists.
 
-## Peer status slice (v0.97, deployed)
+## Local history slice (v0.98 deployed and input checked)
+
+`history [count]` reads the connected board's recent RAM events, with a default
+of 16 and a maximum of 64. Every event and gap row names its board. The command
+header identifies the local scope and boot session; peer retrieval is the next
+slice. A fixed sequence window and per-record reads let producers continue
+while the terminal drains. Overwritten records are reported as gaps. The
+[deployment record](testing/history-v098.md) describes event meanings, short
+critical sections, limits, and interactive acceptance.
+
+Pico A was flashed through disk-free PICOBOOT at 21:28 UTC on 2026-09-14.
+All 262,144 firmware bytes matched an independent readback and all 4,096 saved
+settings bytes were unchanged. Mac checks found no mass-storage interface
+during maintenance and no retained RP2 object after reboot; five media clients
+were active and not busy before and after. All seven serial status checks
+confirmed both boards executing `0.98` with boot CRC metadata `4e15626f`,
+stable distinct sessions, and increasing uptime. This confirms B's executing
+identity, without an independent B flash readback or flash-integrity check.
+
+Four local history reads returned the same six A-tagged records across terminal
+reopen: boot, PC-facing USB mount, three peripheral HID interfaces, and an
+accepted peer output change from A to B. The standard macOS `screen` terminal
+also passed help, history, and two-board status. Benji confirmed "looks good"
+after the requested input/switch/history check. The assistant did not capture
+those later history rows independently. Peer history
+retrieval is not implemented in this slice.
+
+## Peer status slice (introduced in v0.97)
 
 `status` now queries both boards by default. It opens one response frame and
 prints the connected board immediately. A successful peer reply adds a second
@@ -72,8 +99,9 @@ END status
 deskhop>
 ```
 
-The placeholders illustrate the format. The 2026-09-14 deployment confirmed
-both installed boards executing v0.97, as recorded below. With a terminal
+The placeholders illustrate the format introduced in v0.97. Its 2026-09-14
+deployment confirmed both boards executing that version, as recorded below;
+the current v0.98 observation is recorded above. With a terminal
 on B, B prints first. Builds may differ during propagation. The peer snapshot
 is taken when it accepts the request; the local snapshot is taken when the
 command is processed. Their uptimes have independent boot origins and are not
@@ -122,7 +150,8 @@ application read pause, and terminal close/reopen. These observations confirm
 B's executing identity and boot metadata, without an independent B flash
 readback or flash-integrity check. Benji confirmed the ordinary input/switching
 check on both Macs: "Working great. No replug needed." The terminal open/closed
-phases were not separately reported. Local RAM history is next. See the [v0.97 deployment record](testing/peer-status-v097.md) for
+phases were not separately reported. That accepted release preceded the v0.98
+local-history deployment above. See the [v0.97 deployment record](testing/peer-status-v097.md) for
 the sessions, evidence, and remaining checks.
 
 ## Console use and first-slice interpretation

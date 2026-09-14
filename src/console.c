@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "console.h"
+#include "diagnostic_history.h"
 #include "diagnostic_peer.h"
 #include "tusb.h"
 
@@ -31,6 +32,8 @@ static struct {
     uint32_t image_crc_at_boot;
     bool connected, previous_cr;
     bool peer_waiting, peer_ready;
+    bool history_active;
+    uint64_t history_next, history_end;
     uint32_t query_token;
     uint64_t query_started_us;
     peer_status_result_t peer_result;
@@ -45,6 +48,7 @@ void console_disconnect(void) {
     console.line_error = LINE_OK;
     console.line_used = console.tx_used = console.tx_sent = 0;
     console.peer_waiting = console.peer_ready = false;
+    console.history_active = false;
     /* TinyUSB resets CDC endpoints BEFORE the unmount callback. read_flush()
      * rearms OUT, so it must never run after that reset (ep_out is then zero).
      * USB reset already clears those FIFOs; a DTR drop still needs a flush. */
@@ -112,6 +116,98 @@ static void append_peer(void) {
             (unsigned long long)peer->uptime_ms);
 }
 
+static bool history_count(const char *line, unsigned *count) {
+    if (line[7] == '\0') {
+        *count = 16;
+        return true;
+    }
+    /* Do not accept signs, trailing words or wraparound from strtoul(). */
+    const char *p = line + 8;
+    unsigned value = 0;
+    if (!*p)
+        return false;
+    for (; *p; ++p) {
+        if (*p < '0' || *p > '9')
+            return false;
+        value = value * 10 + (unsigned)(*p - '0');
+        if (value > HISTORY_CAPACITY)
+            return false;
+    }
+    *count = value;
+    return value != 0;
+}
+
+static char output_name(unsigned output) {
+    return output == 0 ? 'A' : output == 1 ? 'B' : '?';
+}
+
+static void begin_history(unsigned count) {
+    const history_window_t window = diagnostic_history_window(count);
+    console.history_next = window.first_seq;
+    console.history_end = window.end_seq;
+    console.history_active = true;
+    appendf("BEGIN history\r\nboard=%c\r\nboot_session=%08lx%08lx\r\n"
+            "scope=local\r\npeer=not_implemented\r\ncapacity=%u\r\n"
+            "returned=%u\r\noverwritten=%llu\r\n",
+            console.board, (unsigned long)(console.boot_session >> 32),
+            (unsigned long)(uint32_t)console.boot_session, HISTORY_CAPACITY,
+            window.count, (unsigned long long)window.overwritten);
+}
+
+static void append_history_row(void) {
+    /* Copy only one compact event while its slot is protected by the bridge.
+     * Formatting and USB backpressure never hold the history lock. The fixed
+     * end sequence keeps a stalled reader from chasing new producer events. */
+    history_event_t event;
+    uint64_t seq = console.history_next++;
+    if (!diagnostic_history_read(seq, &event)) {
+        appendf("GAP board=%c seq=%llu\r\n", console.board,
+                (unsigned long long)seq);
+        return;
+    }
+    appendf("board=%c seq=%llu uptime_ms=%llu event=", console.board,
+            (unsigned long long)event.seq,
+            (unsigned long long)(event.time_us / 1000));
+    switch (event.type) {
+    case HISTORY_BOOT:
+        appendf("boot build=%u.%u output=%c", (unsigned)(event.value >> 16),
+                (unsigned)(event.value & 0xffff), output_name(event.a));
+        break;
+    case HISTORY_OUTPUT_LOCAL:
+    case HISTORY_OUTPUT_PEER:
+        appendf("%s old=%c new=%c", event.type == HISTORY_OUTPUT_LOCAL
+                ? "output_local" : "output_peer", output_name(event.a),
+                output_name(event.b));
+        break;
+    case HISTORY_USB_MOUNT:
+        append("usb_mount");
+        break;
+    case HISTORY_USB_UNMOUNT:
+        append("usb_unmount");
+        break;
+    case HISTORY_HID_MOUNT:
+    case HISTORY_HID_UNMOUNT:
+        appendf("%s device=%u instance=%u protocol=%u keyboard=%u mouse=%u",
+                event.type == HISTORY_HID_MOUNT ? "hid_mount" : "hid_unmount",
+                (unsigned)event.a, (unsigned)event.b, (unsigned)(event.value & 0xff),
+                (unsigned)!!(event.value & 0x100), (unsigned)!!(event.value & 0x200));
+        break;
+    case HISTORY_DESCRIPTOR_REJECTED:
+        appendf("descriptor_rejected device=%u instance=%u",
+                (unsigned)event.a, (unsigned)event.b);
+        break;
+    case HISTORY_PACKET_CHECKSUM_ERROR:
+    case HISTORY_UART_DROPPED:
+        appendf("%s packet_type=%lu", event.type == HISTORY_PACKET_CHECKSUM_ERROR
+                ? "packet_checksum_error" : "uart_dropped", (unsigned long)event.value);
+        break;
+    default:
+        appendf("unknown type=%u", (unsigned)event.type);
+        break;
+    }
+    append("\r\n");
+}
+
 static void command(uint64_t now_us) {
     console.line[console.line_used] = '\0';
     if (console.line_error == LINE_TOO_LONG) {
@@ -122,12 +218,14 @@ static void command(uint64_t now_us) {
         append("BEGIN help\r\n"
                "DeskHop diagnostic console - all commands are read-only.\r\n"
                "\r\n"
-               "  help      Show this help.\r\n"
-               "  status    Show both boards' identity, build, boot session and uptime.\r\n"
+               "  help             Show this help.\r\n"
+               "  status           Show both boards' identity, build, boot session and uptime.\r\n"
+               "  history [count]  Show this board's recent events (default 16; 1..64).\r\n"
                "\r\n"
                "Status queries both boards by default and prints this board first.\r\n"
                "A missing or older peer is reported after a bounded timeout.\r\n"
-               "History and firmware verification will follow in later releases.\r\n"
+               "History is local in this release; peer history will follow.\r\n"
+               "Firmware verification will follow in a later release.\r\n"
                "The image CRC is metadata captured at boot, not an integrity check.\r\n"
                "Enter submits; Backspace edits; Ctrl-C cancels a line.\r\n"
                "END help\r\n");
@@ -151,12 +249,19 @@ static void command(uint64_t now_us) {
         console.peer_waiting = diagnostic_peer_request(console.query_token, now_us);
         if (!console.peer_waiting)
             finish_status("busy");
+    } else if (strcmp(console.line, "history") == 0
+               || strncmp(console.line, "history ", 8) == 0) {
+        unsigned count;
+        if (history_count(console.line, &count))
+            begin_history(count);
+        else
+            append("ERROR usage: history [count] (decimal 1..64)\r\n");
     } else if (console.line_used != 0) {
         append("ERROR unknown command; type help\r\n");
     }
     console.line_used = 0;
     console.line_error = LINE_OK;
-    if (!console.peer_waiting)
+    if (!console.peer_waiting && !console.history_active)
         append(prompt);
 }
 
@@ -198,6 +303,17 @@ void console_task(uint64_t now_us) {
     transmit();
     if (console.tx_used)
         return;
+
+    if (console.history_active) {
+        if (console.history_next < console.history_end) {
+            append_history_row();
+        } else {
+            console.history_active = false;
+            append("END history\r\n");
+            append(prompt);
+        }
+        return;
+    }
 
     if (console.peer_waiting) {
         if (console.peer_ready) {

@@ -41,12 +41,13 @@ def main():
     for name,unit in [('zoom_tracker','zoom_tracker'),('fw_update','fw_update'),
                       ('screensaver_policy','screensaver_policy'),('reboot_hotkey','reboot_hotkey'),
                       ('config_migration','config_migration'),('selection','selection'),
-                      ('peer_status','peer_status')]:
+                      ('peer_status','peer_status'),('history','history')]:
         compile_test(name,[f'tests/test_{name}.c',f'src/{unit}.c'])
     node=os.environ.get('NODE') or shutil.which('node') or str(pathlib.Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')
     run('WebConfig auto-start',[node,'tests/test_webconfig_autostart.js'])
     hid_flags=['-Wno-unused-parameter','-Wno-sign-compare','-Itests/hid_stubs','-Ipico-sdk/lib/tinyusb/src']
-    hid_sources=['src/hid_parser.c','src/hid_report.c','src/keyboard.c','src/usb.c','src/reboot_hotkey.c']
+    hid_sources=['src/hid_parser.c','src/hid_report.c','src/keyboard.c','src/usb.c','src/reboot_hotkey.c',
+                 'tests/history_stub.c']
     compile_test('hid_regressions',['tests/test_hid_regressions.c',*hid_sources],hid_flags)
     hid=BUILD/'hid_properties'
     run('build HID properties',[os.environ.get('CC','cc'),*BASE,*hid_flags,'-Isrc/include','tests/hid_fuzz.c',*hid_sources,'-o',hid])
@@ -60,7 +61,7 @@ def main():
     from build import build
     build(BUILD/'sim/node.so')
     native=build(BUILD/'sim/native-boundaries',executable=ROOT/'tests/sim/test_native_boundaries.c',sanitize=True)
-    run('mouse native boundary properties',[native])
+    run('production native boundary properties',[native])
     run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'])
     run('simulator contract checks',[sys.executable,'tests/sim/test_harness.py'])
     if a.tier=='deep':

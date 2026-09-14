@@ -16,6 +16,7 @@
 #include "main.h"
 #include "console.h"
 #include "diagnostic_peer.h"
+#include "diagnostic_history.h"
 #include "pico/rand.h"
 
 /* ================================================== *
@@ -252,6 +253,9 @@ void initial_setup(device_t *state) {
     };
     memcpy(identity.board_id, physical_id.id, sizeof(identity.board_id));
     diagnostic_peer_init(&identity);
+    diagnostic_history_init();
+    diagnostic_history_record(HISTORY_BOOT, state->active_output, 0,
+                              (VERSION_MAJOR << 16) | VERSION_MINOR);
 #if DH_CONSOLE
     char board_id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
     pico_get_unique_board_id_string(board_id, sizeof(board_id));

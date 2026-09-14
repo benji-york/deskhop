@@ -12,6 +12,7 @@
 #include "main.h"
 #include "console.h"
 #include "hid_report.h"
+#include "diagnostic_history.h"
 
 _Static_assert(MAX_DEVICES <= CFG_TUH_DEVICE_MAX,
                "MAX_DEVICES must not exceed CFG_TUH_DEVICE_MAX");
@@ -85,6 +86,7 @@ void tud_hid_set_report_cb(uint8_t instance,
 /* Invoked when device is mounted */
 void tud_mount_cb(void) {
     global_state.tud_connected = true;
+    diagnostic_history_record(HISTORY_USB_MOUNT, 0, 0, 0);
 #if DH_CONSOLE && CFG_TUD_CDC
     /* A USB bus reset need not call unmount, and re-enumeration can finish
      * before the console's next poll. Never retain the old partial command. */
@@ -95,6 +97,7 @@ void tud_mount_cb(void) {
 /* Invoked when device is unmounted */
 void tud_umount_cb(void) {
     global_state.tud_connected = false;
+    diagnostic_history_record(HISTORY_USB_UNMOUNT, 0, 0, 0);
 #if DH_CONSOLE && CFG_TUD_CDC
     console_disconnect();
 #endif
@@ -148,6 +151,10 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
                              || iface->num_keyboards > 0;
     bool contains_mouse = itf_protocol == HID_ITF_PROTOCOL_MOUSE
                           || iface->mouse.is_found;
+
+    diagnostic_history_record(HISTORY_HID_UNMOUNT, dev_addr, instance,
+                              itf_protocol | (contains_keyboard ? 256u : 0)
+                              | (contains_mouse ? 512u : 0));
 
     if (contains_mouse)
         mouse_interface_removed(iface, &global_state);
@@ -205,6 +212,17 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
 
     /* Parse the report descriptor into our internal structure. */
     parse_report_descriptor(iface, desc_report, desc_len);
+
+    /* Record enumeration even when enforced-port policy later ignores it.
+     * This describes the interface, not a guarantee that reports are accepted. */
+    diagnostic_history_record(HISTORY_HID_MOUNT, dev_addr, instance,
+                              itf_protocol
+                              | ((itf_protocol == HID_ITF_PROTOCOL_KEYBOARD
+                                  || iface->num_keyboards > 0) ? 256u : 0)
+                              | ((itf_protocol == HID_ITF_PROTOCOL_MOUSE
+                                  || iface->mouse.is_found) ? 512u : 0));
+    if (iface->descriptor_invalid)
+        diagnostic_history_record(HISTORY_DESCRIPTOR_REJECTED, dev_addr, instance, 0);
 
     switch (itf_protocol) {
         case HID_ITF_PROTOCOL_KEYBOARD:
