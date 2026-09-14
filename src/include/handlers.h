@@ -50,9 +50,13 @@ void handle_toggle_gaming_msg(uart_packet_t *, device_t *);
 void handle_heartbeat_msg(uart_packet_t *, device_t *);
 void handle_keyboard_uart_msg(uart_packet_t *, device_t *);
 void handle_mouse_abs_uart_msg(uart_packet_t *, device_t *);
+void handle_mouse_source_uart_msg(uart_packet_t *, device_t *);
+void handle_mouse_synthetic_uart_msg(uart_packet_t *, device_t *);
+void handle_mouse_buttons_sync_msg(uart_packet_t *, device_t *);
 void handle_mouse_nonmotion_uart_msg(uart_packet_t *, device_t *);
 void handle_mouse_zoom_msg(uart_packet_t *, device_t *);
 void handle_output_select_msg(uart_packet_t *, device_t *);
+void handle_output_select_sync_msg(uart_packet_t *, device_t *);
 void handle_pointer_sync_msg(uart_packet_t *, device_t *);
 void handle_proxy_msg(uart_packet_t *, device_t *);
 void handle_read_config_msg(uart_packet_t *, device_t *);
@@ -74,3 +78,5 @@ void handle_write_fw_msg(uart_packet_t *, device_t *);
  *==============================================================================*/
 
 void set_active_output(device_t *, uint8_t);
+void announce_initial_output(device_t *);
+void sync_output_selection(device_t *);

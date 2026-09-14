@@ -5,7 +5,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'keyboard',
            'mouse', 'reboot_hotkey', 'screensaver_policy', 'zoom_tracker', 'zoom',
            'tasks', 'handlers', 'led', 'uart', 'usb', 'usb_descriptors', 'utils',
-           'fw_update', 'config_migration']
+           'fw_update', 'config_migration', 'selection']
 def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=False):
     output = pathlib.Path(output).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
     main = (source_root/'src/main.c').read_text()
@@ -31,7 +31,9 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
            '-I'+str(output.parent), '-I'+str(ROOT/'tests/sim/include'), '-I'+str(source_root/'src/include'),
            '-I'+str(ROOT/'pico-sdk/src/common/pico_util/include'),
            '-I'+str(ROOT/'pico-sdk/lib/tinyusb/src'),
-           str(ROOT/'tests/sim/node.c'), *([str(executable)] if executable else []), *[str(source_root/f'src/{s}.c') for s in SOURCES],
+           str(ROOT/'tests/sim/node.c'), *([str(executable)] if executable else []),
+           *[str(source_root/f'src/{s}.c') for s in SOURCES
+             if s != 'selection' or (source_root/f'src/{s}.c').exists()],
            str(ROOT/'pico-sdk/src/common/pico_util/queue.c'), '-lm', '-o', str(output)]
     subprocess.run(cmd, check=True)
     return output

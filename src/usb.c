@@ -140,6 +140,9 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     bool contains_mouse = itf_protocol == HID_ITF_PROTOCOL_MOUSE
                           || iface->mouse.is_found;
 
+    if (contains_mouse)
+        mouse_interface_removed(iface, &global_state);
+
     if (contains_keyboard) {
         if (dev_addr == global_state.kbd_dev_addr
             && instance == global_state.kbd_instance)

@@ -12,8 +12,8 @@ Run `python3 tests/coverage.py` with Clang and LLVM `llvm-profdata`/`llvm-cov`
 (the runner finds Xcode tools through `xcrun` on macOS). No Python packages are
 required. `--layer paired --layer storage` selects a subset; `--hid-iterations N`
 changes the generated HID workload. Default measurements use scenario seed 1,
-storage seed 1, the five original pure-policy suites plus 64,128 updater contract
-cases, and 2,000 generated HID descriptors at seed `0x484944`.
+storage seed 1, the five original pure-policy suites plus the selection suite,
+64,128 updater contract cases, and 2,000 generated HID descriptors at seed `0x484944`.
 
 The generated `build/tests/coverage/html/index.html` links each layer's source
 HTML. Every layer retains binaries, raw profiles, merged profiles, a text report,
@@ -26,14 +26,14 @@ Measured on 2026-09-14 with the default command after all six layers passed:
 
 | Layer / source group | Executed lines / mapped lines | Covered branches / mapped branches |
 | --- | ---: | ---: |
-| Paired application + native boundaries | 1,586 / 2,505 (63.31%) | 667 / 1,253 (53.23%) |
+| Paired application + native boundaries | 1,879 / 2,790 (67.35%) | 860 / 1,427 (60.27%) |
 | Paired SDK queue implementation | 77 / 83 (92.77%) | 14 / 19 (73.68%) |
-| Storage application units | 411 / 994 (41.35%) | 164 / 357 (45.94%) |
-| HID regression + generated inputs | 629 / 883 (71.23%) | 333 / 532 (62.59%) |
-| Pure policy units | 227 / 235 (96.60%) | 157 / 170 (92.35%) |
-| USB device application callbacks/descriptors | 72 / 207 (34.78%) | 30 / 144 (20.83%) |
+| Storage application units | 450 / 1,238 (36.35%) | 170 / 495 (34.34%) |
+| HID regression + generated inputs | 629 / 885 (71.07%) | 333 / 534 (62.36%) |
+| Pure policy units | 309 / 324 (95.37%) | 213 / 256 (83.20%) |
+| USB device application callbacks/descriptors | 72 / 209 (34.45%) | 30 / 146 (20.55%) |
 | USB device TinyUSB stack | 1,005 / 2,084 (48.22%) | 448 / 1,170 (38.29%) |
-| USB host application units | 504 / 883 (57.08%) | 230 / 532 (43.23%) |
+| USB host application units | 506 / 885 (57.18%) | 232 / 534 (43.45%) |
 | USB host TinyUSB stack | 999 / 2,178 (45.87%) | 344 / 1,157 (29.73%) |
 
 These percentages overlap and **cannot be summed or averaged into total
@@ -53,7 +53,7 @@ after code/compiler/test changes; these figures are a dated snapshot.
 | `tests/hid_fuzz.c` | Actual HID parser, scalar extraction, keyboard/consumer/system extraction and USB report dispatch | Bit-at-a-time signed scalar oracle; exact-sized buffers; descriptor mutation/truncation; 256 dispatch IDs per generated descriptor | Sanitizers and finite generated cases; no parser completeness proof, original HID boundary stubs remain |
 | `tests/sim/` | Actual application units plus checked-in SDK `queue.c`, separate globals and statics for A/B | Independent standard HID fixture bytes, exact outgoing reports, production UART serialization/receiver with modeled DMA arrival, controlled clock and host acceptance | HAL/task boundary schedules; modeled USB stack, CPU and hardware |
 | `tests/sim/test_native_boundaries.c` | Same native application build, focusing on mouse decoding and protocol output-index bounds | ASan/UBSan exact allocation, 256 mouse IDs, short/empty reports, independently asserted state preservation and output | Native ABI; no ARM instruction or arbitrary memory-interleaving coverage |
-| `tests/storage/` | `utils.c`, `ramdisk.c`, `tasks.c`, `handlers.c`, updater/migration helpers and production types | NOR bits/alignment/counters; independent bitwise CRC; full image bytes; finite TX queue; named source/receiver operations | Complete operations are serialized; no USB mass-storage wire stack or instruction-level concurrency |
+| `tests/storage/` | `utils.c`, `ramdisk.c`, `tasks.c`, `handlers.c`, protocol map, updater/migration/selection helpers and production types | NOR bits/alignment/counters; independent bitwise CRC; full image bytes; finite TX queue; real SET_VAL interleaved inside a save snapshot | Update operations are serialized; one explicit config-copy preemption; no USB mass-storage wire stack or arbitrary instruction-level concurrency |
 | `tests/model/` | `policy_contract.c` links the actual updater helper; `check_flash.py` separately checks a specification | 64,128 finite C contract cases; exhaustive reduced two-core graph; mutation counterexamples and shortest-path replay | Specification assumptions are not automatically proved for C or RP2040 |
 | `tests/emulation/` | Small ARM instruction sequences in rp2040js, not DeskHop firmware | Arithmetic oracle; two emulator instances exchanging UART register writes/reads; multicore capability probe | Each instance has one CPU and no working SIO launch FIFO; no PIO-USB or DeskHop boot |
 | `tests/usb_stack/` | Checked-in `tusb.c`, device/control, HID, MSC and FIFO units plus production `usb.c` / `usb_descriptors.c` | Queued virtual DCD SETUP/XFER_COMPLETE events; independent host control requests, descriptor lengths, stalls and class transfer assertions | ASan/UBSan pass; device-controller transaction model, modeled MSC backing callbacks; no PHY, PIO or real host OS |
@@ -69,7 +69,7 @@ establish correctness.
 
 ## Production translation-unit inventory
 
-All 23 C files directly under `src/` are accounted for below. “Included” means
+Every C file directly under `src/` is accounted for below. “Included” means
 linked into a test layer, not complete branch coverage. The bundled Pico SDK,
 TinyUSB and Pico-PIO-USB contain additional source outside this inventory.
 
@@ -77,18 +77,19 @@ TinyUSB and Pico-PIO-USB contain additional source outside this inventory.
 | --- | --- | --- |
 | `hid_parser.c`, `hid_report.c` | Original HID suite, generated HID tests, paired/native boundary builds; usage carry/list capacity, report offsets, NKRO, bit extraction, malformed/truncated inputs | All legal HID combinations, collection semantics and an independent full HID parser |
 | `keyboard.c`, `reboot_hotkey.c` | Original recognizer/HID suites and paired scenarios; report routing, modifiers, F24 and exact reboot sequence | Real host virtual-keyboard state; all possible multi-keyboard interactions |
-| `mouse.c` | Paired scenarios and sanitized native boundaries; actual descriptor-driven decoding, absolute/relative output, remote nonmotion, synchronization | Cross-device held-button aggregation is a known failing property; all pointing-device descriptors |
+| `mouse.c` | Paired scenarios and sanitized native boundaries; descriptor-driven decoding, absolute/relative output, per-interface/peer button masks, detach, focus all-up, nonmotion and synthetic desktop reports | All pointing-device descriptors, arbitrary loss of ordinary physical reports, physical host button semantics |
 | `zoom.c`, `zoom_tracker.c` | Original tracker suite plus paired debt/quiet-exit/manual-mode scenarios | Whether macOS is actually magnified; host scroll interpretation; exhaustive shared-edge paths |
 | `screensaver_policy.c` | Original policy suite and actual `tasks.c` timed paired keep-awake | Real macOS idle counter and lock/sleep policy |
 | `tasks.c` | Paired scheduler/policy/queue/heartbeat/watchdog calls; full storage updater | Actual loop instruction timing, every scheduler/IRQ/DMA interleaving, full Pong trajectory coverage |
 | `handlers.c` | Paired routing/switch/reboot handlers; storage heartbeat/source/reply/updater guards | Complete API, maintenance-hotkey, calibration and bootloader-command coverage |
+| `selection.c` | Paired production selection requests and reconciliation; independent wire fixtures for loss/recovery, ordering, joins, concurrent intent and wrap; targeted mutations | Assumes eventual delivery and fewer than 2**31 outstanding generations; unlimited resets with arbitrarily stale traffic are not proved |
 | `uart.c` | Real packet writer, queueing, checksum dispatch, DMA-ring receiver with modeled byte arrival | Actual UART/isolator electrical behavior, hardware DMA wrapping/overrun semantics |
 | `protocol.c` | `consumer_system` routes real reports to both outputs; `vendor_config` exercises guarded SET/GET, GET_ALL (44 fields), invalid checksum/length/ID/type, read-only fields and endpoint backpressure | Every mutable-field value, malformed/proxied config combination and persistence interaction |
 | `usb.c`, `usb_descriptors.c` | Actual app callbacks and descriptors in paired/HID layers; real TinyUSB device/control/HID/MSC stack in `usb_stack` | Physical USB/PIO, all descriptor/host combinations; real host and device stacks are separate from paired application simulator |
 | `led.c` | Paired focus indication and five-transition acknowledgement pulse scenario | Actual Sofle/QMK LED behavior and exhaustive transport failure/acknowledgement semantics |
 | `fw_update.c` | Existing helper suite, 64,128 contract cases, full storage updater | Unbounded protocol liveness under arbitrary link failure |
 | `config_migration.c` | Original migration tests plus real flash load/save/migrate/reload | Every historic unsupported layout and arbitrary application config consistency |
-| `utils.c` | Paired utilities; storage CRC/read/write/lock/config/recovery paths | Physical XIP safety, boot image execution, each untested utility branch |
+| `utils.c` | Paired utilities; storage CRC/read/write/lock/config/recovery paths; coherent persisted config snapshot under a real concurrent setter | Physical XIP safety, boot image execution, all live config-reader interleavings, each untested utility branch |
 | `ramdisk.c` | Actual UF2 MSC callbacks in storage suite | FAT/macOS copy behavior, SCSI transport and host request fragmentation through a complete stack |
 | `constants.c`, `defaults.c` | Production constants/default configuration linked in relevant native layers | Compiled data is not proof every option works in every combination |
 | `setup.c` | ARM build only | Role-probe GPIO/isolator logic, USB/PIO/DMA/clock initialization, startup flash/RAM behavior |
@@ -106,7 +107,9 @@ No QMK checkout or target Mac is modified by these tests.
 | --- | --- | --- |
 | Position-neutral clicks and wheel on both Macs | paired `pointer` | Poisons inactive cached coordinates, checks owner coordinates for absolute reports and zero deltas for relative reports in both output directions |
 | Cross-Pico pointer synchronization / zero-motion composite reports | `pointer_sync` | Actual physical input decode, serialized UART and owner report; checks unchanged physical-activity timestamp for empty composite report |
-| Button aggregation | strict known gap `button_aggregation` | B left held then A right should emit mask `3`; current production emits `2`. Retained as desired-property counterexample, not a passing regression |
+| Button aggregation | `mouse_button_aggregation`, `mouse_button_sources_and_detach`, `mouse_button_split_reports`, `mouse_incomplete_fragments_keep_holds` | OR of independent local interfaces and peer sources; same-bit holds, releases/detach, motion/wheel/pan, idle composite input, split IDs and rejected truncated fragments; both outputs and absolute/relative modes |
+| Held-button focus changes | `mouse_output_switch_held`, `mouse_switch_inflight_source`, `mouse_switch_full_queue` | Actual F24 releases both old-host HID interfaces; retains source masks for later input, supports detach after switching, rejects stale physical delivery to the inactive host, and requests recovery at the 100 ms critical-queue bound |
+| Mouse capability and synthetic reports | `mouse_asymmetric_capability`, `mouse_synthetic_desktop_preserves_sources` | Asymmetric startup cannot reinterpret a queued physical report as synthetic; actual macOS desktop edge handling emits five zero-button relative nudges while subsequent physical input retains both holds. Full behavior requires upgraded peers |
 | IDs 0–255, offsets and bounded usage lists | original HID `test_all_report_id_receivers`, `test_distinct_report_capacity`, generated HID cases; native mouse ID loop | Receiver-map/offset distinction preserved; 24 report offsets and four NKRO blocks remain representation limits |
 | Multi-block NKRO, usage carry, consumer/system reports | original HID named tests plus `hid_fuzz` | Independent outputs/activity guards; exact allocations expose memory errors. Multiple keyboard reports/collections still share collapsed state |
 | Malformed/truncated reports and false activity | generated HID, scalar oracle, `test_native_boundaries` | Exact short inputs and independent state/activity invariants; finite corpus, not every malformed descriptor |
@@ -118,8 +121,9 @@ No QMK checkout or target Mac is modified by these tests.
 | System-wide keep-awake timing | `timed_system_wide_keepawake` | Real A/B physical input, 10-second alternating jitter, unchanged direct timestamps through synthetic output/peer sync, stop after configured global idle and restart on real activity |
 | Inactive-output idle policy | `keepawake_inactive_only`, screensaver policy suite | Output focus changes and timeout-disabled case; per-output maximum/Pong combinations are not comprehensively exercised |
 | Persisted auto-start and migrations | storage `config_persistence_and_migration`, original migration/JS tests | Actual v8/v9/v10 flash load/save/reload and CRC; disabled mode persists; corruption defaults; separate from actual timed jitter scenarios |
+| Config save concurrent with SET_VAL | storage `config_set_during_save_keeps_persisted_crc_coherent` | Real API setter attempts to update a multibyte field halfway through the save copy; independently validates CRC and whole-old/whole-new value, retains the later RAM edit, and saves/reloads it subsequently. The config lock is absent during flash operations; this is a selected preemption, not all memory races |
 | UART delay/loss/corruption/partial packets | `uart_faults`, `uart_queue_switch`, storage peer tests | Modeled byte scheduling enters real ring/parser; exact source/receiver full-image traffic in storage; physical framing/parity errors are not simulated |
-| Selection message loss | strict known gap `selection_loss` | Blocking enqueue survives queue saturation but provides no wire acknowledgement/retransmit. Dropped selection can leave output state divergent beyond heartbeats |
+| Selection loss, ordering and recovery | `selection_loss`, `selection_link_recovery`, `selection_reordering`, `selection_concurrent`, `selection_duplicate_keeps_keys`, `selection_queue_retry`; join/wrap/legacy cases in `test_selection.py` | Runtime generation/origin ordering and recurring ID32 reconciliation restore agreement within the tested post-recovery bound; duplicates do not release held keys again, full queues retry. Requires both upgraded peers, recurring polls, eventual delivery and less than half the counter range outstanding; permanent partitions cannot converge |
 | Full peer update / completion boundaries | storage `peer_transfer_queue_loss_duplicate_wraparound` | 65,536 actual source word reads and receiver operations per full transfer, exact final-page/image boundaries, queue backpressure and retry |
 | Source pinning / recovery / stalled peer | `peer_corrupt_word_recovery`, `peer_stall_pause_and_restart`, `source_reads_and_metadata` | Corrupt words, pinned checksum/version, paused dirty state, repair on return, source refusal, legacy sentinel/metadata |
 | UF2 ordering/duplicates/invalid/mixed image | `uf2_reordering_and_duplicate`, `uf2_reject_invalid`, `uf2_complete_mixed_image_enters_recovery`; USB stack MSC requests | All 1,024 blocks, shuffled order, independent CRC and NOR byte/counter oracle through real MSC callback. Separate real MSC stack handles class control requests, SCSI INQUIRY/READ_CAPACITY/READ10 bulk data and invalid-CBW stalls with modeled storage; these are not yet one integrated end-to-end UF2 stack test |
@@ -131,8 +135,13 @@ No QMK checkout or target Mac is modified by these tests.
 
 Names in the matrix match functions/scenario keys in
 [paired transport tests](../../tests/sim/test_transport.py),
-[paired behavior tests](../../tests/sim/test_behaviors.py), and
+[paired behavior tests](../../tests/sim/test_behaviors.py),
+[mouse source tests](../../tests/sim/test_mouse_buttons.py),
+[mouse handoff tests](../../tests/sim/test_mouse_extra.py),
+[selection tests](../../tests/sim/test_selection.py), and
 [storage tests](../../tests/storage/test_storage.c).
+The selection scenario inventory is generated from its `scenario_` functions;
+`python3 tests/sim/run.py --help` lists all currently registered paired cases.
 
 ## Scheduling, replay and mutation evidence
 
@@ -151,27 +160,41 @@ Saved paired steps include input operations and serializable `expect`,
 `expect_report` and `check` assertions. Substantive elapsed-time, report-suppression,
 age-range and deadline assertions use the recorded predicate API, so generic
 replay/minimization preserves those oracles. Harness contract tests verify exact
-trace replay and that a real failing production property survives minimization.
+trace replay and that an intentionally impossible delivery property survives minimization.
 Storage replay uses seed plus named scenario, and its JSONL is an observation
 trace rather than an arbitrary input script. The finite model produces shortest
 counterexample paths and validates replay automatically. See each runner's help
 for current shrinking/minimization support; do not infer it from a saved log.
 
-The storage mutation suite executes ten deliberately broken production variants
+The storage mutation suite executes eleven deliberately broken production variants
 and requires runtime detection, not compile failure. The model detects five
 separate specification mutations. These demonstrate sensitivity to representative
 bugs such as premature finalization, queue consumption on failure, invalid CRC
-acceptance and missing exclusion. They are not a universal mutation score. The paired/higher-level mutation runner reports its measured results separately;
+acceptance, missing flash exclusion and a SET_VAL writer bypassing the config
+snapshot lock. The paired suite defines fifteen production mutations, including
+seven selection mutations and mouse peer-mask/echo/detach checks. Each runner
+reports its actual runtime results; these inventories are not completed-run
+claims or a universal mutation score. The intentional lost-delivery apparatus
+case checks replay/minimization independently of an unfixed production bug;
 source execution percentages above measure exercised code, not mutation quality.
 
 ## Outstanding findings and fidelity obligations
 
-The strict expected counterexamples are useful findings, not exceptions that
-make the firmware correct. Cross-device button aggregation and selection-message
-loss require production fixes/protocol decisions if their desired properties
-are to pass. Multiple keyboard report collections still collapse onto shared
+Cross-device mouse aggregation and bounded selection convergence after link
+recovery are passing regression properties for upgraded peers. The compatibility
+path still accepts legacy selection commands and physical mouse packets; it
+cannot give old firmware the new reconciliation or explicit-synthetic behavior.
+Ordinary input packets are not an acknowledged, lossless transport, and these
+tests do not promise delivery through permanent partitions or every queue/link
+failure. Multiple keyboard report collections still collapse onto shared
 keyboard state. The updater's volatile ownership flag cannot guarantee safe boot
 after arbitrary loss of power while rewriting the running slot.
+
+Configuration format remains 10 in firmware v0.94. The new short RAM lock covers
+the persisted snapshot and known config writers; it is released before flash
+work. It does not make all application reads atomic or prove every two-core
+memory interleaving. Neither this inventory nor the dated source-coverage table
+substitutes for the final overall run recorded in `validation.md`.
 
 There is no blanket proof of USB enumeration on macOS, Karabiner modifier state,
 Accessibility Zoom state, real idle timer resets, Sofle LED behavior, isolator

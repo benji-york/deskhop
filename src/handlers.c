@@ -74,21 +74,28 @@ void _get_border_position(device_t *state, border_size_t *border) {
 }
 
 void _screensaver_set(device_t *state, uint8_t value) {
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
+        config_lock();
         state->config.output[BOARD_ROLE].screensaver.mode = value;
-    else
+        config_unlock();
+    } else
         send_value(value, SCREENSAVER_MSG);
 };
 
 /* This key combo records switch y top coordinate for different-size monitors  */
 void screen_border_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    bool save = CURRENT_BOARD_IS_ACTIVE_OUTPUT;
+    border_size_t snapshot;
+    config_lock();
     border_size_t *border = &state->config.output[state->active_output].border;
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
+    if (save)
         _get_border_position(state, border);
+    snapshot = *border;
+    config_unlock();
+    if (save)
         save_config(state);
-    }
 
-    queue_packet((uint8_t *)border, SYNC_BORDERS_MSG, sizeof(border_size_t));
+    queue_packet((uint8_t *)&snapshot, SYNC_BORDERS_MSG, sizeof(snapshot));
 };
 
 /* This key combo puts board A in firmware upgrade mode */
@@ -230,8 +237,17 @@ void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
 }
 
 /* Function handles received mouse moves from the other board */
-void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
+static void handle_mouse_uart_report(uart_packet_t *packet, device_t *state, bool source_report) {
     mouse_report_t report = *(mouse_report_t *)packet->data;
+    if (source_report) {
+        state->peer_mouse_buttons = report.buttons;
+        state->mouse_buttons = combined_mouse_buttons(state);
+        /* A packet already in flight can still target the previous output.
+         * Retain its source state without re-pressing the released old host. */
+        if (!CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+            return;
+        report.buttons = combined_mouse_buttons(state);
+    }
     bool activating_zoom = is_macos_zoom_scroll(state, report.wheel);
     observe_zoom_scroll(state, report.wheel);
 
@@ -257,9 +273,41 @@ void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
         state->pointer_x = report.x;
         state->pointer_y = report.y;
     }
-    state->mouse_buttons = report.buttons;
+    state->mouse_buttons = combined_mouse_buttons(state);
 
     record_remote_activity(state, BOARD_ROLE);
+}
+
+void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
+    /* Capability learning can be asymmetric while old-format reports remain
+     * in flight. Never reinterpret those physical reports as synthetic. */
+    handle_mouse_uart_report(packet, state, true);
+}
+
+void handle_mouse_source_uart_msg(uart_packet_t *packet, device_t *state) {
+    handle_mouse_uart_report(packet, state, true);
+}
+
+void handle_mouse_synthetic_uart_msg(uart_packet_t *packet, device_t *state) {
+    handle_mouse_uart_report(packet, state, false);
+}
+
+void handle_mouse_buttons_sync_msg(uart_packet_t *packet, device_t *state) {
+    if (packet->data[1] > 1)
+        return;
+    uint8_t before = combined_mouse_buttons(state);
+    state->peer_mouse_state_known = true;
+    state->peer_mouse_buttons = packet->data[0];
+    state->mouse_buttons = combined_mouse_buttons(state);
+    /* A detach must release only that source. Periodic state mirrors do not
+     * manufacture input/activity or replay an ordinary physical report. */
+    if (packet->data[1] && before != state->mouse_buttons && CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
+        bool relative = mouse_uses_relative_mode(state);
+        mouse_report_t report = {.buttons = state->mouse_buttons,
+            .x = relative ? 0 : state->pointer_x, .y = relative ? 0 : state->pointer_y,
+            .mode = relative ? RELATIVE : ABSOLUTE};
+        queue_mouse_report_critical(&report, state);
+    }
 }
 
 /* Apply position-neutral mouse input at the active board's authoritative
@@ -267,12 +315,16 @@ void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
    reasserting a stale absolute position. */
 void handle_mouse_nonmotion_uart_msg(uart_packet_t *packet, device_t *state) {
     mouse_nonmotion_report_t *input = (mouse_nonmotion_report_t *)packet->data;
+    state->peer_mouse_buttons = input->buttons;
+    state->mouse_buttons = combined_mouse_buttons(state);
+    if (!CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+        return;
     observe_zoom_scroll(state, input->wheel);
     uint8_t mode = mouse_uses_relative_mode(state) || input->mode == RELATIVE
                        ? RELATIVE
                        : ABSOLUTE;
     mouse_report_t report = {
-        .buttons = input->buttons,
+        .buttons = state->mouse_buttons,
         .x       = mode == RELATIVE ? 0 : state->pointer_x,
         .y       = mode == RELATIVE ? 0 : state->pointer_y,
         .wheel   = input->wheel,
@@ -281,7 +333,6 @@ void handle_mouse_nonmotion_uart_msg(uart_packet_t *packet, device_t *state) {
     };
 
     queue_mouse_report(&report, state);
-    state->mouse_buttons = input->buttons;
     record_remote_activity(state, BOARD_ROLE);
 }
 
@@ -311,15 +362,48 @@ void handle_pointer_sync_msg(uart_packet_t *packet, device_t *state) {
     state->pointer_y = (int16_t)packet->data16[1];
 }
 
-/* Function handles request to switch output  */
-void handle_output_select_msg(uart_packet_t *packet, device_t *state) {
-    if (packet->data[0] >= NUM_SCREENS)
+/* Versioned selection updates are idempotent. A newer token selecting the same
+ * output must not repeatedly release held keys during heartbeat reconciliation. */
+static void receive_output_selection(uart_packet_t *packet, device_t *state, bool allow_legacy) {
+    selection_state_t incoming;
+    bool legacy = allow_legacy && selection_is_legacy(packet->data);
+    if (!legacy && !selection_decode(packet->data, &incoming))
         return;
-    state->active_output = packet->data[0];
-    if (state->tud_connected)
-        release_all_keys(state);
 
-    restore_leds(state);
+    firmware_update_lock();
+    uint8_t previous_output = state->active_output;
+    bool accepted;
+    if (legacy) {
+        selection_legacy_request(&state->selection, packet->data[0], 1 - state->board_role);
+        accepted = true;
+    } else {
+        accepted = selection_merge(&state->selection, &incoming, state->board_role);
+    }
+    if (accepted)
+        state->active_output = state->selection.output;
+    bool changed = previous_output != state->active_output;
+    firmware_update_unlock();
+
+    if (!accepted)
+        return;
+    /* Queue and USB operations can wait; never perform them under the state lock. */
+    if (changed || legacy) {
+        if (state->tud_connected)
+            release_all_keys(state);
+        if (changed)
+            release_mouse_host_buttons(state);
+        restore_leds(state);
+    }
+    if (!legacy)
+        sync_output_selection(state);
+}
+
+void handle_output_select_msg(uart_packet_t *packet, device_t *state) {
+    receive_output_selection(packet, state, true);
+}
+
+void handle_output_select_sync_msg(uart_packet_t *packet, device_t *state) {
+    receive_output_selection(packet, state, false);
 }
 
 /* On firmware upgrade message, reboot into the BOOTSEL fw upgrade mode */
@@ -349,13 +433,18 @@ void handle_switch_lock_msg(uart_packet_t *packet, device_t *state) {
 
 /* Handle border syncing message that lets the other device know about monitor height offset */
 void handle_sync_borders_msg(uart_packet_t *packet, device_t *state) {
+    bool notify = CURRENT_BOARD_IS_ACTIVE_OUTPUT;
+    border_size_t snapshot;
+    config_lock();
     border_size_t *border = &state->config.output[state->active_output].border;
-
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
+    if (notify)
         _get_border_position(state, border);
-        queue_packet((uint8_t *)border, SYNC_BORDERS_MSG, sizeof(border_size_t));
-    } else
+    else
         memcpy(border, packet->data, sizeof(border_size_t));
+    snapshot = *border;
+    config_unlock();
+    if (notify)
+        queue_packet((uint8_t *)&snapshot, SYNC_BORDERS_MSG, sizeof(snapshot));
 
     save_config(state);
 }
@@ -373,7 +462,9 @@ void handle_wipe_config_msg(uart_packet_t *packet, device_t *state) {
 
 /* Update screensaver state after received message */
 void handle_screensaver_msg(uart_packet_t *packet, device_t *state) {
+    config_lock();
     state->config.output[BOARD_ROLE].screensaver.mode = packet->data[0];
+    config_unlock();
 }
 
 /* Process consumer control message */
@@ -426,11 +517,15 @@ void handle_api_msgs(uart_packet_t *packet, device_t *state) {
         if (map->readonly)
             return;
 
+        config_lock();
         memcpy(ptr, &packet->data[1], map->len);
+        config_unlock();
     }
     else if (packet->type == GET_VAL_MSG) {
         uart_packet_t response = {.type=GET_VAL_MSG, .data={[0] = value_idx}};
+        config_lock();
         memcpy(&response.data[1], ptr, map->len);
+        config_unlock();
         queue_cfg_packet(&response, state);
     }
 
@@ -633,15 +728,47 @@ void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
 void set_active_output(device_t *state, uint8_t new_output) {
     if (new_output >= NUM_SCREENS)
         return;
+    uint8_t payload[PACKET_DATA_LENGTH];
+    firmware_update_lock();
+    /* output_toggle_hotkey_handler historically updates active_output first;
+     * the accepted token still records the previous selection here. */
+    bool changed = state->selection.output != new_output;
+    selection_request(&state->selection, new_output, state->board_role);
     state->active_output = new_output;
+    selection_encode(&state->selection, payload);
+    firmware_update_unlock();
     restore_leds(state);
 
     /* A dropped selection packet leaves the two Picos routing reports to
        different hosts. This queue is drained by the other core, so wait for a
        slot rather than silently losing a switch-critical state transition. */
-    queue_packet_blocking(&new_output, OUTPUT_SELECT_MSG, sizeof(new_output));
+    queue_packet_blocking(payload, OUTPUT_SELECT_MSG, sizeof(payload));
 
     /* If we were holding a key down and drag the mouse to another screen, the key gets stuck.
        Changing outputs = no more keypresses on the previous system. */
     release_all_keys(state);
+    if (changed)
+        release_mouse_host_buttons(state);
+}
+
+/* Announce the initialized state without treating the boot default as a new
+ * human selection. A surviving upgraded peer can restore its accepted token. */
+void announce_initial_output(device_t *state) {
+    uint8_t payload[PACKET_DATA_LENGTH];
+    firmware_update_lock();
+    selection_encode(&state->selection, payload);
+    firmware_update_unlock();
+    restore_leds(state);
+    queue_packet_blocking(payload, OUTPUT_SELECT_MSG, sizeof(payload));
+    release_all_keys(state);
+}
+
+/* Also sent after an accepted merge for prompt joining. Dropped/full-queue
+ * attempts are retried by the existing 1 Hz heartbeat; old peers ignore ID32. */
+void sync_output_selection(device_t *state) {
+    uint8_t payload[PACKET_DATA_LENGTH];
+    firmware_update_lock();
+    selection_encode(&state->selection, payload);
+    firmware_update_unlock();
+    queue_packet_try(payload, OUTPUT_SELECT_SYNC_MSG, sizeof(payload));
 }

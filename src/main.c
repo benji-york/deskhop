@@ -40,7 +40,7 @@ int main(void) {
     initial_setup(device);
 
     // Initial state, A is the default output
-    set_active_output(device, OUTPUT_A);
+    announce_initial_output(device);
 
     while (true) {
         for (int i = 0; i < NUM_TASKS; i++)

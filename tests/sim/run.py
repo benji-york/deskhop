@@ -7,8 +7,12 @@ import pathlib
 import sys
 from simulator import Simulation, ROOT
 from test_transport import SCENARIOS as TRANSPORT, KNOWN_GAPS, scenario_generated
-from test_behaviors import SCENARIOS as BEHAVIORS, BACKGROUND_FALSE
-SCENARIOS={**TRANSPORT,**BEHAVIORS,'generated':scenario_generated}
+from test_behaviors import SCENARIOS as BEHAVIORS, BACKGROUND_FALSE as BEHAVIOR_BACKGROUND_FALSE
+from test_mouse_buttons import SCENARIOS as MOUSE_BUTTONS
+from test_mouse_extra import SCENARIOS as MOUSE_EXTRA, BACKGROUND_FALSE as MOUSE_BACKGROUND_FALSE
+from test_selection import SCENARIOS as SELECTION
+BACKGROUND_FALSE = BEHAVIOR_BACKGROUND_FALSE | MOUSE_BACKGROUND_FALSE
+SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,'generated':scenario_generated}
 
 def run_case(name,seed,library=None,artifact_dir=None,core_order=None,expected_gap=False):
     fn=KNOWN_GAPS[name] if expected_gap else SCENARIOS[name]

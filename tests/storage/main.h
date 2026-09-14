@@ -86,3 +86,8 @@ extern struct storage_sio *sio_hw;
 extern struct storage_watchdog *watchdog_hw;
 void hw_write_masked(uint32_t *, uint32_t, uint32_t);
 struct storage_dma *dma_channel_hw_addr(uint32_t);
+
+/* Instrument native memcpy boundaries without replacing production logic. */
+void *storage_memcpy(void *, const void *, size_t);
+void write_raw_packet(uint8_t *, uart_packet_t *);
+#define memcpy storage_memcpy

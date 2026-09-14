@@ -1,11 +1,12 @@
 /* Execute production update/config/MSC units against observable NOR/SDK edges. */
 #include "main.h"
+#undef memcpy
 #include <stdio.h>
 #include <setjmp.h>
 
 static const char *scenario;
 static uint64_t now;
-static unsigned current_core, lock_owner[3], lock_depth[3], next_lock;
+static unsigned current_core, lock_owner[4], lock_depth[4], next_lock;
 static unsigned interrupts[2], erases, programs, resets, watchdog_kicks;
 static unsigned sector_erases[STORAGE_SIZE / FLASH_SECTOR_SIZE];
 static unsigned page_programs[STAGING_PAGES_CNT];
@@ -14,6 +15,11 @@ static jmp_buf power_cut;
 static uint32_t seed = 1, replay_seed = 1;
 static FILE *trace;
 static unsigned trace_step;
+static bool config_set_on_copy, config_set_pending;
+static unsigned config_set_invoked;
+static bool config_set_active;
+static jmp_buf config_set_blocked;
+static void interleaved_config_set(void);
 static void event(const char *kind, uint32_t value) {
     if (trace) fprintf(trace, "{\"scenario\":\"%s\",\"seed\":%u,\"step\":%u,\"time_us\":%llu,\"core\":%u,\"event\":\"%s\",\"value\":%u}\n",
                        scenario, replay_seed, trace_step++, (unsigned long long)now, current_core, kind, value);
@@ -58,19 +64,59 @@ static uint32_t make_image(uint8_t *bytes, uint16_t version, uint8_t salt) {
     memcpy(bytes + STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE, &metadata, sizeof(metadata));
     return crc;
 }
+static void interleaved_config_set(void) {
+    unsigned saved_core = current_core;
+    current_core = 1;
+    uart_packet_t packet = {.type = SET_VAL_MSG, .data = {21}};
+    uint64_t idle = UINT64_C(0x0066778899aabbcc);
+    memcpy(&packet.data[1], &idle, 7);
+    config_set_active = true;
+    if (setjmp(config_set_blocked) == 0) {
+        handle_api_msgs(&packet, &global_state);
+        ++config_set_invoked;
+    }
+    config_set_active = false;
+    current_core = saved_core;
+}
+void *storage_memcpy(void *destination, const void *source, size_t length) {
+    if (config_set_on_copy && destination == global_state.page_buffer
+        && source == &global_state.config && length == sizeof(config_t)) {
+        config_set_on_copy = false;
+        /* Preempt the native copy inside one multibyte config field. This
+           models a legal copy interleaving; the actual setter must acquire its
+           own lock to defer. Without serialization the saved field is torn. */
+        size_t split = offsetof(config_t, output[0].screensaver.idle_time_us) + 4;
+        memcpy(destination, source, split);
+        interleaved_config_set();
+        memcpy((uint8_t *)destination + split, (const uint8_t *)source + split, length - split);
+        return destination;
+    }
+    return memcpy(destination, source, length);
+}
+void write_raw_packet(uint8_t *bytes, uart_packet_t *packet) { CHECK(false); }
 void critical_section_init(critical_section_t *cs) {
     if (!cs->id) cs->id = ++next_lock;
-    CHECK(cs->id <= 2);
+    CHECK(cs->id <= 3);
 }
 void critical_section_enter_blocking(critical_section_t *cs) {
-    CHECK(cs->id && cs->id <= 2);
-    CHECK(!lock_depth[cs->id]);
+    CHECK(cs->id && cs->id <= 3);
+    if (lock_depth[cs->id]) {
+        /* Run the real setter up to its blocked SDK acquisition, then resume
+           that operation from its side-effect-free entry when the lock opens. */
+        CHECK(config_set_active && cs->id == 3 && lock_owner[cs->id] != current_core);
+        config_set_pending = true;
+        longjmp(config_set_blocked, 1);
+    }
     lock_owner[cs->id] = current_core;
     lock_depth[cs->id]++;
 }
 void critical_section_exit(critical_section_t *cs) {
     CHECK(lock_depth[cs->id] == 1 && lock_owner[cs->id] == current_core);
     lock_depth[cs->id]--;
+    if (cs->id == 3 && config_set_pending) {
+        config_set_pending = false;
+        interleaved_config_set();
+    }
 }
 uint32_t save_and_disable_interrupts(void) {
     unsigned was = interrupts[current_core];
@@ -85,6 +131,7 @@ uint8_t toggle_led(void) { return 0; }
 void reset_usb_boot(uint32_t gpio, uint32_t disable) { ++resets; event("rom-recovery-request", resets); }
 
 static void before_flash(uint32_t offset, size_t length) {
+    CHECK(!lock_depth[3]); /* RAM snapshots never hold their lock through flash. */
     CHECK(lock_depth[2] == 1 && lock_owner[2] == current_core);
     CHECK(interrupts[current_core]);
     CHECK(offset <= STORAGE_SIZE && length <= STORAGE_SIZE - offset);
@@ -143,6 +190,8 @@ void queue_packet_blocking(const uint8_t *data, enum packet_type_e type, int len
 
 static void fresh(const char *name) {
     scenario = name;
+    config_set_on_copy = config_set_pending = config_set_active = false;
+    config_set_invoked = 0;
     event("scenario-start", 0);
     memset(&global_state, 0, sizeof(global_state));
     storage_flash = receiver_flash;
@@ -495,6 +544,25 @@ static void config_persistence_and_migration(void) {
     }
 }
 
+static void config_set_during_save(void) {
+    fresh("config_set_during_save_keeps_persisted_crc_coherent");
+    global_state.config.output[0].screensaver.idle_time_us = UINT64_C(0x0011223344556677);
+    config_set_on_copy = true;
+    save_config(&global_state);
+    CHECK(config_set_invoked == 1);
+    config_t persisted;
+    memcpy(&persisted, ADDR_CONFIG, sizeof(persisted));
+    CHECK(persisted.checksum == oracle_crc32((const uint8_t *)&persisted, offsetof(config_t, checksum)));
+    CHECK(persisted.output[0].screensaver.idle_time_us == UINT64_C(0x0011223344556677)
+          || persisted.output[0].screensaver.idle_time_us == UINT64_C(0x0066778899aabbcc));
+    CHECK(global_state.config.output[0].screensaver.idle_time_us == UINT64_C(0x0066778899aabbcc));
+    /* The later SET was not lost: a subsequent explicit save persists it. */
+    save_config(&global_state);
+    memset(&global_state.config, 0, sizeof(config_t));
+    load_config(&global_state);
+    CHECK(global_state.config.output[0].screensaver.idle_time_us == UINT64_C(0x0066778899aabbcc));
+}
+
 static void power_cut_observation(void) {
     static const unsigned cuts[] = {1, 2, 3, 17, 18, 63, 127};
     for (unsigned i = 0; i < sizeof(cuts) / sizeof(cuts[0]); ++i) {
@@ -560,6 +628,7 @@ int main(int argc, char **argv) {
     host_peer_config_serializations();
     source_reads_and_metadata();
     config_persistence_and_migration();
+    config_set_during_save();
     power_cut_observation();
     watchdog_contract();
     if (trace) fclose(trace);

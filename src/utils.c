@@ -23,10 +23,12 @@ _Static_assert(offsetof(config_t, screensaver_system_timeout_sec) == CONFIG_V8_R
    cross-core exclusion; disabling interrupts protects only the calling core. */
 static critical_section_t firmware_update_critical_section;
 static critical_section_t flash_access_critical_section;
+static critical_section_t config_critical_section;
 
 void firmware_sync_init(void) {
     critical_section_init(&firmware_update_critical_section);
     critical_section_init(&flash_access_critical_section);
+    critical_section_init(&config_critical_section);
 }
 
 void firmware_update_lock(void) {
@@ -35,6 +37,16 @@ void firmware_update_lock(void) {
 
 void firmware_update_unlock(void) {
     critical_section_exit(&firmware_update_critical_section);
+}
+
+/* This lock only covers the small RAM snapshot/mutations. Keep it separate
+   from firmware ownership so API SETs never wait through a flash erase. */
+void config_lock(void) {
+    critical_section_enter_blocking(&config_critical_section);
+}
+
+void config_unlock(void) {
+    critical_section_exit(&config_critical_section);
 }
 
 /* ================================================== *
@@ -180,9 +192,10 @@ void write_flash_page(uint32_t target_addr, uint8_t *buffer) {
 
 void load_config(device_t *state) {
     const config_t *config   = ADDR_CONFIG;
-    config_t *running_config = &state->config;
+    config_t loaded_config;
+    config_t *running_config = &loaded_config;
 
-    /* Load the flash config first, including the checksum */
+    /* Validate/migrate privately; publish one complete configuration below. */
     critical_section_enter_blocking(&flash_access_critical_section);
     memcpy(running_config, config, sizeof(config_t));
     critical_section_exit(&flash_access_critical_section);
@@ -215,6 +228,9 @@ void load_config(device_t *state) {
             &running_config->output[OUTPUT_B].screensaver.mode,
             SCREENSAVER_SYSTEM_TIMEOUT_SEC,
             JITTER)) {
+        config_lock();
+        memcpy(&state->config, running_config, sizeof(config_t));
+        config_unlock();
         save_config(state);
         return;
     }
@@ -222,6 +238,10 @@ void load_config(device_t *state) {
     /* On any condition failing, we fall back to default config */
     if (!config_valid || running_config->version != CURRENT_CONFIG_VERSION)
         memcpy(running_config, &default_config, sizeof(config_t));
+
+    config_lock();
+    memcpy(&state->config, running_config, sizeof(config_t));
+    config_unlock();
 }
 
 void save_config(device_t *state) {
@@ -231,14 +251,15 @@ void save_config(device_t *state) {
         return;
     }
 
-    uint8_t *raw_config = (uint8_t *)&state->config;
-
-    /* Calculate and update checksum, size without checksum */
-    uint32_t checksum       = calc_crc32(raw_config, offsetof(config_t, checksum));
+    /* Snapshot and checksum the same bytes. SET_VAL on the other core may
+       update live config after this short section, but cannot tear this save. */
+    config_lock();
+    memcpy(state->page_buffer, &state->config, sizeof(config_t));
+    uint32_t checksum = calc_crc32(state->page_buffer, offsetof(config_t, checksum));
+    memcpy(state->page_buffer + offsetof(config_t, checksum), &checksum, sizeof(checksum));
     state->config.checksum = checksum;
+    config_unlock();
 
-    /* Copy the config to buffer and pad the rest with zeros */
-    memcpy(state->page_buffer, raw_config, sizeof(config_t));
     memset(state->page_buffer + sizeof(config_t), 0, FLASH_PAGE_SIZE - sizeof(config_t));
 
     /* Write the new config to flash */

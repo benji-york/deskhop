@@ -9,7 +9,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = ["utils.c", "ramdisk.c", "tasks.c", "handlers.c", "fw_update.c",
-           "config_migration.c", "constants.c", "defaults.c"]
+           "config_migration.c", "constants.c", "defaults.c", "protocol.c", "selection.c"]
 
 
 def build(directory, source_root=ROOT / "src", sanitize=True, coverage=False):

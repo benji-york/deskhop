@@ -41,6 +41,9 @@ size_t             get_field_map_length(void);
  *  Functions for loading, saving, wiping, and resetting device configuration.
  *==============================================================================*/
 
+/* Protect brief RAM configuration mutations/snapshots, never flash or queues. */
+void config_lock(void);
+void config_unlock(void);
 void load_config(device_t *);
 void queue_cfg_packet(uart_packet_t *, device_t *);
 void reset_config_timer(device_t *);

@@ -42,6 +42,10 @@ enum packet_type_e {
     ZOOM_ASSIST_MSG      = 29,
     ZOOM_ASSIST_CLEAR_MSG = 30,
     ACTIVITY_MSG         = 31,
+    OUTPUT_SELECT_SYNC_MSG = 32,
+    MOUSE_BUTTONS_SYNC_MSG = 33,
+    MOUSE_SOURCE_REPORT_MSG = 34,
+    MOUSE_SYNTHETIC_REPORT_MSG = 35,
 };
 
 typedef enum {

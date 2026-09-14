@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 93)
+set(VERSION_MINOR 94)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -68,6 +68,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/mouse.c
   ${SRC_DIR}/reboot_hotkey.c
   ${SRC_DIR}/screensaver_policy.c
+  ${SRC_DIR}/selection.c
   ${SRC_DIR}/zoom_tracker.c
   ${SRC_DIR}/zoom.c
   ${SRC_DIR}/tasks.c

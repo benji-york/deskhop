@@ -28,3 +28,8 @@ void queue_mouse_report(mouse_report_t *, device_t *);
 bool tud_mouse_report(uint8_t mode, uint8_t buttons, int16_t x, int16_t y, int8_t wheel, int8_t pan);
 void output_mouse_report(mouse_report_t *, device_t *);
 void sync_pointer_position(device_t *);
+void sync_mouse_buttons(device_t *);
+void mouse_interface_removed(hid_interface_t *, device_t *);
+uint8_t combined_mouse_buttons(const device_t *);
+bool queue_mouse_report_critical(mouse_report_t *, device_t *);
+void release_mouse_host_buttons(device_t *);

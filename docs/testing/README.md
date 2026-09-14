@@ -35,13 +35,19 @@ in the runbook. No command flashes or uploads firmware.
   full-size production storage transactions; real TinyUSB device and host
   stacks against virtual controllers; paired production scenarios; sanitizer
   checks of mouse inputs; simulator isolation, bounded-wait, replay and
-  minimization checks. Known design counterexamples are printed separately.
+  minimization checks. The finite model reports the remaining update power-loss
+  counterexample separately.
 - **Deep:** fast tier plus 20,000 HID cases, 16 storage seeds, 32 generated
   paired-input sequences, the backpressure scenario under all 24 fixed priority
-  orders of the four modeled cores, and 15 compiled production mutations.
-  Model mutations are counted separately. Nine valid-input traces are also compared with the original
-  `d42c930` source (Git and that local commit are required; no fetching). This is
-  bounded exploration, not every instruction interleaving.
+  orders of the four modeled cores, and 26 compiled production mutations
+  (11 storage and 15 paired, including seven selection mutations).
+  Model mutations are counted separately. Nine valid-input scenarios also run
+  against original `d42c930` source (Git and that local commit are required;
+  no fetching). Four host-effect traces match exactly; five compare ordered
+  effects per host, suppressing only redundant keyboard states and allowing
+  at most one modeled HID poll (1 ms) of timestamp drift. Mouse effects are
+  never collapsed. New UART reconciliation traffic is excluded. This is bounded
+  exploration, not every instruction interleaving or physical timing equivalence.
 - **Coverage:** source coverage artifacts in `build/tests/coverage`. Read the
   report's layer/denominator description; compilation does not imply execution,
   and percentages do not establish correctness.
@@ -127,8 +133,8 @@ def scenario_remote_wheel(sim):
 The expected report is independently packed from the HID contract, never
 obtained by calling the production encoder. Use `expect`, `expect_report`, or
 `check` for every property so failures retain their oracle during replay.
-`check` supports keyboard-usage absence, numeric ranges, elapsed-time bounds
-and host report counts. Internal state expectations complement host-observable
+`check` supports keyboard-usage absence, numeric ranges, elapsed-time bounds,
+host report counts and bytes within an indexed host report. Internal state expectations complement host-observable
 oracles; they should not replace them.
 
 Useful actions include `host`, `mount`, `unmount`, `report`, `led`, `endpoint`,
@@ -152,10 +158,11 @@ the model does not invent UART acknowledgements absent from the firmware.
 
 ```sh
 python3 tests/sim/run.py --scenario generated --seed 73
-python3 tests/sim/run.py --known-gaps
-python3 tests/sim/run.py --replay build/tests/failures/button_aggregation-1.json
-python3 tests/sim/run.py --minimize build/tests/failures/button_aggregation-1.json
-python3 tests/sim/run.py --replay build/tests/failures/button_aggregation-1.min.json
+python3 tests/sim/run.py --scenario mouse_output_switch_held
+python3 tests/sim/test_harness.py
+python3 tests/sim/run.py --replay build/tests/replay-contract.json
+python3 tests/sim/run.py --minimize build/tests/replay-contract.json
+python3 tests/sim/run.py --replay build/tests/replay-contract.min.json
 ```
 
 Replaying a failing case intentionally exits nonzero with the same assertion.
@@ -164,8 +171,10 @@ order, quantum and timestamped USB/UART (including received bytes), LED, reset
 and fault events with the executing core/domain. Exact trace equality is tested on a successful
 record/replay. Reduction deletes input actions while retaining the same failing
 assertion; the result is 1-minimal under action deletion, not a globally shortest
-trace or a minimization of arbitrary data values. The apparatus test currently
-reduces the real button-combination counterexample from 21 to 7 steps.
+trace or a minimization of arbitrary data values. The apparatus deliberately
+drops delivery and then requires the missing report. Its retained source-position
+precondition prevents deletion of the input from manufacturing the same failure;
+the current check reduces that intentional delivery failure from 21 to 9 steps.
 
 HID inputs can be reproduced with the seed/case CLI in
 [the HID boundary documentation](../../tests/hid_stubs/README.md). Storage
@@ -174,17 +183,41 @@ are shortest breadth-first traces and have their own replay command.
 
 ## Current production findings
 
-This branch builds **v0.93**, configuration format **10**. It adds narrow fixes
+This branch targets **v0.94**, configuration format **10**. It adds narrow fixes
 found by the new tests: descriptor/report length checks and bounded parser work;
 correct wide scalar extraction; rejection of invalid descriptor layouts before
 keyboard fallback; valid three-byte boot mouse handling; saturated wide mouse
 motion and safe coordinate arithmetic; and rejected invalid output indices.
 Ordinary preserved behavior remains covered by the original and new scenarios.
 
-Three desired properties are explicit counterexamples rather than passing
-claims: cross-device mouse button aggregation, output-selection convergence
-after on-wire packet loss, and safe boot after arbitrary interrupted running-slot
-updates. The existing multiple-keyboard-report collection limitation also
-remains. See the [matrix](coverage.md) before interpreting a green tier.
+Mouse buttons now retain each local interface's mask separately from peer input.
+The regressions cover overlapping holds, releases, detach, split report IDs,
+truncated fragments, both output directions and absolute/relative reports.
+F24 switching releases both old-host mouse interfaces while preserving physical
+holds for subsequent input. A late physical packet cannot press the old host
+again, and bounded queue admission requests recovery if a critical all-up cannot
+enqueue. Explicit synthetic reports preserve macOS desktop nudges without
+copying peer buttons into the relative HID interface.
+
+Selection uses runtime generation/origin tokens and periodic reconciliation.
+The tests cover bounded convergence after modeled link recovery, duplicates,
+reordering, concurrent selections, startup/join and counter wrap. This assumes
+recurring heartbeat polls, eventual delivery and fewer than 2**31 outstanding
+generations; permanent link loss has no convergence guarantee. Full mouse and
+selection semantics require both Picos to run the upgraded firmware. Legacy
+selection commands and physical mouse reports remain accepted, while mixed
+firmware cannot supply the new reconciliation and explicit-synthetic guarantees.
+
+Configuration saves compute their checksum from a coherent snapshot protected
+against known config writers. A deterministic real SET_VAL/save interleaving
+checks both the persisted bytes and a later edit's preservation in RAM. The short
+RAM lock ends before flash operations; this does not establish every live config
+reader's race freedom.
+
+Safe boot after arbitrary interrupted running-slot updates and the existing
+multiple-keyboard-report collection limitation remain open. See the
+[matrix](coverage.md) before interpreting a green tier. The current scenario
+inventory is generated by `python3 tests/sim/run.py --help`; completed overall
+validation belongs in the dated validation record.
 Hardware USB/PIO timing, electrical behavior, RP2040 weak-memory/instruction
 races, real Mac idle timers and Karabiner state still need independent evidence.

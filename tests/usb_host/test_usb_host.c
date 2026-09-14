@@ -108,6 +108,7 @@ bool queue_try_add(queue_t *queue, const void *item) {
 }
 bool queue_try_remove(queue_t *queue, void *item) { return false; }
 bool queue_try_peek(queue_t *queue, void *item) { return false; }
+void mouse_interface_removed(hid_interface_t *iface, device_t *state) { iface->mouse_buttons = 0; }
 void process_mouse_report(uint8_t *bytes, int length, uint8_t index, hid_interface_t *iface) {
     CHECK(length == 5 && iface->mouse.is_found);
     CHECK(get_report_value(bytes, length, &iface->mouse.move_x) == -7);

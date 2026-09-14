@@ -14,6 +14,9 @@ from run import ROOT, SOURCES, build
 
 # Each change is intentionally small and directly tied to a production invariant.
 MUTATIONS = [
+    ("config-set-without-snapshot-lock", "handlers.c",
+     "        config_lock();\n        memcpy(ptr, &packet->data[1], map->len);\n        config_unlock();",
+     "        memcpy(ptr, &packet->data[1], map->len);"),
     ("duplicate-uf2-program", "ramdisk.c",
      "if (fw_update_mark_block(global_state.uf2_blocks_received,\n"
      "                             &global_state.uf2_blocks_received_count,\n"

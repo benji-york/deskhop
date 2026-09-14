@@ -197,6 +197,11 @@ class Simulation:
             lo,hi=args;ok=lo<=self.now<=hi
         elif predicate=='usb_count':
             node,report_id,count=args;ok=len(self.reports(node,report_id))==count
+        elif predicate=='usb_bytes':
+            node,report_id,index,offset,hexdata=args
+            reports=self.reports(node,report_id);expected=bytes.fromhex(hexdata)
+            ok=(-len(reports)<=index<len(reports) and offset>=0
+                and bytes.fromhex(reports[index]['data'])[offset:offset+len(expected)]==expected)
         else:raise ValueError('unknown predicate '+predicate)
         assert ok,f'predicate {predicate} failed: {args}'
     def save(self,path,reason=''):

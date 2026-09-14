@@ -195,14 +195,22 @@ can later target a redesigned persistent update protocol, with explicit
 implementation trace/refinement checks instead of assuming the model is C.
 
 
-## Preservation check after input hardening
+## Preservation check after regression fixes
 
 `python3 tests/sim/differential.py` builds both the original `d42c930` sources
-and this branch through the same native adapter. Nine scenarios have identical
-timestamped observable traces: local/remote absolute and relative pointer input,
-pointer synchronization, UART faults, endpoint backpressure, F24 with held
-modifiers, coordinated triple-tap reboot, LED acknowledgement timing, zoom
-quiet-time/debt behavior and system-wide keep-awake. All nine passed. These are
-finite behavioral comparisons for valid inputs, not proof of equivalence for
-all inputs; malformed-input changes are intentional and separately asserted.
-No complete rewrite was needed to expose these boundaries.
+and this branch through the same native adapter. All nine scenarios run their
+independent endpoint/state/deadline assertions on both builds. Four retain exact
+timestamped USB/LED/reset/wake traces: backpressure, LED acknowledgement, zoom
+quiet-time/debt and system-wide keep-awake. Five compare ordered effects for each
+host: pointer input/synchronization, UART faults, F24 and coordinated reboot.
+That comparison suppresses only repeated identical keyboard states and allows
+one modeled HID poll (1 ms) of event-time drift; observed drift was at most
+500 microseconds. It retains every mouse report, required key release and other
+effect. Cross-host interleaving and callback core tags are outside that contract.
+
+New reconciliation packets intentionally change the UART trace, so it is excluded
+from cross-version comparison. Same-image replay still checks the full trace.
+The actual old receiver accepts the extended immediate selection message and
+ignores the new sync message. These are finite preservation and compatibility
+checks, not universal equivalence, physical timing or complete mixed-version
+semantics. New regression scenarios separately assert the intended fixes.

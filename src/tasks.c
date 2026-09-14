@@ -232,7 +232,9 @@ void heartbeat_output_task(device_t *state) {
 
     queue_try_add(&global_state.uart_tx_queue, &packet);
     sync_activity(state);
+    sync_mouse_buttons(state);
     sync_owned_zoom_assist(state);
+    sync_output_selection(state);
 }
 
 

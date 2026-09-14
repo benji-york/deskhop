@@ -41,6 +41,7 @@ void queue_system_packet(uint8_t *report, device_t *state) {
     last_system = report[0];
     system_count++;
 }
+void mouse_interface_removed(hid_interface_t *iface, device_t *state) { iface->mouse_buttons = 0; }
 void process_mouse_report(uint8_t *report, int length, uint8_t itf, hid_interface_t *iface) {
     (void)report; (void)length; (void)itf; (void)iface;
     mouse_count++;

@@ -16,6 +16,7 @@
 #define MACOS_SWITCH_MOVE_X 10
 #define MACOS_SWITCH_MOVE_COUNT 5
 #define ACCEL_POINTS 7
+#define MOUSE_CRITICAL_QUEUE_TIMEOUT_US 100000
 
 uint16_t get_jump_threshold(output_t *output, enum screen_pos_e direction) {
     const uint16_t NO_JUMP_THRESHOLD = 0;
@@ -160,7 +161,7 @@ enum screen_pos_e update_mouse_position(device_t *state, mouse_values_t *values)
     state->pointer_y = move_and_keep_on_screen(state->pointer_y, offset_y);
 
     /* Update buttons state */
-    state->mouse_buttons = values->buttons;
+    state->mouse_buttons = combined_mouse_buttons(state);
 
     return switch_direction;
 }
@@ -170,7 +171,90 @@ void output_mouse_report(mouse_report_t *report, device_t *state) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
         queue_mouse_report(report, state);
     } else {
-        queue_packet((uint8_t *)report, MOUSE_REPORT_MSG, MOUSE_REPORT_LENGTH);
+        enum packet_type_e type = state->peer_mouse_state_known
+            ? MOUSE_SYNTHETIC_REPORT_MSG : MOUSE_REPORT_MSG;
+        queue_packet((uint8_t *)report, type, MOUSE_REPORT_LENGTH);
+    }
+}
+
+uint8_t combined_mouse_buttons(const device_t *state) {
+    return state->local_mouse_buttons | state->peer_mouse_buttons;
+}
+
+static void refresh_local_mouse_buttons(hid_interface_t *changed, device_t *state) {
+    uint8_t buttons = changed ? changed->mouse_buttons : 0;
+    for (unsigned dev = 0; dev < MAX_DEVICES; dev++)
+        for (unsigned itf = 0; itf < MAX_INTERFACES; itf++)
+            buttons |= state->iface[dev][itf].mouse_buttons;
+    state->local_mouse_buttons = buttons;
+    state->mouse_buttons = combined_mouse_buttons(state);
+}
+
+static void publish_mouse_buttons(device_t *state, bool detached) {
+    uint8_t data[] = {state->local_mouse_buttons, detached};
+    if (detached)
+        queue_packet_blocking(data, MOUSE_BUTTONS_SYNC_MSG, sizeof(data));
+    else
+        queue_packet(data, MOUSE_BUTTONS_SYNC_MSG, sizeof(data));
+}
+
+/* Also advertises source-report support to a peer. Old firmware ignores this
+ * new message and continues receiving the original physical report format. */
+void sync_mouse_buttons(device_t *state) {
+    publish_mouse_buttons(state, false);
+}
+
+void mouse_interface_removed(hid_interface_t *iface, device_t *state) {
+    uint8_t before = state->local_mouse_buttons;
+    iface->mouse_buttons = 0;
+    refresh_local_mouse_buttons(NULL, state);
+    if (before == state->local_mouse_buttons)
+        return;
+    publish_mouse_buttons(state, true);
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
+        bool relative = mouse_uses_relative_mode(state);
+        mouse_report_t report = {.buttons = combined_mouse_buttons(state),
+            .x = relative ? 0 : state->pointer_x, .y = relative ? 0 : state->pointer_y,
+            .mode = relative ? RELATIVE : ABSOLUTE};
+        queue_mouse_report_critical(&report, state);
+    }
+}
+
+bool queue_mouse_report_critical(mouse_report_t *report, device_t *state) {
+    uint64_t started = time_us_64();
+    while (state->tud_connected) {
+        if (queue_try_add(&state->mouse_queue, report))
+            return true;
+        if (time_us_64() - started >= MOUSE_CRITICAL_QUEUE_TIMEOUT_US) {
+            state->reboot_requested = true;
+            return false;
+        }
+        tight_loop_contents();
+    }
+    return false;
+}
+
+/* A focus change ends a drag on both HID interfaces of the old host. Physical
+ * source masks remain authoritative for subsequent input on the new host. */
+void release_mouse_host_buttons(device_t *state) {
+    if (!combined_mouse_buttons(state))
+        return;
+    mouse_report_t absolute = {.x = state->pointer_x, .y = state->pointer_y, .mode = ABSOLUTE};
+    mouse_report_t relative = {.mode = RELATIVE};
+    if (queue_mouse_report_critical(&absolute, state))
+        queue_mouse_report_critical(&relative, state);
+}
+
+/* Physical reports carry only this Pico's source state across UART. Synthetic
+ * parking/desktop reports retain the original exact-output message semantics. */
+static void output_source_mouse_report(mouse_report_t *report, device_t *state) {
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
+        report->buttons = combined_mouse_buttons(state);
+        queue_mouse_report(report, state);
+    } else {
+        enum packet_type_e type = state->peer_mouse_state_known
+            ? MOUSE_SOURCE_REPORT_MSG : MOUSE_REPORT_MSG;
+        queue_packet((uint8_t *)report, type, MOUSE_REPORT_LENGTH);
     }
 }
 
@@ -293,7 +377,9 @@ void switch_virtual_desktop(device_t *state, output_t *output, int new_index, in
     }
 
     state->pointer_x       = (direction == RIGHT) ? MIN_SCREEN_COORD : MAX_SCREEN_COORD;
+    config_lock();
     output->screen_index = new_index;
+    config_unlock();
 }
 
 /*                               BORDER
@@ -366,8 +452,8 @@ void extract_report_values(uint8_t *raw_report, int len, device_t *state, mouse_
     extract_value(uses_id, &values->wheel, &mouse->wheel, raw_report, len);
     extract_value(uses_id, &values->pan, &mouse->pan, raw_report, len);
 
-    if (!extract_value(uses_id, &values->buttons, &mouse->buttons, raw_report, len)) {
-        values->buttons = state->mouse_buttons;
+    if (!mouse->buttons.size || !extract_value(uses_id, &values->buttons, &mouse->buttons, raw_report, len)) {
+        values->buttons = iface->mouse_buttons;
     }
 }
 
@@ -443,9 +529,18 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
        keyboard events. */
     if (values.move_x == 0 && values.move_y == 0 &&
         values.wheel == 0 && values.pan == 0 &&
-        values.buttons == state->mouse_buttons) {
+        values.buttons == iface->mouse_buttons) {
         return;
     }
+
+    uint8_t previous_local = state->local_mouse_buttons;
+    iface->mouse_buttons = (uint8_t)values.buttons;
+    refresh_local_mouse_buttons(iface, state);
+    values.buttons = state->local_mouse_buttons;
+    /* An inactive source sends its state with the routed physical report.
+     * The active source must mirror its own holds for future output switches. */
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT && previous_local != state->local_mouse_buttons)
+        sync_mouse_buttons(state);
 
     record_local_activity(state, state->active_output);
 
@@ -487,7 +582,7 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
         }
 
         /* Move the mouse, depending where the output is supposed to go */
-        output_mouse_report(&report, state);
+        output_source_mouse_report(&report, state);
     }
 
     /* There is one cursor, but each board tracks its position separately. Absolute

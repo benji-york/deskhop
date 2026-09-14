@@ -111,27 +111,15 @@ def scenario_core_watchdog(s):
     s.do(1,'pause',1,1200000);s.advance(1100000)
     s.expect(1,'stopped',1);s.expect(0,'stopped',0)
 
-# These desired properties currently fail in production. Keep visible as strict
-# expected counterexamples, never silently redefine the oracle to match firmware.
-def gap_button_aggregation(s):
-    attach(s);s.do(1,'report',1,0,mouse(buttons=1));s.advance(5000)
-    s.do(0,'report',1,1,mouse(buttons=2));s.advance(5000)
-    s.expect_report(0,2,out_mouse(3,16000,16000))
-
-def gap_selection_loss(s):
-    attach(s)
-    # Drain all traffic, then drop exactly OUTPUT_SELECT. A blocking TX queue
-    # protects enqueueing only; there is no on-wire ACK/retry of the selection.
-    s.advance(5000);s.do(0,'fault',{'drop':1});s.do(0,'select',1);s.advance(1200000)
-    s.expect(1,'output',1)
-
 SCENARIOS={
     'pointer':scenario_pointer,'pointer_sync':scenario_pointer_sync,
     'uart_faults':scenario_uart_faults,'backpressure':scenario_backpressure,
     'critical_queue':scenario_critical_queue,'uart_queue_switch':scenario_uart_queue_switch,
     'disconnect':scenario_disconnect,'core_watchdog':scenario_core_watchdog,
 }
-KNOWN_GAPS={'button_aggregation':gap_button_aggregation,'selection_loss':gap_selection_loss}
+# Retain explicit expected-counterexample support for future findings. The two
+# original gaps are now passing regressions in mouse_buttons and selection.
+KNOWN_GAPS={}
 
 def scenario_generated(s,steps=100):
     """Independent host oracle: accumulate integer deltas in a safe interior.

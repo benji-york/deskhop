@@ -9,7 +9,18 @@ import subprocess
 import sys
 import tempfile
 from build import ROOT, build
+from selection_mutations import SOURCE_MUTATIONS
 MUTATIONS=[
+ ('ignore-peer-mouse-buttons','mouse.c',
+  'return state->local_mouse_buttons | state->peer_mouse_buttons;',
+  'return state->local_mouse_buttons;', 'mouse_button_aggregation', 'host 0 ID 2'),
+ ('echo-peer-mouse-buttons','mouse.c',
+  'values.buttons = state->local_mouse_buttons;',
+  'values.buttons = combined_mouse_buttons(state);', 'mouse_button_aggregation', 'host 0 ID 2'),
+ ('omit-mouse-detach-release','mouse.c',
+  'void mouse_interface_removed(hid_interface_t *iface, device_t *state) {',
+  'void mouse_interface_removed(hid_interface_t *iface, device_t *state) { return;',
+  'mouse_button_sources_and_detach', 'host 0 ID 2'),
  ('stale-remote-click','mouse.c','if (!CURRENT_BOARD_IS_ACTIVE_OUTPUT && !position_changed)',
   'if (false && !CURRENT_BOARD_IS_ACTIVE_OUTPUT && !position_changed)','pointer','host 0 ID 2'),
  ('no-pointer-sync','mouse.c','void sync_pointer_position(device_t *state) {',
@@ -22,6 +33,7 @@ MUTATIONS=[
  ('zoom-no-quiet-period','zoom_tracker.c','now + ZOOM_ASSIST_QUIET_TIME_US',
   'now','zoom_scroll_debt_and_quiet_exit','zoom'),
 ]
+MUTATIONS.extend(SOURCE_MUTATIONS)
 def main():
     with tempfile.TemporaryDirectory(prefix='deskhop-sim-mutants-') as tmp:
         base=pathlib.Path(tmp)

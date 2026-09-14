@@ -16,6 +16,7 @@
 #include "packet.h"
 #include "reboot_hotkey.h"
 #include "screen.h"
+#include "selection.h"
 #include "zoom_tracker.h"
 
 typedef void (*action_handler_t)();
@@ -119,6 +120,7 @@ typedef struct {
     uint8_t peer_activity_valid;            // Bitmask for peer_activity
     uint32_t core1_last_loop_pass;       // Timestamp of last core1 loop execution
     uint8_t active_output;               // Currently selected output (0 = A, 1 = B)
+    selection_state_t selection;         // Runtime token; short firmware-lock snapshots
     uint8_t board_role;                  // Which board are we running on? (0 = A, 1 = B, etc.)
 
     hid_keyboard_report_t local_kbd_states[MAX_DEVICES]; // Store keyboard states
@@ -133,6 +135,9 @@ typedef struct {
     int16_t pointer_x; // Store and update the location of our mouse pointer
     int16_t pointer_y;
     int16_t mouse_buttons; // Store and update the state of mouse buttons
+    uint8_t local_mouse_buttons; // OR of attached interfaces; never includes peer input.
+    uint8_t peer_mouse_buttons;
+    bool peer_mouse_state_known; // Peer understands source-owned mouse reports.
 
     config_t config;       // Device configuration, loaded from flash or defaults used
     queue_t hid_queue_out; // Queue that stores outgoing hid messages

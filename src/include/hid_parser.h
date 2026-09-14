@@ -180,6 +180,7 @@ struct hid_interface_t {
     uint8_t protocol;
     bool uses_report_id;
     bool descriptor_invalid; // Report-protocol input must not use a rejected layout.
+    uint8_t mouse_buttons;   // Held buttons owned by this physical interface only.
 };
 
 typedef struct {

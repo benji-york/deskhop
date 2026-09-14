@@ -50,6 +50,7 @@ int32_t extract_kbd_data(uint8_t *, int, uint8_t, hid_interface_t *, hid_keyboar
 int32_t extract_bit_variable(nkro_block_t *, uint8_t *, int, uint8_t *, int);
 keyboard_t *get_keyboard(hid_interface_t *, uint8_t);
 void process_mouse_report(uint8_t *, int, uint8_t, hid_interface_t *);
+void mouse_interface_removed(hid_interface_t *, device_t *);
 void process_keyboard_report(uint8_t *, int, uint8_t, hid_interface_t *);
 void process_consumer_report(uint8_t *, int, uint8_t, hid_interface_t *);
 void process_system_report(uint8_t *, int, uint8_t, hid_interface_t *);

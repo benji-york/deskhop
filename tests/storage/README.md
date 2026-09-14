@@ -23,7 +23,8 @@ log; replay regenerates the scenario from the seed, not from arbitrary edited lo
 ## What executes
 
 The suite compiles the complete checked-in `utils.c`, `ramdisk.c`, `tasks.c`,
-`handlers.c`, `fw_update.c`, `config_migration.c`, `constants.c`, and `defaults.c`.
+`handlers.c`, `fw_update.c`, `config_migration.c`, `constants.c`, `defaults.c`,
+`protocol.c`, and `selection.c`. `run.py`'s `SOURCES` is the build inventory.
 The linker removes unused functions; no updater or MSC callback is copied into
 test code. Production `device_t`, config layout, UF2 layout, protocol enums,
 metadata, and TinyUSB HID types are included directly.
@@ -41,9 +42,14 @@ For every word of the two full peer transfers, emitted requests run through the
 real source `handle_request_byte_msg` and `read_running_firmware_word`, then the
 real receiver response handler and firmware upgrade task. The source has separate
 state, image bytes, and TX queue. An adapter switches modeled flash address spaces
-between invocations. This suite schedules complete operations serially and checks
-lock ownership; it does **not** run two CPUs or exhaustively interleave C memory
-accesses. The broader simulator and reduced model checker cover additional
+between invocations. Update operations run serially and check lock ownership.
+The config regression additionally invokes the real SET_VAL handler on modeled
+core 1 halfway through core 0's save copy, splitting a 64-bit field after four
+bytes. If its real config-lock acquisition blocks, the boundary defers the
+side-effect-free setter until the save releases that lock. Removing the setter's
+lock allows it to execute inside the copy and produces a torn persisted value.
+This suite does **not** run two CPUs or exhaustively interleave C memory accesses.
+The broader simulator and reduced model checker cover additional
 scheduling questions at their separately documented abstraction levels.
 
 ## Coverage and oracles
@@ -61,16 +67,26 @@ scheduling questions at their separately documented abstraction levels.
 | Source/reboot reservation | Bounds/alignment, legacy sentinel word, busy source, rebooted source, late UF2 after reboot decision | No unsafe source read or post-decision flash operation/watchdog extension |
 | Metadata formats | Current metadata/version/transferred CRC and packed legacy direct rollback | Direct old images accepted; unaligned legacy peer metadata rejected |
 | Config persistence | Actual v8/v9/v10 load, migration, flash save, later reload, manual auto-start disable, corruption fallback | Independent persisted CRC; preserved speed, border and timeout fields; defaults comparison |
+| Config SET_VAL/save race | `config_set_during_save_keeps_persisted_crc_coherent`: actual setter runs at a selected snapshot-copy preemption, then a later save/reload | Independent CRC over persisted bytes and a whole-old/whole-new field oracle; later RAM edit remains available; config lock must be released before every flash operation |
 | Power interruption | Seven partial firmware erase/program cuts; one partial config program | NOR persists, RAM state vanishes; damaged image CRC rejected; torn config loads defaults |
 | Watchdog | Core1 hang threshold minus one and threshold, deliberate reboot | Observable kick counts, no wall-clock sleeping |
 
-`mutations.py` compiles and runs ten isolated production variants. It must kill all
+`mutations.py` compiles and runs eleven isolated production variants. It must kill all
 of them at runtime: duplicate UF2 programming, early completion, skipped embedded
 CRC, UF2 after reboot reservation, consuming a word on TX failure, premature page
 zero commit, missing final page, stale response acceptance, config-save guard
-removal, and removal of cross-core flash locking. Compile failures do not count.
+removal, removal of cross-core flash locking, and SET_VAL bypassing the config
+snapshot lock. Compile failures do not count.
 This demonstrates sensitivity to these concrete errors; it is not a universal
 mutation score or proof of correctness.
+
+The configuration format remains 10 in firmware v0.94. `save_config` copies RAM
+under a short config lock and calculates the persisted checksum from that copy;
+the lock ends before erase/program. Known config writers use the same lock,
+including API SET, screensaver settings, screen borders and desktop screen-index
+changes. This guarantees a coherent persisted snapshot for those writers, not
+atomicity of every live config read. The updater/flash ownership design and
+power-loss recovery guarantees are unchanged.
 
 ## Extending scenarios
 

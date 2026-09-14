@@ -75,8 +75,12 @@ const uart_handler_t uart_handler[] = {
     /* Core functions */
     {.type = KEYBOARD_REPORT_MSG, .handler = handle_keyboard_uart_msg},
     {.type = MOUSE_REPORT_MSG, .handler = handle_mouse_abs_uart_msg},
+    {.type = MOUSE_SOURCE_REPORT_MSG, .handler = handle_mouse_source_uart_msg},
+    {.type = MOUSE_SYNTHETIC_REPORT_MSG, .handler = handle_mouse_synthetic_uart_msg},
+    {.type = MOUSE_BUTTONS_SYNC_MSG, .handler = handle_mouse_buttons_sync_msg},
     {.type = MOUSE_NONMOTION_MSG, .handler = handle_mouse_nonmotion_uart_msg},
     {.type = OUTPUT_SELECT_MSG, .handler = handle_output_select_msg},
+    {.type = OUTPUT_SELECT_SYNC_MSG, .handler = handle_output_select_sync_msg},
     {.type = POINTER_SYNC_MSG, .handler = handle_pointer_sync_msg},
     {.type = MODIFIER_STATE_MSG, .handler = handle_modifier_state_msg},
     {.type = ZOOM_ASSIST_MSG, .handler = handle_zoom_assist_msg},
