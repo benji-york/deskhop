@@ -8,6 +8,24 @@ README.
 
 Snapshot: 2026-09-15
 
+## v0.102 release candidate: completed fixes only
+
+The user requested publication and deployment of the completed fixes. The
+`codex/release-v0.102` branch contains keyboard recovery `b8992dc`, followed by
+UART integrity `5499e8f`, plus a release version bump. Both fix branches have
+been pushed separately to the fork. Configuration validation (#4) and reboot
+safety (#1) are **not included**. Main is unchanged.
+
+See the [v0.102 release record](docs/testing/release-v102.md) for validation,
+artifact identity, known limitations, and the required two-board migration.
+Fresh release validation passed: fast 38/38, deep 46/46, ARM 2/2. The frozen
+artifact's full-slot CRC is `dabb9b75` (boot metadata CRC `d9e9f64d`); the future
+hardware check is `verify 0.102 dabb9b75`.
+This candidate has **not been flashed**. The v0.101 deployment remains the
+last accepted hardware state. The draft notes below describe the original
+unversioned commits; v0.102 supplies their required release version, not a claim
+that physical migration or acceptance has already happened.
+
 ## Unflashed UART command integrity draft
 
 The second ordered bug-fix draft branches from keyboard draft
