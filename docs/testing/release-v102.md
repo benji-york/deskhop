@@ -1,7 +1,10 @@
-# v0.102 completed-fix release candidate
+# v0.102 completed-fix release and deployment
 
 Prepared 2026-09-15 at the user's request to commit, push, and flash the finished
-fixes. **Not yet flashed.** Last accepted hardware version remains v0.101.
+fixes. **Both Picos are programmed, externally verified, and running v0.102.**
+Paired runtime verification passed with both host cables on this Mac. Returning
+B's cable to its original Mac and user input acceptance remain pending. The last
+user-accepted paired hardware version is v0.101.
 
 ## Scope and history
 
@@ -55,9 +58,9 @@ Do not follow the older runbook instruction to flash A and wait for propagation.
    all firmware bytes to match and every settings byte to remain unchanged.
    Stop on errors or stale/busy USB/media services. No automatic reboot while
    verification is incomplete.
-5. Return B's host cable to its original Mac and reboot both normally once
-   independently verified. Keep both powered. Their new protected UART link
-   should then restore normal cross-board operation.
+5. Reboot both normally once independently verified, while both host cables
+   remain on this Mac. Check their new protected UART link before returning B's
+   host cable to its original Mac; repeat the runtime check after relocation.
 6. From a confirmed DeskHop console, request fresh statuses and
    `verify 0.102 <full-slot CRC from the candidate manifest>`. Require both
    identities, new/stable sessions, advancing core counters, and both complete
@@ -75,6 +78,58 @@ teardown coincided with a Mac panic. Do not use `picotool reboot -u` or a mounte
 UF2 copy as an implicit substitute. Finish cable relocation before maintenance;
 if a board unexpectedly restarts later, stop and re-establish a safe maintenance
 path before touching either image.
+
+### Pico B programming
+
+At 2026-09-15 17:04:33 UTC, B's direct programming and external verification
+completed. `picotool load -v` passed. An independent 262,144-byte readback
+exactly matches the frozen v0.102 binary; all 4,096 settings bytes match the
+pre-write backup (SHA-256
+`aa816af793193a7ce487d391b49bf45d514dde09bd77d28255eb782e82a85464`). The old
+firmware backup exactly matched the accepted v0.101 binary.
+
+B was deliberately left in disk-free PICOBOOT pending A's upgrade. Evidence
+and backups: `build/flashing/pico-b-v102-retry.AbTELH/`, including `result.json`.
+The initial backup attempt returned an unspecified RP2040 error and created no
+backup files; no writes occurred then. Reconnecting B and reentering maintenance
+resolved both small and full backup reads. The underlying cause is unproven;
+the earlier error record is `build/flashing/pico-b-v102.ZXWOfu/result.json`.
+
+### Pico A programming and paired runtime verification
+
+At 2026-09-15 17:08:37 UTC, A's direct programming and independent readback
+completed. All 262,144 firmware bytes matched the frozen v0.102 binary; all
+4,096 settings bytes remained unchanged. Its pre-write firmware matched the
+accepted v0.101 binary; its settings backup has the same SHA-256 recorded above
+for B. Evidence: `build/flashing/pico-a-v102.kHhVDP/`, including `result.json`.
+
+Both devices were selected by their exact flash UIDs, and each exposed only
+the class-255 PICOBOOT interface, with no mass-storage interface. After successful
+external verification, `picotool reboot -a --ser <UID>` returned success for A
+and then B, by 17:09:05 UTC. Both normal DeskHop USB identities reappeared and
+no RP2 Boot device remained. The same 20 Mac media clients remained active and
+nonbusy. No settings writes or automatic peer firmware update were needed.
+
+The bounded read-only checker passed at 17:09:27 UTC in 5.728 seconds, receiving
+11,064 bytes. Five statuses confirmed both builds, stable sessions, idle updaters,
+and advancing counters on all four cores. Correct/wrong/correct expected CRCs
+produced PASS/FAIL/PASS for three fresh full-slot scans on each board. The
+intentional wrong-CRC failure is a negative control, not a firmware defect.
+Every scan measured `dabb9b75`, separately from boot metadata CRC `d9e9f64d`,
+and took 1.121921–1.140241 seconds. The peer responses demonstrate communication
+over the new protected UART protocol, not automatic-update acceptance.
+
+Both boot sessions changed from the last pre-maintenance check:
+A `37dad6e6dd90a647` → `b0bce00bb487c0ee`;
+B `278b9e1e3603606d` → `78a478e1fcdf0bdd`.
+Evidence: `build/flashing/console-v102-smoke-20260915T170927.300864Z.json` and
+matching `.txt`. The checker was adapted from v0.101 and passed its offline
+full-sequence self-test, including 42 rejected invalid fixtures, before use.
+
+Both host cables were still attached to this Mac. The user has been asked to
+return B to its original Mac. Post-relocation runtime checks and physical
+typing/releases, buttons, switching/arrows, zoom assist and keep-awake acceptance
+are not yet established.
 
 ## Validation and deployment evidence
 
@@ -108,7 +163,8 @@ The post-flash console command is `verify 0.102 dabb9b75`.
 
 Results: `build/tests/results-{fast,deep,arm}.json`. Frozen artifacts never
 include the settings sector. `build/flashing/freeze_v102.py` refuses to replace
-an existing artifact with different bytes. Hardware status remains unflashed.
+an existing artifact with different bytes. Do not rerun that preparation helper
+after deployment starts: per-board hardware results now update the manifest.
 
 ### Pre-migration hardware check
 

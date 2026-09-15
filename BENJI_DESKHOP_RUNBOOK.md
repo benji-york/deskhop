@@ -8,7 +8,7 @@ README.
 
 Snapshot: 2026-09-15
 
-## v0.102 release candidate: completed fixes only
+## Current firmware: v0.102 completed fixes; input acceptance pending
 
 The user requested publication and deployment of the completed fixes. The
 `codex/release-v0.102` branch contains keyboard recovery `b8992dc`, followed by
@@ -19,14 +19,20 @@ safety (#1) are **not included**. Main is unchanged.
 See the [v0.102 release record](docs/testing/release-v102.md) for validation,
 artifact identity, known limitations, and the required two-board migration.
 Fresh release validation passed: fast 38/38, deep 46/46, ARM 2/2. The frozen
-artifact's full-slot CRC is `dabb9b75` (boot metadata CRC `d9e9f64d`); the future
+artifact's full-slot CRC is `dabb9b75` (boot metadata CRC `d9e9f64d`); the
 hardware check is `verify 0.102 dabb9b75`.
-This candidate has **not been flashed**. The v0.101 deployment remains the
-last accepted hardware state. The draft notes below describe the original
-unversioned commits; v0.102 supplies their required release version, not a claim
-that physical migration or acceptance has already happened.
+**Both Picos were independently programmed, readback-verified, and normally
+rebooted on 2026-09-15.** All firmware bytes matched; saved settings were unchanged.
+The paired console check passed: both execute v0.102, have fresh stable boot
+sessions and advancing cores, and pass fresh full-slot scans over the new UART
+link. Both host cables were on this Mac for that check. Returning B to its
+original Mac and physical input acceptance remain pending. v0.101 is the last
+user-accepted deployment, not the currently installed firmware.
 
-## Unflashed UART command integrity draft
+The draft notes below describe the original unversioned commits; v0.102 supplies
+their required release version. Release source/artifact commit: `fea46a8`.
+
+## Historical UART command integrity draft (released in v0.102)
 
 The second ordered bug-fix draft branches from keyboard draft
 `b8992dc16370bbb1ce00a238463ec6e8207d0883` on `codex/uart-command-integrity`.
@@ -37,11 +43,11 @@ deliberately program both boards independently; subsequent compatible releases
 retain protected automatic peer updates. The Web Config page uses a separate
 12-byte CRC8 format. This draft preserves the keyboard state envelope and keeps
 firmware 0.101/configuration 10: **UNFLASHABLE as a release** until the stack's
-explicit version/migration plan. The deployed v0.101 installation below is unchanged.
+explicit version/migration plan. The v0.102 release above completes that migration.
 Validation passed: fast 38/38, deep 46/46, ARM 2/2, 12 UART integrity scenarios,
 72 inherited keyboard cases, and the additional queue/remount scheduling checks.
 
-## Unflashed keyboard reliability draft
+## Historical keyboard reliability draft (released in v0.102)
 
 The first bug-fix-stack draft starts at `af100bc` on
 `codex/keyboard-state-recovery`. See the [design and test note](docs/testing/keyboard-reliability-draft.md).
@@ -51,11 +57,11 @@ synthetic lease repairs a lost lock-shortcut all-up. Keyboard backpressure no
 longer requests a reboot. Mouse timeout/reboot safety is a later stack task.
 This RAM-only draft keeps version 0.101/configuration 10 and is **not for rollout**;
 its keyboard protocol requires both upgraded boards and a deliberate release
-version bump. The accepted deployment below remains unchanged.
+version bump. The v0.102 release above supplies both.
 
-## Current deployment: v0.101 full-slot verification
+## Previous accepted deployment: v0.101 full-slot verification
 
-Both boards are running v0.101 and have completed input acceptance. The
+Both boards ran v0.101 and completed input acceptance before v0.102. The
 [deployment record](docs/testing/verification-v101.md) documents the new
 `verify <build> <crc32>` command, native validation, and physical evidence.
 It checks both boards using fresh incremental flash scans, executing-build
