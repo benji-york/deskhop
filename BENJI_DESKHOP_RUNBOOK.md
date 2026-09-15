@@ -8,6 +8,67 @@ README.
 
 Snapshot: 2026-09-15
 
+## Repository-owned updater (host implementation; hardware acceptance pending)
+
+Use the root Makefile and `scripts/update_firmware.py` for future upgrades;
+release-specific scripts under `build/flashing/` are retained historical evidence,
+not the maintained entry point. `make` shows help. `make release` tests/builds
+and freezes a validated candidate; `make flash-plan` previews without touching
+USB. An explicitly requested `make flash` performs serial ROM entry, UID-targeted
+backup/load/readback, unchanged-settings checks, normal reboot, bounded peer
+propagation and complete fresh both-board verification. `make verify` is read-only.
+
+The profile in `config/updater.json` pins A/B's physical UIDs and A's current
+callout port. See [the updater guide](docs/updater.md) for tool paths, explicit
+frozen-manifest selection, manual disk-free entry, compatibility limits and
+failure recovery. Do not use mass-storage ROM, `reboot -u`, or automatic retries.
+Normal upgrades require a candidate newer than both boards; an already-current
+pair is verified without rewriting. UART framing changes require a separate
+migration, not this automatic workflow.
+
+Evidence is retained under `build/releases/` and `build/updater/runs/`; checks and
+settings backups are not traded away for speed. Preparation can reuse the same
+validated candidate when inputs are unchanged. Firmware sources/version, QMK,
+and the deployed pair are unchanged by this host-only work. Actual flashing and
+serial-command hardware acceptance remain pending; offline test doubles are not
+evidence of physical USB/ROM behavior. Ask Benji to check normal input after any
+future successful device verification.
+
+Host-only validation on 2026-09-15 passed all 99 updater tests, all 40 fast-tier
+steps, ARM configuration/build, default Make help, and hardware-free preview.
+A second preparation reused the validated candidate. The frozen
+`build/releases/deskhop-v0.104-0x2bs1w1/manifest.json` still identifies full-slot
+CRC `befb208b` and BIN SHA-256
+`32ebaeada1de04f5bc347caa0f4b5d6173e1afe433a9a86dc2d1d7c00ad241e8`,
+identical to the accepted deployment. No USB inspection, serial command or
+picotool invocation against hardware occurred in this validation.
+
+On this Mac, picotool is currently not on `PATH`; pass `PICOTOOL` explicitly
+for a future authorized flash/verify. The previously used installation is
+`/Users/benji/.codex/worktrees/9235/DeskHop/build/tools/picotool-2.3.1/picotool/picotool`.
+That external tool dependency is not hardcoded in the maintained Python scripts.
+
+### First live updater run: already-current pair, 2026-09-15
+
+On Benji's subsequent "Flash" request, `make flash PICOTOOL=…` reused the frozen
+v0.104 candidate and correctly took the already-current verification path. No
+bootloader command, flash write, or reboot occurred. The first run stopped on
+A's `UNVERIFIED reason=busy` after reading all 262,144 bytes; B passed. Evidence:
+`build/updater/runs/20260915T210348Z-a826uiym/`. The post-scan firmware recheck can
+conservatively invalidate a complete scan on a single failed nonblocking lock
+acquisition. This was not a reported checksum mismatch, and no safety check was
+bypassed or flash command retried.
+
+A separate read-only `make verify PICOTOOL=…` then completed in 5.617 seconds.
+Both boards passed the full correct/wrong/correct verification sequence with
+CRC `befb208b`, unchanged boot sessions and advancing cores. Combined history
+checks and unchanged active/nonbusy Mac media checks passed. Evidence:
+`build/updater/runs/20260915T210433Z-y3kn8rst/result.json`, with
+`firmware_verified=true`, `write_started=false`, and `reboot_requested=false`.
+The new updater's live diagnostic path is exercised; serial ROM entry, upload
+and auto-propagation through this new host workflow remain untested. No firmware
+or QMK changes were needed, and no new user-input acceptance is claimed.
+
 ## Accepted v0.104: serial bootloader entry (physical command check pending)
 
 `codex/serial-bootloader` adds `bootloader A` and `bootloader B` to the production

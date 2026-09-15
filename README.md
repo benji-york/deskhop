@@ -92,6 +92,12 @@ Alternatively, you can use the [pre-built images](https://github.com/hrvach/desk
 
 ## Upgrading firmware
 
+**Benji's maintained macOS workflow:** use the root Makefile (`make release`,
+`make flash-plan`, then explicitly `make flash`). See the [updater guide](docs/updater.md)
+for UID-pinned serial entry, disk-free PICOBOOT, backups and both-board verification.
+This avoids the ROM mass-storage path implicated in this setup's Mac panic.
+The generic upstream methods below are not the recommended procedure for this pair.
+
 **Option 1** - (firmware 0.6 and later) Put the device in "config mode" by simultaneously pressing **left ctrl + right shift + c + o**. Device your keyboard is plugged into will reboot and turn into a USB drive called "DESKHOP". All you need to do is copy the .uf2 file to it. Once image is verified, device will flash and reboot, then proceed to upgrade the other board. During this operation the led will blink. Once it's done, it will write flash and reboot, completing the operation.
 
 _Note_ - This is not an actual generic USB drive, you can't use it to copy files to it.

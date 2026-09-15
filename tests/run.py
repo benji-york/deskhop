@@ -38,6 +38,7 @@ def main():
         run('ARM configure',['cmake','-S','.','-B','build/arm-validation'],env,120)
         run('ARM firmware',['cmake','--build','build/arm-validation','--parallel','4'],env,600)
         return
+    run('host updater contracts',[sys.executable,'-m','unittest','discover','-s','tests/updater','-v'])
     for name,unit in [('zoom_tracker','zoom_tracker'),('fw_update','fw_update'),
                       ('screensaver_policy','screensaver_policy'),('reboot_hotkey','reboot_hotkey'),
                       ('config_migration','config_migration'),('selection','selection'),
