@@ -1,7 +1,8 @@
 # v0.103 Bootloader-button fix
 
 Prepared 2026-09-15 on `codex/bootloader-button-fix`, based on accepted v0.102
-commit `0d09d27`. **Not flashed.** Both Picos remain on accepted v0.102.
+commit `0d09d27`. Source/artifact commit: `bbac34f`. **Deployed and firmware-verified
+on both Picos.** User input and physical Bootloader-button acceptance are pending.
 
 ## Fix and regression coverage
 
@@ -50,7 +51,7 @@ handlers remain unchanged and do not gain this guard;
 this is not the broad controlled-reboot safety fix. There is no remote execution
 acknowledgement or retry after physical UART corruption. A persistently stalled
 or saturated UART can defer this button's local action rather than force reset.
-Physical browser/USB/UART execution and ROM entry still need deployment acceptance.
+The button's physical browser/USB/UART sequence and ROM entry still need acceptance.
 
 ## Build and validation
 
@@ -81,7 +82,51 @@ Final artifact identities:
 The candidate is built in `build/arm-validation/`. Frozen release filenames are
 `build/flashing/deskhop-v0.103-bootloader-button.*` and
 `build/flashing/v103-candidate.json`; the manifest records the committed source
-identity and validation results without marking hardware deployment complete.
+identity, validation results and separate deployment/acceptance state.
+
+## Hardware deployment: 2026-09-15
+
+Pico A was already in disk-free PICOBOOT when flashing was requested. Its exact
+flash UID was `E6654854574C3E30`; only USB interface class 255 was present.
+Its pre-flash firmware matched accepted v0.102 byte-for-byte. After backing up
+firmware and settings, official picotool `load -v` passed, and an independent
+262,144-byte readback matched the frozen v0.103 binary. All 4,096 settings bytes
+were unchanged. A normal application reboot was requested at
+**18:29:25.575682 UTC**. No mass-storage mount/copy was used. The same 20 Mac
+media clients remained active/nonbusy, and the RP2 Boot object disappeared.
+
+The first bounded rollout capture obtained 56 statuses over 29.592 seconds.
+B remained on its v0.102 boot while receiving v0.103 from A; its final sampled
+progress was 217,088 / 262,144 bytes. This capture ended on its time limit,
+not a transfer failure. A separate status-only continuation observed B on
+v0.103 with a new boot session and two same-boot advancing samples across all
+four cores. Peer execution became `update=confirmed`. No B cable relocation,
+manual flash or power cycle was needed. Completion occurred between captures;
+the exact final-page/reboot instant was not sampled.
+
+- A session: `1163db6c8ba18a80`.
+- B session: `93c98994a187e251` → `11f9bc0f338e959f`.
+- B UID: `E6654854577F2330`.
+
+The final read-only console checker passed in **5.504 seconds** (11,742 received
+bytes): five stable paired statuses, two histories, and three fresh full-slot
+scans on each board. Correct/wrong/correct CRC expectations yielded
+**PASS/FAIL/PASS**, while every measured image CRC was `0c2fdeb0`. Boot metadata
+CRC independently matched `30eae185`; generation stayed stable and both cores
+advanced during every scan. B's image was measured by its own firmware, not by
+external picotool readback; its settings were not separately read back.
+
+Evidence under `build/flashing/`:
+
+- `pico-a-v103.1zhk_b_p/`: backups, flash/readback logs, reboot and USB/media health.
+- `console-v103-rollout-20260915T182955.json` and `.txt`.
+- `console-v103-progress-20260915T183016Z.json` and `.txt`.
+- `console-v103-smoke-20260915T183031.112765Z.json` and `.txt`.
+
+Typing, trackball/buttons and switching are awaiting Benji's check. The new
+Bootloader button has deliberately **not** been exercised on hardware: it stops
+both boards, so that acceptance test requires independent input and recovery
+access to both boards. Successful flashing does not establish button behavior.
 
 ## Rollout and remaining scope
 

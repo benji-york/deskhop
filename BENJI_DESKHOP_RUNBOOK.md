@@ -8,7 +8,7 @@ README.
 
 Snapshot: 2026-09-15
 
-## Prepared v0.103: Bootloader-button fix (not flashed)
+## Deployed v0.103: Bootloader-button fix (input acceptance pending)
 
 `codex/bootloader-button-fix` corrects the Web Config Bootloader button's boolean
 payload and the missing firmware command allowlist entry. The firmware retains
@@ -20,10 +20,15 @@ generated pages and the embedded image are updated together. No remote execution
 acknowledgement is added.
 See the [v0.103 fix record](docs/testing/bootloader-button-v103.md) for validation,
 artifact identity and safe hardware acceptance steps. UART/configuration formats,
-settings and QMK are unchanged. v0.102 below is still the accepted deployment;
+settings and QMK are unchanged. Both Picos now run v0.103 from source `bbac34f`.
+A's full external readback matched the artifact and its saved settings were
+unchanged. B automatically updated from v0.102 without a power cycle. Fresh
+full-slot scans on both boards matched `0c2fdeb0`; both-core progress passed.
+User input/switching checks and a controlled physical Bootloader-button test
+remain pending. v0.102 below is the previous user-accepted deployment;
 the config-validation and reboot-safety fixes remain separate unfinished work.
 
-## Current accepted firmware: v0.102 completed fixes
+## Previous accepted firmware: v0.102 completed fixes
 
 The user requested publication and deployment of the completed fixes. The
 `codex/release-v0.102` branch contains keyboard recovery `b8992dc`, followed by

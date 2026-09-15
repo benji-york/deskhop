@@ -61,12 +61,13 @@ including bounded work, malformed command recovery, and HID progress while a
 serial reader is stalled. The paired adapter derives task names and core
 ownership from each firmware's tables, including older baseline builds.
 
-## Current release and prepared Bootloader fix
+## Current release and Bootloader fix
 
-Both boards now run accepted [v0.102](release-v102.md), which releases the keyboard
+The accepted [v0.102](release-v102.md) released the keyboard
 and UART fixes below with their required version bump and two-board migration.
-The [v0.103 Bootloader-button fix](bootloader-button-v103.md) is prepared but
-not flashed. It adds an actual page-click/mock-HID test and 20 paired-production
+The [v0.103 Bootloader-button fix](bootloader-button-v103.md) is now deployed
+and firmware-verified on both boards; user input and physical button acceptance
+remain pending. It adds an actual page-click/mock-HID test and 20 paired-production
 scenarios for USB admission, peer routing, queue/DMA/UART drain and updater guards.
 These exercise production handlers, not the Pico ROM or physical USB hardware.
 
