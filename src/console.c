@@ -6,6 +6,7 @@
 #include "diagnostic_history.h"
 #include "diagnostic_peer.h"
 #include "diagnostic_peer_history.h"
+#include "diagnostic_runtime.h"
 #include "tusb.h"
 
 #if DH_CONSOLE && CFG_TUD_CDC
@@ -109,6 +110,98 @@ static void finish_status(const char *outcome) {
     console.peer_waiting = console.peer_ready = false;
 }
 
+static const char *update_source_name(unsigned source) {
+    switch (source) {
+    case DIAGNOSTIC_SOURCE_NONE: return "none";
+    case DIAGNOSTIC_SOURCE_PEER: return "peer";
+    case DIAGNOSTIC_SOURCE_USB: return "usb";
+    default: return "unknown";
+    }
+}
+
+static const char *update_phase_name(unsigned phase) {
+    switch (phase) {
+    case DIAGNOSTIC_UPDATE_IDLE: return "idle";
+    case DIAGNOSTIC_UPDATE_RECEIVING: return "receiving";
+    case DIAGNOSTIC_UPDATE_PAUSED: return "paused";
+    case DIAGNOSTIC_UPDATE_VALIDATING: return "validating";
+    case DIAGNOSTIC_UPDATE_REBOOT_PENDING: return "reboot_pending";
+    case DIAGNOSTIC_UPDATE_FAILED: return "failed";
+    case DIAGNOSTIC_UPDATE_ABANDONED: return "abandoned";
+    default: return "unknown";
+    }
+}
+
+static const char *peer_boot_name(unsigned boot) {
+    switch (boot) {
+    case DIAGNOSTIC_PEER_UNOBSERVED: return "unobserved";
+    case DIAGNOSTIC_PEER_FIRST_SEEN: return "first_seen";
+    case DIAGNOSTIC_PEER_SAME_BOOT: return "same_boot";
+    case DIAGNOSTIC_PEER_NEW_BOOT: return "new_boot";
+    case DIAGNOSTIC_PEER_IDENTITY_CHANGED: return "identity_changed";
+    default: return "unknown";
+    }
+}
+
+static const char *progress_name(unsigned progress) {
+    switch (progress) {
+    case DIAGNOSTIC_PROGRESS_UNAVAILABLE: return "unavailable";
+    case DIAGNOSTIC_PROGRESS_BASELINE: return "baseline";
+    case DIAGNOSTIC_PROGRESS_ADVANCING: return "advancing";
+    case DIAGNOSTIC_PROGRESS_NOT_ADVANCING: return "not_advancing";
+    default: return "unknown";
+    }
+}
+
+static const char *execution_name(unsigned execution) {
+    switch (execution) {
+    case DIAGNOSTIC_EXECUTION_NOT_OBSERVED: return "not_observed";
+    case DIAGNOSTIC_EXECUTION_PENDING_REBOOT: return "pending_reboot";
+    case DIAGNOSTIC_EXECUTION_AWAITING_PROGRESS: return "awaiting_progress";
+    case DIAGNOSTIC_EXECUTION_CONFIRMED: return "confirmed";
+    case DIAGNOSTIC_EXECUTION_UNEXPECTED_BOOT: return "unexpected_boot";
+    default: return "unknown";
+    }
+}
+
+static void append_version(unsigned encoded_version) {
+    if (encoded_version < 100) {
+        append("unknown");
+    } else {
+        unsigned version = encoded_version - 100;
+        appendf("%u.%u", version / 1000, version % 1000);
+    }
+}
+
+static void append_runtime(char board, const diagnostic_runtime_snapshot_t *runtime) {
+    for (unsigned core = 0; core < 2; ++core) {
+        if (runtime->core_valid & (1u << core)) {
+            appendf("board=%c core=%u checkpoints=%lu age_ms=%lu\r\n", board, core,
+                    (unsigned long)runtime->core_ticks[core],
+                    (unsigned long)runtime->core_age_ms[core]);
+        } else {
+            appendf("board=%c core=%u checkpoints=unavailable age_ms=unavailable\r\n", board, core);
+        }
+    }
+    appendf("board=%c update seen=%u source=%s phase=%s received=%lu total=%lu progress_age_ms=",
+            board, (unsigned)runtime->update_seen, update_source_name(runtime->source),
+            update_phase_name(runtime->phase), (unsigned long)runtime->received_bytes,
+            (unsigned long)runtime->total_bytes);
+    if (!runtime->update_seen)
+        append("unavailable");
+    else
+        appendf("%lu", (unsigned long)runtime->progress_age_ms);
+    append(" target=");
+    append_version(runtime->target_version);
+    appendf(" attempt=%lu\r\n", (unsigned long)runtime->update_attempt);
+}
+
+static void append_observation(char board, const diagnostic_peer_observation_t *observation) {
+    appendf("board=%c observation boot=%s progress=%s update=%s\r\n", board,
+            peer_boot_name(observation->boot), progress_name(observation->progress),
+            execution_name(observation->update));
+}
+
 static void append_peer(void) {
     const peer_status_snapshot_t *peer = &console.peer_result.snapshot;
     char board_id[17];
@@ -127,6 +220,12 @@ static void append_peer(void) {
             (unsigned long)(peer->boot_session >> 32),
             (unsigned long)(uint32_t)peer->boot_session,
             (unsigned long long)peer->uptime_ms);
+    char board = peer->role == 0 ? 'A' : 'B';
+    if (peer->protocol == 2)
+        append_runtime(board, &peer->runtime);
+    else
+        appendf("board=%c runtime=unavailable protocol=%u\r\n", board, (unsigned)peer->protocol);
+    append_observation(board, &console.peer_result.observation);
 }
 
 static bool history_count(const char *line, unsigned *count) {
@@ -276,8 +375,30 @@ static void append_history_row(const peer_history_snapshot_t *snapshot, unsigned
         appendf("%s packet_type=%lu", event.type == HISTORY_PACKET_CHECKSUM_ERROR
                 ? "packet_checksum_error" : "uart_dropped", (unsigned long)event.value);
         break;
+    case HISTORY_UPDATE_BEGIN:
+        appendf("update_begin source=%s target=", update_source_name(event.a));
+        append_version(event.value);
+        break;
+    case HISTORY_UPDATE_PROGRESS:
+        appendf("update_progress source=%s percent=%u received=%lu", update_source_name(event.a),
+                (unsigned)event.b, (unsigned long)event.value);
+        break;
+    case HISTORY_UPDATE_PHASE:
+        appendf("update_phase phase=%s source=%s target=", update_phase_name(event.a),
+                update_source_name(event.b));
+        append_version(event.value);
+        break;
+    case HISTORY_PEER_OBSERVED:
+        appendf("peer_observed peer=%c boot=%s build=", output_name(event.a), peer_boot_name(event.b));
+        append_version(event.value);
+        break;
+    case HISTORY_PEER_PROGRESS:
+        appendf("peer_progress peer=%c progress=%s build=", output_name(event.a), progress_name(event.b));
+        append_version(event.value);
+        break;
     default:
-        appendf("unknown type=%u", (unsigned)event.type);
+        appendf("unknown type=%u a=%u b=%u value=%lu", (unsigned)event.type,
+                (unsigned)event.a, (unsigned)event.b, (unsigned long)event.value);
         break;
     }
     append("\r\n");
@@ -336,19 +457,21 @@ static void command(uint64_t now_us) {
         append("ERROR command must contain printable ASCII characters\r\n");
     } else if (strcmp(console.line, "help") == 0) {
         append("BEGIN help\r\n"
-               "DeskHop diagnostic console - all commands are read-only.\r\n"
+               "DeskHop console - all commands are read-only.\r\n"
                "\r\n"
-               "  help             Show this help.\r\n"
-               "  status           Show both boards' identity, build, boot session and uptime.\r\n"
+               "  help             Show help.\r\n"
+               "  status           Show build, boot, core checkpoints and update state.\r\n"
                "  history [count]  Show both boards' recent events (default 16; 1..64 each).\r\n"
                "\r\n"
                "Status queries both boards by default and prints this board first.\r\n"
-               "A missing or older peer is reported after a bounded timeout.\r\n"
-               "History merges snapshots by approximate event age; each row identifies its board.\r\n"
-               "Cross-board timing is approximate; each board keeps its own event order.\r\n"
-               "History is volatile; GAP marks a record overwritten during capture.\r\n"
-               "Firmware verification will follow in a later release.\r\n"
-               "The image CRC is metadata captured at boot, not an integrity check.\r\n"
+               "A missing peer has a bounded timeout; older firmware may lack runtime data.\r\n"
+               "Core counts mark diagnostic task checkpoints.\r\n"
+               "Peer observations update only when status is queried.\r\n"
+               "Confirmation is historical and version-only; progress compares the latest queries.\r\n"
+               "History merges snapshots by approximate event age; each board keeps its own order.\r\n"
+               "History and observations live in RAM until reboot.\r\n"
+               "GAP means unavailable during capture or through an older peer protocol.\r\n"
+               "The image CRC is boot metadata, not an integrity check.\r\n"
                "Enter submits; Backspace edits; Ctrl-C cancels a line.\r\n"
                "END help\r\n");
     } else if (strcmp(console.line, "status") == 0) {
@@ -364,6 +487,8 @@ static void command(uint64_t now_us) {
                              (unsigned long)(console.boot_session >> 32),
                              (unsigned long)(uint32_t)console.boot_session,
                              (unsigned long long)(now_us / 1000));
+        const diagnostic_runtime_snapshot_t runtime = diagnostic_runtime_snapshot();
+        append_runtime(console.board, &runtime);
         if (++console.query_token == 0)
             ++console.query_token;
         console.query_started_us = now_us;

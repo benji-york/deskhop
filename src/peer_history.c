@@ -17,6 +17,13 @@ static void write_le(uint8_t *bytes, uint64_t value, unsigned count) {
         bytes[i] = (uint8_t)(value >> (8 * i));
 }
 
+static uint32_t fallback_token(uint32_t token) {
+    uint64_t rotated = (uint64_t)token + UINT32_C(0x80000000);
+    if (rotated > UINT32_MAX)
+        rotated -= UINT32_MAX;
+    return (uint32_t)rotated;
+}
+
 static unsigned wire_size(unsigned limit) {
     return PEER_HISTORY_HEADER_SIZE + limit * PEER_HISTORY_RECORD_SIZE + 4;
 }
@@ -76,7 +83,8 @@ peer_history_start_t peer_history_start(peer_history_t *state, uint32_t token, u
     state->client_sent = false;
     state->client_phase = CLIENT_RECEIVE;
     state->client_limit = (uint8_t)count;
-    state->client_token = token;
+    state->client_token = state->client_wire_token = token;
+    state->client_protocol = PEER_HISTORY_PROTOCOL;
     state->client_started_us = requested_at_us;
     state->client_first_response_us = 0;
     state->client_received_count = 0;
@@ -93,7 +101,7 @@ bool peer_history_receive_request(peer_history_t *state, const uint8_t payload[8
     expire(state, now_us);
     uint32_t token = (uint32_t)read_le(payload, 4);
     unsigned count = payload[5];
-    if (!token || payload[4] != PEER_HISTORY_PROTOCOL || !count
+    if (!token || (payload[4] != PEER_HISTORY_PROTOCOL && payload[4] != PEER_HISTORY_LEGACY_PROTOCOL) || !count
         || count > PEER_HISTORY_MAX_COUNT || payload[6] || payload[7]
         || state->local_role > 1 || state->server_phase != SERVER_IDLE)
         return false;
@@ -103,6 +111,7 @@ bool peer_history_receive_request(peer_history_t *state, const uint8_t payload[8
         return false;
     state->server_seen_request = true;
     state->server_token = token;
+    state->server_protocol = payload[4];
     state->server_limit = (uint8_t)count;
     state->server_started_us = now_us;
     state->server_phase = SERVER_BEGIN;
@@ -118,7 +127,7 @@ bool peer_history_receive_request(peer_history_t *state, const uint8_t payload[8
 void peer_history_receive_response(peer_history_t *state, const uint8_t payload[8], uint64_t now_us) {
     expire(state, now_us);
     if (!state->client_active || !state->client_sent
-        || read_le(payload, 4) != state->client_token)
+        || read_le(payload, 4) != state->client_wire_token)
         return;
     unsigned index = (unsigned)read_le(payload + 4, 2);
     if (index >= state->client_wire_size / 2) {
@@ -143,7 +152,7 @@ void peer_history_receive_response(peer_history_t *state, const uint8_t payload[
 static void encode_header(peer_history_t *state) {
     uint8_t *bytes = state->server_bytes;
     memset(bytes, 0, PEER_HISTORY_HEADER_SIZE);
-    bytes[0] = PEER_HISTORY_PROTOCOL;
+    bytes[0] = state->server_protocol;
     bytes[1] = state->local_role;
     bytes[2] = (uint8_t)state->server_window.count;
     bytes[3] = PEER_HISTORY_RECORD_SIZE;
@@ -189,6 +198,12 @@ static void server_work(peer_history_t *state, peer_history_begin_fn begin,
         } else if (!read(context, state->server_window.first_seq + index, &event)) {
             state->server_gap_mask |= UINT64_C(1) << index;
             memset(bytes, 0, PEER_HISTORY_RECORD_SIZE);
+        } else if (state->server_protocol == PEER_HISTORY_LEGACY_PROTOCOL
+                   && event.type > PEER_HISTORY_LEGACY_EVENT_MAX) {
+            /* A legacy reader cannot decode newly added event types. Keep its
+             * sequence window intact and report those rows as unavailable. */
+            state->server_gap_mask |= UINT64_C(1) << index;
+            memset(bytes, 0, PEER_HISTORY_RECORD_SIZE);
         } else {
             encode_record(bytes, &event);
         }
@@ -212,9 +227,10 @@ static void server_work(peer_history_t *state, peer_history_begin_fn begin,
 static bool decode_header(peer_history_t *state) {
     const uint8_t *bytes = state->client_bytes;
     peer_history_snapshot_t *snapshot = &state->result.snapshot;
-    if (bytes[0] != PEER_HISTORY_PROTOCOL || bytes[1] != (state->local_role ^ 1u)
+    if (bytes[0] != state->client_protocol || bytes[1] != (state->local_role ^ 1u)
         || bytes[3] != PEER_HISTORY_RECORD_SIZE || read_le(bytes + 4, 4))
         return false;
+    snapshot->protocol = bytes[0];
     snapshot->role = bytes[1];
     snapshot->boot_session = read_le(bytes + 8, 8);
     snapshot->sampled_at_us = read_le(bytes + 16, 8);
@@ -256,7 +272,8 @@ static bool decode_record(peer_history_t *state, unsigned index) {
         .type = bytes[20], .a = bytes[21], .b = bytes[22], .reserved = bytes[23],
     };
     if (event->seq != snapshot->window.first_seq + index
-        || event->type < HISTORY_BOOT || event->type > HISTORY_UART_DROPPED
+        || !event->type || (state->client_protocol == PEER_HISTORY_LEGACY_PROTOCOL
+                            && event->type > PEER_HISTORY_LEGACY_EVENT_MAX)
         || event->reserved || event->time_us > snapshot->sampled_at_us
         || event->time_us < state->client_previous_time_us)
         return false;
@@ -295,6 +312,13 @@ static void client_work(peer_history_t *state) {
 void peer_history_task(peer_history_t *state, uint64_t now_us, peer_history_tx_fn tx, void *context,
                        peer_history_begin_fn begin, peer_history_read_fn read) {
     expire(state, now_us);
+    if (state->client_active && state->client_sent && !state->client_received_count
+        && state->client_protocol == PEER_HISTORY_PROTOCOL
+        && now_us - state->client_sent_at_us >= PEER_HISTORY_FALLBACK_US) {
+        state->client_protocol = PEER_HISTORY_LEGACY_PROTOCOL;
+        state->client_wire_token = fallback_token(state->client_token);
+        state->client_sent = false;
+    }
     server_work(state, begin, read, context);
     client_work(state);
     bool request = state->client_active && !state->client_sent;
@@ -306,8 +330,8 @@ void peer_history_task(peer_history_t *state, uint64_t now_us, peer_history_tx_f
                                   ? PEER_HISTORY_RESPONSE : PEER_HISTORY_REQUEST;
     uint8_t payload[8] = {0};
     if (kind == PEER_HISTORY_REQUEST) {
-        write_le(payload, state->client_token, 4);
-        payload[4] = PEER_HISTORY_PROTOCOL;
+        write_le(payload, state->client_wire_token, 4);
+        payload[4] = state->client_protocol;
         payload[5] = state->client_limit;
     } else {
         write_le(payload, state->server_token, 4);
@@ -321,9 +345,10 @@ void peer_history_task(peer_history_t *state, uint64_t now_us, peer_history_tx_f
     /* Keep a refused candidate preferred. Otherwise an alternating external
      * arbiter can deny every request and grant only response candidates. */
     state->prefer_response = kind == PEER_HISTORY_REQUEST;
-    if (kind == PEER_HISTORY_REQUEST)
+    if (kind == PEER_HISTORY_REQUEST) {
         state->client_sent = true;
-    else if (++state->server_next_chunk == state->server_wire_size / 2)
+        state->client_sent_at_us = now_us;
+    } else if (++state->server_next_chunk == state->server_wire_size / 2)
         state->server_phase = SERVER_IDLE;
 }
 

@@ -45,6 +45,18 @@ MUTATIONS = [
     ("omit-cross-core-flash-lock", "utils.c",
      "critical_section_enter_blocking(&flash_access_critical_section);",
      "/* mutant: omit flash exclusion */"),
+    ("omit-peer-progress-observation", "handlers.c",
+     "diagnostic_update_progress(state->fw.address);",
+     "(void)state->fw.address;"),
+    ("omit-usb-progress-observation", "ramdisk.c",
+     "diagnostic_update_progress(global_state.uf2_blocks_received_count * FLASH_PAGE_SIZE);",
+     "(void)global_state.uf2_blocks_received_count;"),
+    ("omit-peer-failure-before-reset", "tasks.c",
+     "diagnostic_update_phase(DIAGNOSTIC_UPDATE_FAILED);",
+     "/* mutant: failure is invisible before ROM reset */"),
+    ("omit-console-disabled-checkpoint", "tasks.c",
+     "    diagnostic_runtime_checkpoint(0);\n#if DH_CONSOLE && CFG_TUD_CDC",
+     "#if DH_CONSOLE && CFG_TUD_CDC\n    diagnostic_runtime_checkpoint(0);"),
 ]
 
 

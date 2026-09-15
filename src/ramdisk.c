@@ -102,6 +102,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
         memset(global_state.uf2_sectors_erased, 0,
                sizeof(global_state.uf2_sectors_erased));
         global_state.uf2_blocks_received_count = 0;
+        diagnostic_update_begin(DIAGNOSTIC_SOURCE_USB, 0);
     }
 
     /* Mass-storage hosts may duplicate writes. Count and program every UF2 block
@@ -118,16 +119,20 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
         global_state.fw.image_dirty = true;
         write_flash_page_erasing(flash_addr, &buffer[32], erase_sector);
         global_state.fw.progressed_at_us = time_us_32();
+        diagnostic_update_progress(global_state.uf2_blocks_received_count * FLASH_PAGE_SIZE);
     }
 
     if (global_state.uf2_blocks_received_count == EXPECTED_BLOCK_COUNT) {
         /* The build-time metadata checksum is independent of write order and of
            the bytes just received, so a complete but mixed image cannot pass. */
+        diagnostic_update_phase(DIAGNOSTIC_UPDATE_VALIDATING);
         if (!firmware_image_is_valid(0, 0, false)) {
+            diagnostic_update_phase(DIAGNOSTIC_UPDATE_FAILED);
             enter_firmware_recovery();
         }
         else {
             global_state.fw.image_dirty = false;
+            diagnostic_update_phase(DIAGNOSTIC_UPDATE_REBOOT_PENDING);
             global_state.reboot_requested = true;
         }
     }

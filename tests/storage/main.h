@@ -21,6 +21,8 @@ typedef struct { unsigned used, capacity; uint8_t bytes[256][32]; } queue_t;
 #include "screensaver_policy.h"
 #include "zoom.h"
 #include "pinout.h"
+#include "diagnostic_history.h"
+#include "diagnostic_runtime.h"
 #define CORE1_HANG_TIMEOUT_US 500000u
 #define MAGIC_WORD_1 0xdeadf00fu
 #define MAGIC_WORD_2 0x00c0ffeeu

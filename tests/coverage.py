@@ -20,7 +20,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 LAYERS = ('paired', 'storage', 'hid', 'policies', 'usb_device', 'usb_host')
 POLICIES = ('zoom_tracker', 'fw_update', 'screensaver_policy', 'reboot_hotkey',
-            'config_migration', 'selection', 'peer_status', 'history', 'peer_history')
+            'config_migration', 'selection', 'peer_status', 'history', 'peer_history', 'peer_observation')
 METRICS = ('lines', 'branches', 'functions', 'regions')
 
 

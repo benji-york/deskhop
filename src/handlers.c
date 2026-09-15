@@ -616,6 +616,8 @@ static void handle_response_byte_msg_locked(uart_packet_t *packet, device_t *sta
 
     /* Neeeeeeext byte, please! */
     state->fw.address += sizeof(uint32_t);
+    if (state->fw.address % FLASH_PAGE_SIZE == 0)
+        diagnostic_update_progress(state->fw.address);
     state->fw.progressed_at_us = time_us_32();
     state->fw.request_pending = false;
     state->fw.byte_done = true;
@@ -644,6 +646,7 @@ static void begin_firmware_pull(device_t *state,
         .requested_at_us = now,
         .progressed_at_us = now,
     };
+    diagnostic_update_begin(DIAGNOSTIC_SOURCE_PEER, version);
 }
 
 /* Process a request to read a firmware package from flash */
@@ -664,8 +667,10 @@ static void handle_heartbeat_msg_locked(uart_packet_t *packet, device_t *state) 
                 state->fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
                 state->fw.request_pending = false;
                 state->fw.byte_done = false;
+                diagnostic_update_phase(DIAGNOSTIC_UPDATE_PAUSED);
             }
             else {
+                diagnostic_update_phase(DIAGNOSTIC_UPDATE_ABANDONED);
                 state->fw = (fw_upgrade_state_t){0};
             }
         }
@@ -698,8 +703,10 @@ static void handle_heartbeat_msg_locked(uart_packet_t *packet, device_t *state) 
                 state->fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
                 state->fw.request_pending = false;
                 state->fw.byte_done = false;
+                diagnostic_update_phase(DIAGNOSTIC_UPDATE_PAUSED);
             }
             else {
+                diagnostic_update_phase(DIAGNOSTIC_UPDATE_ABANDONED);
                 state->fw = (fw_upgrade_state_t){0};
             }
         }

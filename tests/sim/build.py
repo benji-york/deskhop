@@ -7,7 +7,7 @@ SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'key
            'tasks', 'handlers', 'led', 'uart', 'usb', 'usb_descriptors', 'utils',
            'fw_update', 'config_migration', 'selection']
 OPTIONAL_SOURCES = ['peer_status', 'diagnostic_peer', 'history', 'diagnostic_history',
-                    'peer_history', 'diagnostic_peer_history']
+                    'peer_history', 'diagnostic_peer_history', 'diagnostic_runtime', 'peer_observation']
 
 def extract_tasks(main):
     """Keep table order and core ownership from the supplied production image."""
@@ -55,6 +55,8 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
     if sanitize: flags += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all']
     # Historical baseline images predate the diagnostic bridge. Compile the
     # real queue/protocol code only when the selected source tree owns it.
+    if (source_root/'src/diagnostic_runtime.c').exists():
+        flags += ['-DSIM_HAS_DIAGNOSTIC_RUNTIME=1']
     if (source_root/'src/diagnostic_peer.c').exists():
         flags += ['-DSIM_HAS_DIAGNOSTIC_PEER=1']
     if (source_root/'src/diagnostic_history.c').exists():

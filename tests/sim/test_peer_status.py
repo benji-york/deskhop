@@ -44,7 +44,7 @@ def scenario_peer_status_roundtrip(s):
         request(s, node, token)
     s.do(0, 'report', 1, 0, keyboard(0, 4))
     s.do(1, 'report', 1, 0, mouse(x=7, y=-3))
-    s.advance(50000)
+    s.advance(75000)
     s.expect_report(0, 1, keyboard(0, 4))
     s.expect_report(0, 2, out_mouse(0, 16007, 15997))
     for node, token in ((0, 0x10203040), (1, 0x50607080)):
@@ -54,22 +54,29 @@ def scenario_peer_status_roundtrip(s):
         s.expect(node, 'stopped', 0)
         requests = diagnostic_frames(s, node, 36)
         responses = diagnostic_frames(s, 1 - node, 37)
-        assert len(requests) == 1 and len(responses) == 13
-        assert requests[0][1] == bytes.fromhex(frame(36, struct.pack('<IB3x', token, 1)))
-        assert responses[-1][0] < started + 50000
+        assert len(requests) == 1 and len(responses) == 26
+        assert requests[0][1] == bytes.fromhex(frame(36, struct.pack('<IB3x', token, 2)))
+        assert responses[-1][0] < started + 75000
         # Independent wire-format oracle, including CRC across the assembled
-        # snapshot. The transport checksum alone cannot certify all 13 chunks.
-        data = bytearray(39)
+        # snapshot. The transport checksum alone cannot certify all 26 chunks.
+        data = bytearray(78)
         for _, raw in responses:
             assert raw[:3] == b'\xaa\x55\x25'
             assert int.from_bytes(raw[3:7], 'little') == token
             index = raw[7]
             data[index * 3:index * 3 + 3] = raw[8:11]
-        assert data[0:2] == bytes([1, 1 - node])
+        assert data[0:2] == bytes([2, 1 - node])
         assert struct.unpack_from('<HH', data, 2) == (0, 97)
         assert data[6:14] == bytes((1 - node) * 16 + i for i in range(8))
-        assert int.from_bytes(data[34:38], 'little') == zlib.crc32(data[:34])
-        assert data[38] == 0
+        assert int.from_bytes(data[72:76], 'little') == zlib.crc32(data[:72])
+        assert data[76:78] == bytes(2)
+        assert data[34] == 3 and data[35] == 0
+        assert struct.unpack_from('<I', data, 56)[0] == 262144
+        s.expect(node, 'diagnostic_protocol', 2)
+        s.expect(node, 'diagnostic_core_valid', 3)
+        s.expect(node, 'diagnostic_boot_observation', 1)
+        s.expect(node, 'diagnostic_progress', 1)
+        s.expect(node, 'diagnostic_execution', 0)
     # A human can request status again as soon as the first frame finishes.
     # Respect the server cooldown without manufacturing a peer timeout.
     repeated = s.now
@@ -136,7 +143,7 @@ def scenario_peer_status_malformed(s):
     request(s, 0, 301)
     s.advance(2000)
     # Correct UART envelope, matching token, impossible chunk index.
-    s.do(0, 'raw', frame(37, struct.pack('<IB3x', 301, 13)))
+    s.do(0, 'raw', frame(37, struct.pack('<IB3x', 301, 26)))
     s.advance(3000)
     result(s, 0, 301, 2)
     request(s, 0, 302)
@@ -144,7 +151,7 @@ def scenario_peer_status_malformed(s):
     # Old response tokens and malformed requests do not poison the current
     # query or stop a following real HID packet in the same receiver loop.
     s.do(0, 'raw', frame(37, struct.pack('<IB3x', 301, 255)))
-    s.do(0, 'raw', frame(36, struct.pack('<IB3x', 401, 2)))
+    s.do(0, 'raw', frame(36, struct.pack('<IB3x', 401, 3)))
     s.do(1, 'report', 1, 0, mouse(x=9))
     s.advance(5000)
     s.expect_report(0, 2, out_mouse(0, 16009, 16000))
@@ -158,7 +165,39 @@ def scenario_peer_status_malformed(s):
     result(s, 0, 303)
 
 
+def scenario_peer_status_core_progress(s):
+    attach(s)
+    request(s, 0, 8001)
+    s.advance(75000)
+    result(s, 0, 8001)
+    s.expect(0, 'diagnostic_progress', 1)
+    ticks = [s.get(0, 'diagnostic_ticks', core) for core in (0, 1)]
+    request(s, 0, 8002)
+    s.advance(250000)
+    result(s, 0, 8002)
+    s.expect(0, 'diagnostic_progress', 2)
+    for core in (0, 1):
+        assert s.get(0, 'diagnostic_ticks', core) > ticks[core]
+        s.check('range', 0, 'diagnostic_core_age', core, 0, 2)
+    s.expect(0, 'diagnostic_boot_observation', 2)
+    s.expect(0, 'diagnostic_execution', 0)
+    # UART delivery also needs core0. Once it stops, a later query must fail
+    # explicitly instead of reusing the last successful progress observation.
+    s.do(1, 'pause', 0, 600000)
+    request(s, 0, 8003)
+    s.advance(502000)
+    result(s, 0, 8003, 1)
+    s.expect(0, 'diagnostic_progress', 0)
+    s.expect(0, 'diagnostic_execution', 0)
+    s.expect(0, 'stopped', 0)
+    s.expect(1, 'stopped', 1)
+    s.do(0, 'report', 1, 0, keyboard(0, 4))
+    s.advance(3000)
+    s.expect_report(0, 1, keyboard(0, 4))
+    s.check('diagnostic_pacing', 0, 1000)
+
 SCENARIOS = {
+    'peer_status_core_progress': scenario_peer_status_core_progress,
     'peer_status_roundtrip': scenario_peer_status_roundtrip,
     'peer_status_disconnected': scenario_peer_status_disconnected,
     'peer_status_uart_stalled': scenario_peer_status_uart_stalled,

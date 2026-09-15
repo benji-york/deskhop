@@ -42,7 +42,7 @@ def main():
                       ('screensaver_policy','screensaver_policy'),('reboot_hotkey','reboot_hotkey'),
                       ('config_migration','config_migration'),('selection','selection'),
                       ('peer_status','peer_status'),('history','history'),
-                      ('peer_history','peer_history')]:
+                      ('peer_history','peer_history'),('peer_observation','peer_observation')]:
         dependencies = ['src/history.c'] if name == 'peer_history' else []
         compile_test(name,[f'tests/test_{name}.c',f'src/{unit}.c',*dependencies])
     node=os.environ.get('NODE') or shutil.which('node') or str(pathlib.Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')

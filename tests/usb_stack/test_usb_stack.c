@@ -5,6 +5,7 @@
 #include "peer_status.h"
 #include "diagnostic_history.h"
 #include "diagnostic_peer_history.h"
+#include "diagnostic_runtime.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -26,6 +27,17 @@ static char cdc_bytes[32768];
 static size_t cdc_count;
 static uint64_t cdc_submitted_bytes, console_now_us;
 static bool no_ep0_out_payload;
+static const diagnostic_runtime_snapshot_t default_runtime = {
+    .core_ticks = {123, 456}, .core_age_ms = {0, 1}, .core_valid = 3,
+    .phase = DIAGNOSTIC_UPDATE_IDLE, .source = DIAGNOSTIC_SOURCE_NONE,
+    .total_bytes = 262144, .progress_age_ms = UINT32_MAX,
+};
+static diagnostic_runtime_snapshot_t local_runtime;
+static unsigned runtime_reads;
+diagnostic_runtime_snapshot_t diagnostic_runtime_snapshot(void) {
+    ++runtime_reads;
+    return local_runtime;
+}
 /* Exercise the production ring; only the Pico lock/time adapter is replaced. */
 static history_store_t history_store;
 static unsigned history_reads;
@@ -96,11 +108,20 @@ static uint32_t peer_token;
 static uint64_t peer_requested_at;
 static unsigned peer_requests;
 static peer_status_result_t peer_result;
-static const peer_status_snapshot_t peer_snapshot = {
+static peer_status_snapshot_t peer_snapshot = {
+    .protocol = 2,
+    .runtime = {.core_ticks = {900, 901}, .core_age_ms = {2, 3}, .core_valid = 3,
+                .phase = DIAGNOSTIC_UPDATE_RECEIVING, .source = DIAGNOSTIC_SOURCE_PEER,
+                .received_bytes = 65536, .total_bytes = 262144, .progress_age_ms = 4,
+                .target_version = 200, .update_attempt = 1, .update_seen = true},
     .role = 1, .major = 0, .minor = 96,
     .board_id = {0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10},
     .boot_session = UINT64_C(0x8877665544332211),
     .uptime_ms = 7654321, .image_crc_at_boot = UINT32_C(0x12345678),
+};
+static diagnostic_peer_observation_t peer_observation = {
+    .boot = DIAGNOSTIC_PEER_FIRST_SEEN, .progress = DIAGNOSTIC_PROGRESS_BASELINE,
+    .update = DIAGNOSTIC_EXECUTION_NOT_OBSERVED,
 };
 bool diagnostic_peer_request(uint32_t token, uint64_t requested_at_us) {
     ++peer_requests;
@@ -112,7 +133,7 @@ bool diagnostic_peer_request(uint32_t token, uint64_t requested_at_us) {
 static void peer_publish(uint32_t token, peer_status_outcome_t outcome) {
     CHECK(!peer_result_ready);
     peer_result = (peer_status_result_t){.token = token, .outcome = outcome,
-                                       .snapshot = peer_snapshot};
+                                       .snapshot = peer_snapshot, .observation = peer_observation};
     peer_result_ready = true;
 }
 bool diagnostic_peer_poll(peer_status_result_t *result) {
@@ -461,8 +482,17 @@ static void cdc_status_fields(void) {
     CHECK(occurrences("BEGIN status") == 1 && occurrences("END status") == 1);
     CHECK(strstr(cdc_bytes, "board=A") != NULL);
     CHECK(strstr(cdc_bytes, "board_id=0123456789abcdef") != NULL);
-    CHECK(strstr(cdc_bytes, "build=0.99") != NULL);
+    CHECK(strstr(cdc_bytes, "build=0.100") != NULL);
     CHECK(strstr(cdc_bytes, "image_crc_at_boot=89abcdef") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A core=0 checkpoints=123 age_ms=0\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A core=1 checkpoints=456 age_ms=1\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A update seen=0 source=none phase=idle received=0 total=262144 "
+                            "progress_age_ms=unavailable target=unknown attempt=0\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B core=0 checkpoints=900 age_ms=2\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B core=1 checkpoints=901 age_ms=3\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B update seen=1 source=peer phase=receiving received=65536 total=262144 "
+                            "progress_age_ms=4 target=0.100 attempt=1\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B observation boot=first_seen progress=baseline update=not_observed\r\n") != NULL);
     CHECK(strstr(cdc_bytes, "boot_session=1122334455667788") != NULL);
     CHECK(strstr(cdc_bytes, "board=B\r\n") != NULL);
     CHECK(strstr(cdc_bytes, "board_id=FEDCBA9876543210") != NULL);
@@ -485,6 +515,11 @@ static void cdc_command_stream(void) {
     CHECK(strstr(cdc_bytes, "both boards") != NULL);
     CHECK(strstr(cdc_bytes, "history [count]") != NULL);
     CHECK(strstr(cdc_bytes, "History merges snapshots by approximate event age") != NULL);
+    CHECK(strstr(cdc_bytes, "Core counts mark diagnostic task checkpoints") != NULL);
+    CHECK(strstr(cdc_bytes, "Confirmation is historical and version-only; progress compares the latest queries") != NULL);
+    CHECK(strstr(cdc_bytes, "observations update only when status is queried") != NULL);
+    CHECK(strstr(cdc_bytes, "History and observations live in RAM until reboot") != NULL);
+    CHECK(strstr(cdc_bytes, "GAP means unavailable during capture or through an older peer protocol") != NULL);
     CHECK(occurrences("END help") == 1); /* The complete help fits the fixed TX buffer. */
 
     cdc_capture_clear();
@@ -549,6 +584,100 @@ static void cdc_command_stream(void) {
     CHECK(occurrences("ERROR") == 1 && occurrences("BEGIN status") == 0);
     cdc_send("status\n");
     cdc_status_fields();
+}
+
+static void cdc_runtime_rows_and_legacy(void) {
+    const peer_status_snapshot_t saved_peer = peer_snapshot;
+    const diagnostic_peer_observation_t saved_observation = peer_observation;
+    unsigned reads_before = runtime_reads;
+    local_runtime.core_valid = 1;
+    local_runtime.core_ticks[0] = 0; /* Valid zero can be a wrapped checkpoint counter. */
+    local_runtime.core_ticks[1] = UINT32_MAX;
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(runtime_reads == reads_before + 1);
+    CHECK(strstr(cdc_bytes, "board=A core=0 checkpoints=0 age_ms=0\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A core=1 checkpoints=unavailable age_ms=unavailable\r\n") != NULL);
+
+    local_runtime = default_runtime;
+    local_runtime.update_seen = true;
+    local_runtime.source = DIAGNOSTIC_SOURCE_USB;
+    local_runtime.phase = DIAGNOSTIC_UPDATE_REBOOT_PENDING;
+    local_runtime.received_bytes = 262144;
+    local_runtime.progress_age_ms = 17;
+    local_runtime.target_version = 200;
+    local_runtime.update_attempt = 2;
+    peer_observation = (diagnostic_peer_observation_t){DIAGNOSTIC_PEER_NEW_BOOT,
+        DIAGNOSTIC_PROGRESS_NOT_ADVANCING, DIAGNOSTIC_EXECUTION_AWAITING_PROGRESS};
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(strstr(cdc_bytes, "board=A update seen=1 source=usb phase=reboot_pending received=262144 total=262144 "
+                            "progress_age_ms=17 target=0.100 attempt=2\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B observation boot=new_boot progress=not_advancing update=awaiting_progress\r\n") != NULL);
+    peer_observation.progress = DIAGNOSTIC_PROGRESS_ADVANCING;
+    peer_observation.update = DIAGNOSTIC_EXECUTION_CONFIRMED;
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(strstr(cdc_bytes, "board=B observation boot=new_boot progress=advancing update=confirmed\r\n") != NULL);
+
+    peer_snapshot.protocol = 1;
+    peer_observation.progress = DIAGNOSTIC_PROGRESS_UNAVAILABLE;
+    peer_observation.update = DIAGNOSTIC_EXECUTION_NOT_OBSERVED;
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(strstr(cdc_bytes, "board=B runtime=unavailable protocol=1\r\n") != NULL);
+    CHECK(occurrences("board=B core=") == 0 && occurrences("board=B update ") == 0);
+    CHECK(strstr(cdc_bytes, "board=B observation boot=new_boot progress=unavailable update=not_observed\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "peer=ok\r\n") != NULL && occurrences("END status") == 1);
+
+    /* Maximum scalar widths and long enum names fit each fixed response chunk. */
+    local_runtime = (diagnostic_runtime_snapshot_t){
+        .core_ticks = {UINT32_MAX, UINT32_MAX}, .core_age_ms = {UINT32_MAX, UINT32_MAX}, .core_valid = 3,
+        .received_bytes = UINT32_MAX, .total_bytes = UINT32_MAX, .progress_age_ms = UINT32_MAX,
+        .update_attempt = UINT32_MAX, .target_version = UINT16_MAX, .update_seen = true,
+        .source = DIAGNOSTIC_SOURCE_PEER, .phase = DIAGNOSTIC_UPDATE_REBOOT_PENDING,
+    };
+    peer_snapshot.protocol = 2;
+    peer_snapshot.runtime = local_runtime;
+    peer_observation = (diagnostic_peer_observation_t){DIAGNOSTIC_PEER_IDENTITY_CHANGED,
+        DIAGNOSTIC_PROGRESS_NOT_ADVANCING, DIAGNOSTIC_EXECUTION_AWAITING_PROGRESS};
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(occurrences("checkpoints=4294967295 age_ms=4294967295\r\n") == 4);
+    CHECK(occurrences("progress_age_ms=4294967295 target=65.435 attempt=4294967295\r\n") == 2);
+    CHECK(strstr(cdc_bytes, "board=B observation boot=identity_changed progress=not_advancing update=awaiting_progress\r\n") != NULL);
+    CHECK(occurrences("END status") == 1 && occurrences("deskhop> ") == 1);
+    local_runtime = default_runtime;
+    peer_snapshot = saved_peer;
+    peer_observation = saved_observation;
+
+    /* Snapshot exactly once at command start even while USB output is paused. */
+    local_runtime.core_ticks[0] = 111;
+    cdc_capture_clear();
+    reads_before = runtime_reads;
+    complete_short_out(0x06, "status\n", 7);
+    for (unsigned i = 0; i < 32; ++i) console_tick();
+    CHECK(runtime_reads == reads_before + 1 && endpoint(0x86)->pending);
+    local_runtime.core_ticks[0] = 999;
+    console_drain();
+    CHECK(strstr(cdc_bytes, "board=A core=0 checkpoints=111 age_ms=0\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "checkpoints=999") == NULL);
+    cdc_capture_clear();
+    cdc_send("status\n");
+    CHECK(strstr(cdc_bytes, "board=A core=0 checkpoints=999 age_ms=0\r\n") != NULL);
+    CHECK(runtime_reads == reads_before + 2);
+    local_runtime = default_runtime;
+
+    /* Editing echo can consume three TX bytes per RX byte. Keep enough room
+     * for a complete help response even after27 backspaces in the final tick. */
+    char erase_line[33];
+    memset(erase_line, '\b', 27);
+    memcpy(erase_line + 27, "help\n", 6);
+    cdc_send("xxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    cdc_capture_clear();
+    cdc_send(erase_line);
+    CHECK(occurrences("BEGIN help") == 1 && occurrences("END help") == 1);
+    CHECK(occurrences("deskhop> ") == 1 && occurrences("ERROR") == 0);
 }
 
 static void history_fill(unsigned count) {
@@ -695,6 +824,33 @@ static void cdc_history_event_fields(void) {
     CHECK(occurrences("END history") == 1);
     console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
     console_drain();
+}
+
+static void cdc_runtime_history_fields(void) {
+    diagnostic_history_init();
+    console_now_us = 1000000;
+    diagnostic_history_record(HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 200);
+    diagnostic_history_record(HISTORY_UPDATE_PROGRESS, DIAGNOSTIC_SOURCE_PEER, 50, 131072);
+    diagnostic_history_record(HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_REBOOT_PENDING, DIAGNOSTIC_SOURCE_PEER, 200);
+    diagnostic_history_record(HISTORY_PEER_OBSERVED, 1, DIAGNOSTIC_PEER_NEW_BOOT, 200);
+    diagnostic_history_record(HISTORY_PEER_PROGRESS, 1, DIAGNOSTIC_PROGRESS_ADVANCING, 200);
+    diagnostic_history_record((history_type_t)250, 255, 254, UINT32_MAX);
+    diagnostic_history_record(HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_USB, 0, 0);
+    cdc_capture_clear();
+    cdc_send("history\n");
+    history_frame(7, 0);
+    const char *expected[] = {
+        "update_begin source=peer target=0.100", "update_progress source=peer percent=50 received=131072",
+        "update_phase phase=reboot_pending source=peer target=0.100",
+        "peer_observed peer=B boot=new_boot build=0.100", "peer_progress peer=B progress=advancing build=0.100",
+        "unknown type=250 a=255 b=254 value=4294967295", "update_begin source=usb target=unknown",
+    };
+    for (unsigned i = 0; i < 7; ++i) {
+        char row[256];
+        snprintf(row, sizeof(row), "board=A seq=%u uptime_ms=1000 age_ms=0 event=%s\r\n", i + 1, expected[i]);
+        CHECK(strstr(cdc_bytes, row) != NULL);
+    }
+    CHECK(occurrences("board=A seq=") == 7 && occurrences("END history") == 1);
 }
 
 static void cdc_history_stalled_reader_and_hid(void) {
@@ -1034,7 +1190,7 @@ static void cdc_peer_failures_and_fallback(void) {
         peer_publish(peer_token, outcomes[i]);
         console_drain();
         CHECK(strstr(cdc_bytes, texts[i]) != NULL);
-        CHECK(occurrences("board=A") == 1 && occurrences("board=B") == 0);
+        CHECK(occurrences("board=A\r\n") == 1 && occurrences("board=B") == 0);
         CHECK(occurrences("END status") == 1 && occurrences("deskhop> ") == 1);
     }
     peer_accept = false;
@@ -1227,6 +1383,7 @@ static void msc_bulk(void) {
     CHECK(endpoint(0x04)->stalled && endpoint(0x84)->stalled);
 }
 int main(void) {
+    local_runtime = default_runtime;
     diagnostic_history_init();
     console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
     console_now_us = 1000000;
@@ -1239,10 +1396,14 @@ int main(void) {
     cdc_controls(false);
     scenario = "CDC command streams";
     cdc_command_stream();
+    scenario = "CDC runtime rows, legacy peer and bounded response chunks";
+    cdc_runtime_rows_and_legacy();
     scenario = "CDC history counts and ring wrap";
     cdc_history_count_and_wrap();
     scenario = "CDC history event fields";
     cdc_history_event_fields();
+    scenario = "CDC runtime and unknown history event fields";
+    cdc_runtime_history_fields();
     scenario = "CDC history stalled reader and HID progress";
     cdc_history_stalled_reader_and_hid();
     scenario = "CDC history close discards frozen window";

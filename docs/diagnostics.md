@@ -31,7 +31,7 @@ physical disk-free enumeration check passed; the record is in
    board's sequence order, and disclose approximate cross-board timing. Report
    overwrites/gaps; the requested count is per board. Exact clock synchronization
    and optional board filters are deferred.
-5. **Update/boot observations:** record receiving, validation, reboot pending,
+5. **Update/boot observations (v0.100 deployed and input checked):** record receiving, validation, reboot pending,
    and new executing-build observations separately. Require new boot sessions
    after an observed update, then increasing uptime and progress on both cores.
 6. **Image assurance:** `verify <expected-build>` checks both boards by default,
@@ -42,6 +42,20 @@ physical disk-free enumeration check passed; the record is in
 Additional events and counters follow troubleshooting needs discovered during
 these sessions. Histories are volatile across reboot. No peer/history/verification
 commands are advertised before their implementation exists.
+
+## Update observations slice (v0.100 deployed and input checked)
+
+`status` now includes both cores' diagnostic checkpoints and updater phase,
+source, byte progress, target, and attempt. Fresh peer queries distinguish first
+contact from a new boot and compare both core counters. RAM history records
+sparse update milestones and peer observations. The [deployment record](testing/update-observations-v100.md)
+describes the exact evidence required for target-version confirmation, legacy
+protocol support, limits, and the physical flash/readback/serial results. Both boards now report
+v0.100 with advancing core checkpoints; A's history captured B's old v0.99 boot,
+new v0.100 boot, and later progress. Benji confirmed "Everything works" after the input and switch-and-back check
+on both Macs. Observations are
+query-driven and volatile; the first v0.99-to-v0.100 rollout cannot prove the
+whole update retrospectively. Image integrity remains the next slice.
 
 ## Peer history slice (v0.99 deployed and input checked)
 

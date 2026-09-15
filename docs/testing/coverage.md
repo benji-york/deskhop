@@ -13,7 +13,7 @@ Run `python3 tests/coverage.py` with Clang and LLVM `llvm-profdata`/`llvm-cov`
 required. `--layer paired --layer storage` selects a subset; `--hid-iterations N`
 changes the generated HID workload. Default measurements use scenario seed 1,
 storage seed 1, the five original pure-policy suites plus selection, peer status,
-history storage, and peer history,
+history storage, peer history, and peer observations,
 64,128 updater contract cases, and 2,000 generated HID descriptors at seed `0x484944`.
 
 The generated `build/tests/coverage/html/index.html` links each layer's source
@@ -46,6 +46,19 @@ models, headers/inlines, Python/JavaScript, formal specifications, ARM startup,
 and code that has no LLVM coverage mapping. Constants-only translation units
 may have zero mapped executable lines. The generated report is authoritative
 after code/compiler/test changes; these figures are a dated snapshot.
+
+The v0.100 candidate adds `diagnostic_runtime.c` to the paired and storage
+layers, and `peer_observation.c` to paired execution and pure-policy tests.
+Storage now executes the real runtime/history publishers and asserts lock
+ordering, sparse update events, progress freshness, and reset behavior. Four
+additional mutation tests remove those hooks. Pure units cover legacy/new wire
+formats and query-derived boot/target/core comparisons. The console still uses
+mock peer/runtime snapshots in the real TinyUSB device layer; physical task
+latency and a v2-to-v2 update remain hardware checks. The candidate's generated
+report is `build/tests/coverage-v100/html/index.html`, with final policy and
+USB-device refinements remeasured in
+`build/tests/coverage-v100-final-targeted/html/index.html`; the table above remains
+the dated v0.99 measurement.
 
 ## Layers and independent oracles
 

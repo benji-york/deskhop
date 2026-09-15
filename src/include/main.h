@@ -34,6 +34,7 @@
 #include "dma.h"
 
 #include "firmware.h"
+#include "diagnostic_runtime.h"
 #include "flash.h"
 #include "handlers.h"
 #include "keyboard.h"

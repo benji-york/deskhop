@@ -36,6 +36,13 @@ interleaved 13 A and 11 B records, including eight output changes per board
 covering both directions, without gaps or overwrites. B's history and executing identity
 are observed directly through peer replies; B's flash integrity remains
 independently unverified.
+The [v0.100 deployment](update-observations-v100.md) adds both-core checkpoints,
+updater state and sparse events, query-derived peer boot/progress observations,
+and v1/v2 wire compatibility. A's independent readback/settings/Mac checks and
+both boards' serial status/core/history checks passed, including a live legacy
+fallback and B's transition from its v0.99 session to a new v0.100 session.
+Benji confirmed "Everything works" after the input and switch-and-back check
+on both Macs.
 The device-stack harness now
 also executes real CDC control/bulk transfers and the production console,
 including bounded work, malformed command recovery, and HID progress while a
@@ -74,8 +81,8 @@ in the runbook. No command flashes or uploads firmware.
   counterexample separately.
 - **Deep:** fast tier plus 20,000 HID cases, 16 storage seeds, 32 generated
   paired-input sequences, the backpressure scenario under all 24 fixed priority
-  orders of the four modeled cores, and 26 compiled production mutations
-  (11 storage and 15 paired, including seven selection mutations).
+  orders of the four modeled cores, and 30 compiled production mutations
+  (15 storage and 15 paired, including seven selection mutations).
   Model mutations are counted separately. Nine valid-input scenarios also run
   against original `d42c930` source (Git and that local commit are required;
   no fetching). Four host-effect traces match exactly; five compare ordered

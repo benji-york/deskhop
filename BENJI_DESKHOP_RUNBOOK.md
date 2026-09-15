@@ -8,7 +8,33 @@ README.
 
 Snapshot: 2026-09-14
 
-## Current deployment: v0.99 peer history
+## Current deployment: v0.100 update and core observations
+
+The [deployment record](docs/testing/update-observations-v100.md) describes new
+status rows for both core checkpoints and updater state, sparse history events,
+and query-derived boot/update observations. The existing dual-core roles remain.
+All 41 deep-tier steps, all six native coverage layers, final affected-suite
+rechecks, and the ARM build passed. The frozen UF2 is
+`build/flashing/deskhop-v0.100-update-observations.uf2`, SHA-256
+`70f7d258d66e804ecd32596f70e42fbf00f052d67b2d7eaf55619dcf3ad16565`,
+with boot metadata CRC `8397b53c`. Its source/artifact manifest is
+`build/flashing/v100-candidate.json`. Pico A was flashed and normally rebooted
+at 2026-09-15 00:46:02 UTC. Full independent A firmware readback matched;
+all saved settings were unchanged. Disk-free enumeration and Mac media checks
+passed. Two early serial snapshots showed B's old v0.99 session through legacy
+status fallback; seven subsequent snapshots showed both running v0.100 with
+stable new sessions and both core counters advancing. A session is
+`e37cfda649031433`; B changed from `5b8f298bd669b78a` to `67023817d0aa5245`.
+Both report boot metadata CRC `8397b53c`. Four combined histories retained eight
+A and three B rows, including the new peer boot/progress observations, without
+gaps or overwrites. The checker passed in 5.906 seconds (13,385 bytes).
+Benji confirmed "Everything works" after the typing/trackball/buttons and
+Layer 3 S switch-and-back check on both Macs. The initial
+rollout correctly reports `update=not_observed`: v0.99 supplied no pre-update
+runtime/target information. This does not independently verify B's flash.
+Full image verification is a later slice. No push has been performed.
+
+## Previous accepted deployment: v0.99 peer history
 
 `history [count]` collects both boards by default and interleaves their fixed
 snapshots, labeling every row A or B. Timing across boards is approximate;

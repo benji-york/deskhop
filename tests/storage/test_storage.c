@@ -6,7 +6,8 @@
 
 static const char *scenario;
 static uint64_t now;
-static unsigned current_core, lock_owner[4], lock_depth[4], next_lock;
+/* IDs 1/2/3 remain firmware/flash/config; startup then initializes history/runtime. */
+static unsigned current_core, lock_owner[6], lock_depth[6], next_lock;
 static unsigned interrupts[2], erases, programs, resets, watchdog_kicks;
 static uint32_t reset_disable_mask;
 static unsigned sector_erases[STORAGE_SIZE / FLASH_SECTOR_SIZE];
@@ -97,10 +98,17 @@ void *storage_memcpy(void *destination, const void *source, size_t length) {
 void write_raw_packet(uint8_t *bytes, uart_packet_t *packet) { CHECK(false); }
 void critical_section_init(critical_section_t *cs) {
     if (!cs->id) cs->id = ++next_lock;
-    CHECK(cs->id <= 3);
+    CHECK(cs->id <= 5);
 }
 void critical_section_enter_blocking(critical_section_t *cs) {
-    CHECK(cs->id && cs->id <= 3);
+    CHECK(cs->id && cs->id <= 5);
+    if (cs->id <= 3) CHECK(!lock_depth[4] && !lock_depth[5]);
+    if (cs->id >= 4) {
+        /* Updater hooks may hold firmware, but never flash/config or each other. */
+        CHECK(!lock_depth[2] && !lock_depth[3]);
+        CHECK(!lock_depth[4] && !lock_depth[5]);
+        CHECK(!interrupts[current_core]);
+    }
     if (lock_depth[cs->id]) {
         /* Run the real setter up to its blocked SDK acquisition, then resume
            that operation from its side-effect-free entry when the lock opens. */
@@ -130,6 +138,13 @@ uint64_t time_us_64(void) { return now; }
 void watchdog_update(void) { ++watchdog_kicks; event("watchdog-kick", watchdog_kicks); }
 uint8_t toggle_led(void) { return 0; }
 void reset_usb_boot(uint32_t gpio, uint32_t disable) {
+    /* ROM reset does not return on hardware. Failure must already be visible. */
+    diagnostic_runtime_snapshot_t snapshot = diagnostic_runtime_snapshot();
+    CHECK(snapshot.phase == DIAGNOSTIC_UPDATE_FAILED);
+    history_window_t window = diagnostic_history_window(HISTORY_CAPACITY);
+    history_event_t last;
+    CHECK(window.count && diagnostic_history_read(window.end_seq - 1, &last));
+    CHECK(last.type == HISTORY_UPDATE_PHASE && last.a == DIAGNOSTIC_UPDATE_FAILED);
     ++resets;
     reset_disable_mask = disable;
     event("rom-recovery-request", resets);
@@ -138,6 +153,7 @@ void reset_usb_boot(uint32_t gpio, uint32_t disable) {
 
 static void before_flash(uint32_t offset, size_t length) {
     CHECK(!lock_depth[3]); /* RAM snapshots never hold their lock through flash. */
+    CHECK(!lock_depth[4] && !lock_depth[5]);
     CHECK(lock_depth[2] == 1 && lock_owner[2] == current_core);
     CHECK(interrupts[current_core]);
     CHECK(offset <= STORAGE_SIZE && length <= STORAGE_SIZE - offset);
@@ -217,9 +233,11 @@ static void fresh(const char *name) {
     global_state._running_fw.version = 192;
     global_state.uart_tx_queue.capacity = 256;
     firmware_sync_init();
+    diagnostic_history_init();
+    diagnostic_runtime_init();
 }
 static void owner(unsigned core) {
-    CHECK(!lock_depth[1] && !lock_depth[2]);
+    for (unsigned id = 1; id <= 5; ++id) CHECK(!lock_depth[id]);
     CHECK(!interrupts[0] && !interrupts[1]);
     current_core = core;
     event("core-dispatch", core);
@@ -288,6 +306,34 @@ static void expect_no_change(fw_upgrade_state_t old) {
     CHECK(memcmp(&old, &global_state.fw, sizeof(old)) == 0);
 }
 
+static void expect_history(unsigned index, history_type_t type,
+                           uint8_t a, uint8_t b, uint32_t value) {
+    history_window_t window = diagnostic_history_window(HISTORY_CAPACITY);
+    history_event_t observed;
+    CHECK(!window.overwritten && index < window.count);
+    CHECK(diagnostic_history_read(window.first_seq + index, &observed));
+    CHECK(observed.type == type && observed.a == a && observed.b == b);
+    CHECK(observed.value == value && observed.reserved == 0);
+}
+
+static void expect_completed_history(diagnostic_update_source_t source,
+                                     uint16_t target, bool failed) {
+    diagnostic_runtime_snapshot_t snapshot = diagnostic_runtime_snapshot();
+    diagnostic_update_phase_t phase = failed ? DIAGNOSTIC_UPDATE_FAILED
+                                             : DIAGNOSTIC_UPDATE_REBOOT_PENDING;
+    CHECK(snapshot.update_seen && snapshot.update_attempt == 1);
+    CHECK(snapshot.phase == phase && snapshot.source == source);
+    CHECK(snapshot.target_version == target && snapshot.received_bytes == STAGING_IMAGE_SIZE);
+    CHECK(snapshot.total_bytes == STAGING_IMAGE_SIZE);
+    CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == 7);
+    expect_history(0, HISTORY_UPDATE_BEGIN, source, 0, target);
+    for (unsigned quarter = 1; quarter <= 4; ++quarter)
+        expect_history(quarter, HISTORY_UPDATE_PROGRESS, source, quarter * 25,
+                       quarter * STAGING_IMAGE_SIZE / 4);
+    expect_history(5, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_VALIDATING, source, target);
+    expect_history(6, HISTORY_UPDATE_PHASE, phase, source, target);
+}
+
 static void uf2_reordering_and_duplicate(void) {
     fresh("uf2_reordering_and_duplicate");
     uint32_t crc = make_image(image, 193, 0x31);
@@ -310,6 +356,7 @@ static void uf2_reordering_and_duplicate(void) {
     CHECK(global_state.reboot_requested && !global_state.fw.image_dirty && !resets);
     for (unsigned i = 0; i < STAGING_PAGES_CNT; ++i) CHECK(page_programs[i] == 1);
     for (unsigned i = 0; i < STAGING_IMAGE_SIZE / FLASH_SECTOR_SIZE; ++i) CHECK(sector_erases[i] == 1);
+    expect_completed_history(DIAGNOSTIC_SOURCE_USB, 0, false);
 }
 static void uf2_reject_invalid_and_mixed(void) {
     fresh("uf2_reject_invalid");
@@ -330,6 +377,8 @@ static void uf2_reject_invalid_and_mixed(void) {
         unsigned size = field == 7 ? sizeof(invalid) - 1 : sizeof(invalid);
         CHECK(tud_msc_write10_cb(0, 1, 0, (uint8_t *)&invalid, size) == (int32_t)size);
         CHECK(!programs && !erases && !global_state.fw.upgrade_in_progress && !watchdog_kicks);
+        CHECK(!diagnostic_runtime_snapshot().update_seen);
+        CHECK(!diagnostic_history_window(HISTORY_CAPACITY).count);
     }
     CHECK(tud_msc_write10_cb(0, 4096, 0, (uint8_t *)&valid, sizeof(valid)) == -1);
     scenario = "uf2_complete_mixed_image_enters_recovery";
@@ -339,6 +388,7 @@ static void uf2_reject_invalid_and_mixed(void) {
     CHECK(reset_disable_mask == 0); /* Invalid-image recovery keeps UF2 and PICOBOOT. */
     CHECK(global_state.fw.image_dirty);
     for (unsigned i = 0; i < FLASH_SECTOR_SIZE; ++i) CHECK(storage_flash[i] == 0xff);
+    expect_completed_history(DIAGNOSTIC_SOURCE_USB, 0, true);
 }
 
 static void actual_peer_transfer(bool corrupt, bool intermittent_loss) {
@@ -373,6 +423,12 @@ static void actual_peer_transfer(bool corrupt, bool intermittent_loss) {
         fw_upgrade_state_t saved = global_state.fw;
         response(request.data32[0], image); /* Duplicate must not advance checksum. */
         expect_no_change(saved);
+        if (word == FLASH_PAGE_SIZE / 4 - 1) {
+            now += 5000;
+            response(request.data32[0], image);
+            diagnostic_runtime_snapshot_t snapshot = diagnostic_runtime_snapshot();
+            CHECK(snapshot.received_bytes == FLASH_PAGE_SIZE && snapshot.progress_age_ms == 5);
+        }
         if (intermittent_loss && (word + 1) % 4096 == 0 && word + 1 < STAGING_IMAGE_SIZE / 4) {
             unsigned old_programs = programs;
             global_state.uart_tx_queue.capacity = 0;
@@ -397,6 +453,7 @@ static void actual_peer_transfer(bool corrupt, bool intermittent_loss) {
         CHECK(global_state._running_fw.version == 193 && global_state._running_fw.checksum == crc);
         CHECK(memcmp(storage_flash, image, sizeof(image)) == 0);
     }
+    expect_completed_history(DIAGNOSTIC_SOURCE_PEER, 193, corrupt);
 }
 
 static void peer_stall_pause_and_restart(void) {
@@ -407,6 +464,7 @@ static void peer_stall_pause_and_restart(void) {
     now += FW_UPDATE_STALL_TIMEOUT_US;
     upgrade_tick();
     CHECK(global_state.fw.source == FW_UPDATE_SOURCE_NONE && !programs && !resets);
+    CHECK(diagnostic_runtime_snapshot().phase == DIAGNOSTIC_UPDATE_ABANDONED);
 
     global_state.uart_tx_queue.used = 0;
     heartbeat(193, crc, true);
@@ -421,6 +479,8 @@ static void peer_stall_pause_and_restart(void) {
     upgrade_tick();
     CHECK(global_state.fw.source == FW_UPDATE_SOURCE_PULL_PAUSED);
     CHECK(global_state.fw.upgrade_in_progress && !resets && !global_state.reboot_requested);
+    diagnostic_runtime_snapshot_t paused = diagnostic_runtime_snapshot();
+    CHECK(paused.phase == DIAGNOSTIC_UPDATE_PAUSED && paused.received_bytes == FLASH_PAGE_SIZE);
     fw_upgrade_state_t saved = global_state.fw;
     response(FLASH_PAGE_SIZE, image);
     expect_no_change(saved);
@@ -428,6 +488,9 @@ static void peer_stall_pause_and_restart(void) {
     global_state.uart_tx_queue.used = 0;
     heartbeat(193, crc, true);
     CHECK(global_state.fw.address == 0 && global_state.fw.image_dirty && !global_state.fw.request_pending);
+    diagnostic_runtime_snapshot_t resumed = diagnostic_runtime_snapshot();
+    CHECK(resumed.phase == DIAGNOSTIC_UPDATE_RECEIVING && resumed.received_bytes == 0);
+    CHECK(resumed.update_attempt == 3);
     response(0, image);
     CHECK(global_state.fw.address == 0);
     now += FW_UPDATE_RESPONSE_TIMEOUT_US - 1;
@@ -442,6 +505,58 @@ static void peer_stall_pause_and_restart(void) {
     CHECK(global_state.fw.peer_checksum == (crc ^ 1u) && !global_state.fw.request_pending);
     heartbeat(193, crc, false);
     CHECK(global_state.fw.source == FW_UPDATE_SOURCE_PULL_PAUSED);
+    CHECK(diagnostic_runtime_snapshot().update_attempt == 4);
+    CHECK(diagnostic_runtime_snapshot().phase == DIAGNOSTIC_UPDATE_PAUSED);
+    CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == 7);
+    expect_history(0, HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 193);
+    expect_history(1, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_ABANDONED, DIAGNOSTIC_SOURCE_PEER, 193);
+    expect_history(2, HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 193);
+    expect_history(3, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_PAUSED, DIAGNOSTIC_SOURCE_PEER, 193);
+    expect_history(4, HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 193);
+    expect_history(5, HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 193);
+    expect_history(6, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_PAUSED, DIAGNOSTIC_SOURCE_PEER, 193);
+}
+
+static void peer_update_source_transitions(void) {
+    fresh("peer_source_changes_and_live_stall_observations");
+    uint32_t crc = make_image(image, 193, 0x62);
+    heartbeat(193, crc, true);
+    heartbeat(194, crc, true);
+    CHECK(diagnostic_runtime_snapshot().target_version == 194);
+    CHECK(diagnostic_runtime_snapshot().update_attempt == 2);
+    heartbeat(194, crc, false);
+    CHECK(global_state.fw.source == FW_UPDATE_SOURCE_NONE);
+    CHECK(diagnostic_runtime_snapshot().phase == DIAGNOSTIC_UPDATE_ABANDONED);
+    heartbeat(193, crc, true);
+    heartbeat(192, crc, true);
+    CHECK(global_state.fw.source == FW_UPDATE_SOURCE_NONE);
+    CHECK(diagnostic_runtime_snapshot().phase == DIAGNOSTIC_UPDATE_ABANDONED);
+
+    heartbeat(193, crc, true);
+    upgrade_tick();
+    for (unsigned word = 0; word < FLASH_PAGE_SIZE / 4; ++word) {
+        uart_packet_t request = pop_request();
+        response(request.data32[0], image);
+        upgrade_tick();
+    }
+    CHECK(global_state.fw.image_dirty);
+    heartbeat(191, crc, true);
+    CHECK(global_state.fw.source == FW_UPDATE_SOURCE_PULL_PAUSED);
+    CHECK(diagnostic_runtime_snapshot().phase == DIAGNOSTIC_UPDATE_PAUSED);
+    unsigned paused_events = diagnostic_history_window(HISTORY_CAPACITY).count;
+    heartbeat(191, crc, true); /* An unusable peer cannot produce a false restart. */
+    CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == paused_events);
+    heartbeat(193, crc, true);
+    diagnostic_runtime_snapshot_t before = diagnostic_runtime_snapshot();
+    now += FW_UPDATE_STALL_TIMEOUT_US;
+    heartbeat(193, crc, true); /* A live source makes the dirty stall restart. */
+    upgrade_tick();
+    diagnostic_runtime_snapshot_t after = diagnostic_runtime_snapshot();
+    CHECK(after.phase == DIAGNOSTIC_UPDATE_RECEIVING && after.received_bytes == 0);
+    CHECK(after.update_attempt == before.update_attempt + 1);
+    CHECK(global_state.fw.source == FW_UPDATE_SOURCE_PULL && global_state.fw.image_dirty);
+    history_window_t window = diagnostic_history_window(HISTORY_CAPACITY);
+    expect_history(window.count - 1, HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 193);
 }
 
 static void host_peer_config_serializations(void) {
@@ -466,11 +581,15 @@ static void host_peer_config_serializations(void) {
         CHECK(global_state.fw.source == FW_UPDATE_SOURCE_DROP && programs == 1);
         CHECK(!sector_erases[STORAGE_CONFIG_OFFSET / FLASH_SECTOR_SIZE]);
         CHECK(global_state.uf2_blocks_received_count == 1 && global_state.fw.address == 0);
+        diagnostic_runtime_snapshot_t snapshot = diagnostic_runtime_snapshot();
+        CHECK(snapshot.source == DIAGNOSTIC_SOURCE_USB && snapshot.update_attempt == 2);
+        CHECK(snapshot.received_bytes == FLASH_PAGE_SIZE && snapshot.target_version == 0);
         fw_upgrade_state_t saved = global_state.fw;
         heartbeat(200, crc, true);
         upgrade_tick();
         response(0, image);
         expect_no_change(saved);
+        CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == 2);
         owner(0);
         wipe_config();
         CHECK(erases == 1);
@@ -482,6 +601,8 @@ static void host_peer_config_serializations(void) {
     heartbeat(193, crc, true);
     upgrade_tick();
     CHECK(!programs && !erases && !watchdog_kicks && !global_state.fw.upgrade_in_progress);
+    CHECK(!diagnostic_runtime_snapshot().update_seen);
+    CHECK(!diagnostic_history_window(HISTORY_CAPACITY).count);
 }
 
 static void source_reads_and_metadata(void) {
@@ -591,10 +712,14 @@ static void power_cut_observation(void) {
         memset(&global_state, 0, sizeof(global_state));
         memset(lock_depth, 0, sizeof(lock_depth));
         memset(interrupts, 0, sizeof(interrupts));
+        diagnostic_history_init();
+        diagnostic_runtime_init();
         cut_at_operation = 0;
         CHECK(!global_state.fw.image_dirty);
         CHECK(!firmware_image_is_valid(0, 0, false));
         CHECK(!resets); /* No software recovery ran after asynchronous power loss. */
+        CHECK(!diagnostic_runtime_snapshot().update_seen);
+        CHECK(!diagnostic_history_window(HISTORY_CAPACITY).count);
     }
     fresh("config_power_cut_falls_back_to_defaults");
     global_state.config.output[0].speed_x = 101;
@@ -623,6 +748,57 @@ static void watchdog_contract(void) {
     CHECK(watchdog_kicks == 1);
 }
 
+/* The peer transport is an explicit boundary here; its separate suites exercise
+ * UART behavior. This assertion checks the task publishes before entering it. */
+void diagnostic_peer_task(uint64_t now_us) {
+    diagnostic_runtime_snapshot_t snapshot = diagnostic_runtime_snapshot();
+    CHECK(now_us == now && (snapshot.core_valid & 2) && snapshot.core_ticks[1] != 0);
+}
+
+static void diagnostic_task_checkpoints(void) {
+    fresh("diagnostic_task_checkpoints_with_console_disabled");
+    diagnostic_runtime_snapshot_t initial = diagnostic_runtime_snapshot();
+    CHECK(!initial.core_valid && initial.core_age_ms[0] == UINT32_MAX);
+    CHECK(initial.core_age_ms[1] == UINT32_MAX);
+    owner(0);
+    diagnostic_console_task(&global_state);
+    now += 2000;
+    owner(1);
+    diagnostic_peer_status_task(&global_state);
+    diagnostic_runtime_snapshot_t snapshot = diagnostic_runtime_snapshot();
+    CHECK(snapshot.core_valid == 3 && snapshot.core_ticks[0] == 1 && snapshot.core_ticks[1] == 1);
+    CHECK(snapshot.core_age_ms[0] == 2 && snapshot.core_age_ms[1] == 0);
+    CHECK(!diagnostic_history_window(HISTORY_CAPACITY).count);
+    diagnostic_runtime_checkpoint(2);
+    diagnostic_runtime_checkpoint(UINT32_MAX);
+    diagnostic_runtime_snapshot_t unchanged = diagnostic_runtime_snapshot();
+    CHECK(unchanged.core_valid == 3 && unchanged.core_ticks[0] == 1 && unchanged.core_ticks[1] == 1);
+
+    /* Exercise runtime input rejection separately from the actual updater
+       scenarios above. No invalid update observation may refresh progress. */
+    firmware_update_lock();
+    diagnostic_update_begin(DIAGNOSTIC_SOURCE_PEER, 193);
+    diagnostic_update_progress(FLASH_PAGE_SIZE);
+    firmware_update_unlock();
+    now += 7000;
+    firmware_update_lock();
+    diagnostic_update_progress(FLASH_PAGE_SIZE);
+    diagnostic_update_progress(0);
+    diagnostic_update_progress(STAGING_IMAGE_SIZE + 1);
+    diagnostic_update_phase(DIAGNOSTIC_UPDATE_PAUSED);
+    diagnostic_update_phase(DIAGNOSTIC_UPDATE_PAUSED);
+    diagnostic_update_progress(2 * FLASH_PAGE_SIZE);
+    firmware_update_unlock();
+    snapshot = diagnostic_runtime_snapshot();
+    CHECK(snapshot.core_ticks[0] == 1 && snapshot.core_ticks[1] == 1 && snapshot.core_valid == 3);
+    CHECK(snapshot.core_age_ms[0] == 9 && snapshot.core_age_ms[1] == 7);
+    CHECK(snapshot.received_bytes == FLASH_PAGE_SIZE && snapshot.progress_age_ms == 7);
+    CHECK(snapshot.phase == DIAGNOSTIC_UPDATE_PAUSED && snapshot.update_attempt == 1);
+    CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == 2);
+    expect_history(0, HISTORY_UPDATE_BEGIN, DIAGNOSTIC_SOURCE_PEER, 0, 193);
+    expect_history(1, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_PAUSED, DIAGNOSTIC_SOURCE_PEER, 193);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) seed = (uint32_t)strtoul(argv[1], NULL, 0);
     if (!seed) seed = 1;
@@ -634,12 +810,14 @@ int main(int argc, char **argv) {
     actual_peer_transfer(false, true);
     actual_peer_transfer(true, false);
     peer_stall_pause_and_restart();
+    peer_update_source_transitions();
     host_peer_config_serializations();
     source_reads_and_metadata();
     config_persistence_and_migration();
     config_set_during_save();
     power_cut_observation();
     watchdog_contract();
+    diagnostic_task_checkpoints();
     if (trace) fclose(trace);
     printf("storage production-boundary tests passed (seed=%u; 2 full peer images, shuffled UF2, 6 serializations, 8 power cuts)\n", replay_seed);
     return 0;

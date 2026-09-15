@@ -2,6 +2,8 @@
 #include "main.h"
 #include "diagnostic_peer.h"
 #include "diagnostic_peer_history.h"
+#include "diagnostic_history.h"
+#include "peer_observation.h"
 
 typedef struct { uint32_t token; uint64_t requested_at_us; } request_t;
 static queue_t requests, results;
@@ -9,6 +11,8 @@ static bool initialized;
 /* Only core 1 accesses the following state after startup. */
 static peer_status_t protocol;
 static peer_status_snapshot_t identity;
+static peer_observation_t observations;
+static bool progress_recorded;
 static peer_status_result_t pending_result;
 static bool result_pending;
 static bool query_completed;
@@ -28,6 +32,8 @@ void diagnostic_peer_shutdown(void) {
 void diagnostic_peer_init(const peer_status_snapshot_t *snapshot) {
     diagnostic_peer_shutdown();
     identity = *snapshot;
+    peer_observation_init(&observations);
+    progress_recorded = false;
     peer_status_init(&protocol, identity.role);
     result_pending = false;
     query_completed = false;
@@ -88,6 +94,22 @@ static void status_task(uint64_t now_us) {
     if (!result_pending) {
         result_pending = peer_status_take_result(&protocol, &pending_result);
         if (result_pending) {
+            if (pending_result.outcome == PEER_STATUS_OK) {
+                pending_result.observation = peer_observation_accept(&observations,
+                                                                     &pending_result.snapshot);
+                diagnostic_peer_observation_t observation = pending_result.observation;
+                uint8_t role = pending_result.snapshot.role;
+                uint32_t version = (uint32_t)pending_result.snapshot.major * 1000
+                                   + pending_result.snapshot.minor + 100;
+                if (observation.boot != DIAGNOSTIC_PEER_SAME_BOOT) {
+                    progress_recorded = false;
+                    diagnostic_history_record(HISTORY_PEER_OBSERVED, role, observation.boot, version);
+                }
+                if (!progress_recorded && observation.progress == DIAGNOSTIC_PROGRESS_ADVANCING) {
+                    diagnostic_history_record(HISTORY_PEER_PROGRESS, role, observation.progress, version);
+                    progress_recorded = true;
+                }
+            }
             query_completed = true;
             last_query_completed_us = now_us;
         }
@@ -115,6 +137,8 @@ void diagnostic_peer_receive(bool response, const uint8_t data[8], uint64_t now_
     } else {
         peer_status_snapshot_t snapshot = identity;
         snapshot.uptime_ms = now_us / 1000;
+        snapshot.protocol = PEER_STATUS_PROTOCOL;
+        snapshot.runtime = diagnostic_runtime_snapshot();
         peer_status_receive_request(&protocol, data, &snapshot, now_us);
     }
 }

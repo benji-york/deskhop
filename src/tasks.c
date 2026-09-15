@@ -55,6 +55,7 @@ void usb_device_task(device_t *state) {
 
 void diagnostic_console_task(device_t *state) {
     (void)state;
+    diagnostic_runtime_checkpoint(0);
 #if DH_CONSOLE && CFG_TUD_CDC
     console_task(time_us_64());
 #endif
@@ -62,6 +63,7 @@ void diagnostic_console_task(device_t *state) {
 
 void diagnostic_peer_status_task(device_t *state) {
     (void)state;
+    diagnostic_runtime_checkpoint(1);
     diagnostic_peer_task(time_us_64());
 }
 
@@ -288,6 +290,7 @@ static void firmware_upgrade_task_locked(device_t *state) {
         return;
 
     if (action == FW_UPDATE_ABANDON) {
+        diagnostic_update_phase(DIAGNOSTIC_UPDATE_ABANDONED);
         state->fw = (fw_upgrade_state_t){0};
         return;
     }
@@ -309,6 +312,7 @@ static void firmware_upgrade_task_locked(device_t *state) {
             .requested_at_us = now,
             .progressed_at_us = now,
         };
+        diagnostic_update_begin(DIAGNOSTIC_SOURCE_PEER, version);
         return;
     }
 
@@ -318,6 +322,7 @@ static void firmware_upgrade_task_locked(device_t *state) {
         state->fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
         state->fw.request_pending = false;
         state->fw.byte_done = false;
+        diagnostic_update_phase(DIAGNOSTIC_UPDATE_PAUSED);
         return;
     }
 
@@ -353,8 +358,10 @@ static void firmware_upgrade_task_locked(device_t *state) {
         state->fw.checksum = ~state->fw.checksum;
 
         /* Checksum mismatch, we wipe the stage 2 bootloader and rely on ROM recovery */
+        diagnostic_update_phase(DIAGNOSTIC_UPDATE_VALIDATING);
         if(state->fw.checksum != state->fw.peer_checksum
            || !firmware_image_is_valid(state->fw.version, state->fw.checksum, true)) {
+            diagnostic_update_phase(DIAGNOSTIC_UPDATE_FAILED);
             enter_firmware_recovery();
         }
 
@@ -365,6 +372,7 @@ static void firmware_upgrade_task_locked(device_t *state) {
                 .version = state->fw.version,
                 .checksum = state->fw.checksum,
             };
+            diagnostic_update_phase(DIAGNOSTIC_UPDATE_REBOOT_PENDING);
             global_state.reboot_requested = true;
         }
 

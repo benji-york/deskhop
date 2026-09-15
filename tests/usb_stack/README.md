@@ -53,6 +53,12 @@ Verified scenarios include:
   result, and retains a single frame and prompt. It handles peer timeout, invalid
   data, a busy request queue, a 600 ms core-1 fallback, and late results after
   disconnect or during a fresh query. Pending peer/CDC work leaves HID progressing.
+- v0.100 core/update rows use mocked runtime snapshots, including unpublished
+  versus wrapped-zero counters, maximum values, legacy runtime unavailability,
+  frozen output under backpressure, and a fresh snapshot on the next command.
+  New update/peer history events and opaque future events preserve their fields.
+  Worst-case help with editing echo and maximum status values fit the fixed
+  1 KiB output chunk. Observation policy itself is tested in pure/paired layers.
 - DTR close, unplug, deconfiguration, and fast reset discard partial commands and
   unsent output without accidentally rearming CDC buffers as endpoint zero.
 - Local history uses the production 64-record ring, with default/1/64 counts,

@@ -24,7 +24,8 @@ log; replay regenerates the scenario from the seed, not from arbitrary edited lo
 
 The suite compiles the complete checked-in `utils.c`, `ramdisk.c`, `tasks.c`,
 `handlers.c`, `fw_update.c`, `config_migration.c`, `constants.c`, `defaults.c`,
-`protocol.c`, and `selection.c`. `run.py`'s `SOURCES` is the build inventory.
+`protocol.c`, `selection.c`, `diagnostic_runtime.c`, `diagnostic_history.c`, and
+`history.c`. `run.py`'s `SOURCES` is the build inventory.
 The linker removes unused functions; no updater or MSC callback is copied into
 test code. Production `device_t`, config layout, UF2 layout, protocol enums,
 metadata, and TinyUSB HID types are included directly.
@@ -52,6 +53,16 @@ This suite does **not** run two CPUs or exhaustively interleave C memory accesse
 The broader simulator and reduced model checker cover additional
 scheduling questions at their separately documented abstraction levels.
 
+Updater observations run through the production runtime snapshot and 64-record
+history store. The lock boundary preserves firmware/flash/config IDs and adds
+separate history/runtime locks: updater hooks may hold firmware while briefly
+using either diagnostic lock, but those two locks may not nest, readers may not
+acquire firmware or flash while holding them, and neither may remain held during
+flash operations. The ROM-reset sink checks that a failure event already exists
+at reset entry; it does not infer that volatile history survives a real reset.
+The core 1 diagnostic transport is a boundary stub here that checks checkpoint
+publication before transport entry. Dedicated peer suites exercise its UART work.
+
 ## Coverage and oracles
 
 | Scenario | Actual behavior checked | Independent oracle / model boundary |
@@ -70,13 +81,18 @@ scheduling questions at their separately documented abstraction levels.
 | Config SET_VAL/save race | `config_set_during_save_keeps_persisted_crc_coherent`: actual setter runs at a selected snapshot-copy preemption, then a later save/reload | Independent CRC over persisted bytes and a whole-old/whole-new field oracle; later RAM edit remains available; config lock must be released before every flash operation |
 | Power interruption | Seven partial firmware erase/program cuts; one partial config program | NOR persists, RAM state vanishes; damaged image CRC rejected; torn config loads defaults |
 | Watchdog | Core1 hang threshold minus one and threshold, deliberate reboot | Observable kick counts, no wall-clock sleeping |
+| Update history | Successful and corrupt full peer/UF2 images; receiving, 25/50/75/100% progress, validating, reboot pending or failure | Exact seven-record timelines in the real ring; failure visible before reset; no duplicate progress-age refresh, invalid-UF2 events, or stale peer takeover |
+| Update state changes | Clean abandonment, dirty pause, resume, live-peer stall restart, source version/CRC changes, host takeover | Runtime phase/target/attempt and retained-event assertions against actual updater branches |
+| Core checkpoints and observation bounds | Both diagnostic task entries, console disabled, invalid core numbers, duplicate/decreasing/out-of-range progress and paused progress | Exact counters/ages; update begin preserves core counters; rejected progress and phase changes do not refresh progress age; duplicate phase emits no extra row |
 
-`mutations.py` compiles and runs eleven isolated production variants. It must kill all
+`mutations.py` compiles and runs fifteen isolated production variants. It must kill all
 of them at runtime: duplicate UF2 programming, early completion, skipped embedded
 CRC, UF2 after reboot reservation, consuming a word on TX failure, premature page
 zero commit, missing final page, stale response acceptance, config-save guard
-removal, removal of cross-core flash locking, and SET_VAL bypassing the config
-snapshot lock. Compile failures do not count.
+removal, removal of cross-core flash locking, SET_VAL bypassing the config
+snapshot lock, missing peer/USB progress observations, missing failure observation
+before reset, and suppressing the core 0 checkpoint when the console is disabled.
+Compile failures do not count.
 This demonstrates sensitivity to these concrete errors; it is not a universal
 mutation score or proof of correctness.
 

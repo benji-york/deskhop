@@ -163,6 +163,9 @@ void sim_init(uint8_t role, event_cb_t cb) {
     /* The store and its cross-core bridge remain production code even when
        this test boundary disables CDC. Initialize before any USB callback. */
     diagnostic_history_init();
+#if SIM_HAS_DIAGNOSTIC_RUNTIME
+    diagnostic_runtime_init();
+#endif
     diagnostic_history_record(HISTORY_BOOT, global_state.active_output, 0, 98);
 #endif
 #if SIM_HAS_DIAGNOSTIC_PEER
@@ -360,6 +363,17 @@ int64_t sim_get(int field,int index) {
       case 68:return diagnostic_result.snapshot.uptime_ms;
       case 69:return diagnostic_result.snapshot.image_crc_at_boot;
       case 70:assert(index >= 0 && index < 8);return diagnostic_result.snapshot.board_id[index];
+#if SIM_HAS_DIAGNOSTIC_RUNTIME
+      case 71:return diagnostic_result.snapshot.protocol;
+      case 72:return diagnostic_result.snapshot.runtime.core_valid;
+      case 73:assert(index >= 0 && index < 2);return diagnostic_result.snapshot.runtime.core_ticks[index];
+      case 74:assert(index >= 0 && index < 2);return diagnostic_result.snapshot.runtime.core_age_ms[index];
+      case 75:return diagnostic_result.observation.boot;
+      case 76:return diagnostic_result.observation.progress;
+      case 77:return diagnostic_result.observation.update;
+      case 78:return diagnostic_result.snapshot.runtime.phase;
+      case 79:return diagnostic_result.snapshot.runtime.received_bytes;
+#endif
 #endif
       default:assert(false);return 0;
     }

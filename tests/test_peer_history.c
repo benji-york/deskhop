@@ -59,7 +59,7 @@ static void put_event(uint8_t *wire, const history_event_t *event) {
 static void fixture(uint8_t wire[PEER_HISTORY_MAX_WIRE_SIZE], uint8_t role,
                     unsigned requested, unsigned count, uint64_t first, uint64_t oldest) {
     memset(wire, 0, PEER_HISTORY_MAX_WIRE_SIZE);
-    wire[0] = 1; wire[1] = role; wire[2] = (uint8_t)count; wire[3] = 24;
+    wire[0] = PEER_HISTORY_PROTOCOL; wire[1] = role; wire[2] = (uint8_t)count; wire[3] = 24;
     put(wire + 8, 8, UINT64_C(0x8877665544332211));
     put(wire + 16, 8, 1000000);
     put(wire + 24, 8, first);
@@ -76,7 +76,7 @@ static void fixture(uint8_t wire[PEER_HISTORY_MAX_WIRE_SIZE], uint8_t role,
 static void request(uint8_t payload[8], uint32_t token, unsigned count) {
     memset(payload, 0, 8);
     put(payload, 4, token);
-    payload[4] = 1;
+    payload[4] = PEER_HISTORY_PROTOCOL;
     payload[5] = (uint8_t)count;
 }
 
@@ -235,7 +235,7 @@ static void test_wire_and_success(void) {
                 assert(result->outcome == PEER_HISTORY_OK);
                 assert(result->token == UINT32_C(0xa1b2c3d4));
                 assert(result->requested_at_us == 1000000 && result->first_response_us == 1001000);
-                assert(result->snapshot.role == role);
+                assert(result->snapshot.role == role && result->snapshot.protocol == 2);
                 assert(result->snapshot.boot_session == UINT64_C(0x8877665544332211));
                 assert(result->snapshot.sampled_at_us == 1000000);
                 assert(result->snapshot.window.first_seq == 81 - limit);
@@ -275,10 +275,10 @@ static void test_corruption_and_structure(void) {
         expect_invalid(wire, 16);
     }
     const struct { unsigned offset, width; uint64_t value; } invalid[] = {
-        {0,1,2}, {1,1,0}, {2,1,17}, {2,1,1}, {3,1,23}, {4,4,1},
+        {0,1,3}, {1,1,0}, {2,1,17}, {2,1,1}, {3,1,23}, {4,4,1},
         {24,8,0}, {24,8,UINT64_MAX}, {32,8,2}, {32,8,UINT64_MAX},
         {40,8,0}, {40,8,2}, {48,8,1}, {48,8,UINT64_MAX}, {56,8,4},
-        {64,8,2}, {64+8,8,1000001}, {64+20,1,0}, {64+20,1,11},
+        {64,8,2}, {64+8,8,1000001}, {64+20,1,0},
         {64+23,1,1}, {88+8,8,999}, {112,1,1}, {56,8,1},
     };
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
@@ -462,6 +462,116 @@ static void test_external_pacer_does_not_starve_request(void) {
     assert(ep.offered == 6 && ep.requests == 1 && ep.responses == 2);
 }
 
+static void test_legacy_wire_and_filter(void) {
+    endpoint_t server;
+    init(&server, 1, 0);
+    const uint8_t types[] = {1, 11, 15, 255, 10};
+    for (unsigned i = 0; i < sizeof(types); ++i) {
+        history_event_t event = example(i + 1);
+        history_store_record(&server.store, event.time_us, (history_type_t)types[i],
+                              event.a, event.b, event.value);
+    }
+    uint8_t payload[8];
+    request(payload, 11, 16); payload[4] = 1;
+    assert(peer_history_receive_request(&server.protocol, payload, server.now));
+    for (unsigned tick_count = 0; tick_count < 400 && server.responses != 226; ++tick_count)
+        tick(&server, 1000000 + tick_count * 1000);
+    assert(server.responses == 226 && server.reads == 5);
+
+    /* The v1 byte layout and CRC remain unchanged. Future event contents must
+     * be absent, with their original sequence positions represented as gaps. */
+    uint8_t expected[PEER_HISTORY_MAX_WIRE_SIZE];
+    fixture(expected, 1, 16, 5, 1, 1);
+    expected[0] = 1;
+    put(expected + 56, 8, 14);
+    for (unsigned i = 0; i < sizeof(types); ++i) {
+        if (types[i] > 10)
+            memset(expected + 64 + i * 24, 0, 24);
+        else
+            expected[64 + i * 24 + 20] = types[i];
+    }
+    sign_wire(expected, 16);
+    assert(memcmp(server.wire, expected, length(16)) == 0);
+
+    /* A current reader still receives every new or unknown nonzero event
+     * type, including its numeric arguments, without a protocol bump. */
+    request(payload, 12, 16);
+    assert(peer_history_receive_request(&server.protocol, payload, 1500000));
+    unsigned previous_responses = server.responses;
+    for (unsigned i = 0; i < 400 && server.responses != previous_responses + 226; ++i)
+        tick(&server, 1500000 + i * 1000);
+    endpoint_t client;
+    init(&client, 0, 0);
+    start(&client, 12, 16);
+    deliver(&client, server.wire, 12, 16, 3, true, true);
+    const peer_history_result_t *result = finish(&client, 1010000);
+    assert(result->outcome == PEER_HISTORY_OK && result->snapshot.protocol == 2);
+    assert(result->snapshot.gap_mask == 0 && result->snapshot.window.count == 5);
+    for (unsigned i = 0; i < sizeof(types); ++i) {
+        history_event_t event = example(i + 1);
+        event.type = types[i];
+        assert_event(&result->snapshot.events[i], &event);
+    }
+}
+
+static void test_legacy_fallback_and_stale_chunks(void) {
+    const uint32_t tokens[] = {1, UINT32_C(0x7fffffff), UINT32_C(0x80000000), UINT32_MAX};
+    const uint32_t fallback[] = {UINT32_C(0x80000001), UINT32_MAX, 1, UINT32_C(0x80000000)};
+    const unsigned limits[] = {1, 16, 64};
+    for (unsigned token_index = 0; token_index < 4; ++token_index) {
+        for (unsigned n = 0; n < 3; ++n) {
+            unsigned limit = limits[n];
+            endpoint_t ep;
+            init(&ep, 0, 0);
+            start(&ep, tokens[token_index], limit);
+            assert(ep.last_request[4] == 2);
+            tick(&ep, 1249999);
+            assert(ep.requests == 1);
+            tick(&ep, 1250000);
+            assert(ep.requests == 2 && ep.last_request[4] == 1);
+            uint8_t expected_request[8];
+            request(expected_request, fallback[token_index], limit); expected_request[4] = 1;
+            assert(memcmp(ep.last_request, expected_request, 8) == 0);
+            uint8_t stale[8];
+            request(stale, tokens[token_index], limit);
+            stale[4] = stale[5] = 255;
+            peer_history_receive_response(&ep.protocol, stale, 1251000);
+            assert(ep.protocol.client_active && ep.protocol.client_received_count == 0);
+
+            uint8_t wire[PEER_HISTORY_MAX_WIRE_SIZE];
+            fixture(wire, 1, limit, limit, 1, 1);
+            wire[0] = 1; sign_wire(wire, limit);
+            deliver(&ep, wire, fallback[token_index], limit, 7, true, true);
+            const peer_history_result_t *result = finish(&ep, 1260000);
+            assert(result->outcome == PEER_HISTORY_OK && result->token == tokens[token_index]);
+            assert(result->requested_at_us == 1000000 && result->first_response_us == 1251000);
+            assert(result->snapshot.protocol == 1 && result->snapshot.window.count == limit);
+            for (unsigned i = 0; i < limit; ++i) {
+                history_event_t expected = example(i + 1);
+                assert_event(&result->snapshot.events[i], &expected);
+            }
+        }
+    }
+    endpoint_t ep;
+    init(&ep, 0, 0);
+    uint8_t wire[PEER_HISTORY_MAX_WIRE_SIZE];
+    fixture(wire, 1, 1, 1, 1, 1);
+    start(&ep, 7, 1);
+    chunk(&ep, wire, 7, 5, 1001000);
+    tick(&ep, 1250000);
+    assert(ep.requests == 1 && ep.protocol.client_protocol == 2);
+    tick(&ep, 4000000);
+    assert(peer_history_peek_result(&ep.protocol)->outcome == PEER_HISTORY_TIMEOUT);
+
+    /* Fallback does not refresh the original request's three-second deadline. */
+    init(&ep, 0, 0);
+    assert(peer_history_start(&ep.protocol, 8, 1, 1000000) == PEER_HISTORY_STARTED);
+    tick(&ep, 3900000);
+    assert(ep.requests == 1);
+    tick(&ep, 4000000);
+    assert(ep.requests == 1 && peer_history_peek_result(&ep.protocol)->outcome == PEER_HISTORY_TIMEOUT);
+}
+
 static void test_rejection_pacing_and_expiry(void) {
     endpoint_t ep;
     init(&ep, 0, 1);
@@ -533,6 +643,8 @@ int main(void) {
     test_bidirectional_and_borrow();
     test_capture_overwritten_by_producer();
     test_external_pacer_does_not_starve_request();
+    test_legacy_wire_and_filter();
+    test_legacy_fallback_and_stale_chunks();
     test_rejection_pacing_and_expiry();
     puts("peer history: independent wire/CRC, roles/counts/orders, corruption, gaps, deadlines, pacing and borrowed-result contracts passed");
     return 0;

@@ -75,9 +75,9 @@ def check_wire(s, client, token, limit):
             assert index not in indices and index < expected_size // 2
             indices.add(index)
             data[2 * index:2 * index + 2] = raw[9:11]
-    assert requests == [bytes.fromhex(frame(38, struct.pack('<IBB2x', token, 1, limit)))]
+    assert requests == [bytes.fromhex(frame(38, struct.pack('<IBB2x', token, 2, limit)))]
     assert indices == set(range(expected_size // 2))
-    assert data[:4] == bytes([1, 1 - client, limit, 24])
+    assert data[:4] == bytes([2, 1 - client, limit, 24])
     assert data[4:8] == bytes(4)
     assert int.from_bytes(data[8:16], 'little') == 2 - client
     assert int.from_bytes(data[-4:], 'little') == zlib.crc32(data[:-4])
@@ -105,12 +105,12 @@ def scenario_peer_history_roundtrip(s):
     status_request(s, 1, 2002)
     s.do(0, 'report', 1, 0, keyboard(0, 4))
     s.do(1, 'report', 1, 0, mouse(x=7, y=-3))
-    s.advance(100000)
+    s.advance(150000)
     s.expect_report(0, 1, keyboard(0, 4))
     s.expect_report(0, 2, out_mouse(0, 16007, 15997))
     for node in (0, 1):
         status_result(s, node, 2001 + node)
-    s.advance(2200000)
+    s.advance(2150000)
     for node, limit in ((0, 16), (1, 64)):
         result(s, node, 1001 + node)
         expect_seed(s, node, limit, seeded[1 - node])

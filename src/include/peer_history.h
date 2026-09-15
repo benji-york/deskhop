@@ -2,7 +2,9 @@
 
 #include "history.h"
 
-#define PEER_HISTORY_PROTOCOL 1u
+#define PEER_HISTORY_PROTOCOL 2u
+#define PEER_HISTORY_LEGACY_PROTOCOL 1u
+#define PEER_HISTORY_LEGACY_EVENT_MAX 10u
 #define PEER_HISTORY_MAX_COUNT 64u
 #define PEER_HISTORY_HEADER_SIZE 64u
 #define PEER_HISTORY_RECORD_SIZE 24u
@@ -11,9 +13,10 @@
 #define PEER_HISTORY_REQUEST_INTERVAL_US UINT64_C(200000)
 #define PEER_HISTORY_TX_INTERVAL_US UINT64_C(1000)
 #define PEER_HISTORY_TIMEOUT_US UINT64_C(3000000)
+#define PEER_HISTORY_FALLBACK_US UINT64_C(250000)
 
 typedef struct {
-    uint8_t role;
+    uint8_t role, protocol;
     uint64_t boot_session, sampled_at_us;
     history_window_t window;
     uint64_t gap_mask;
@@ -57,16 +60,16 @@ typedef struct {
     uint8_t local_role;
     uint64_t boot_session;
     bool client_active, client_sent, result_ready;
-    uint8_t client_phase, client_limit, client_validate_index;
-    uint32_t client_token, client_crc;
-    uint64_t client_started_us, client_first_response_us, client_previous_time_us;
+    uint8_t client_phase, client_limit, client_validate_index, client_protocol;
+    uint32_t client_token, client_wire_token, client_crc;
+    uint64_t client_started_us, client_sent_at_us, client_first_response_us, client_previous_time_us;
     unsigned client_wire_size, client_received_count, client_crc_offset;
     uint8_t client_received[(PEER_HISTORY_MAX_CHUNKS + 7u) / 8u];
     uint8_t client_bytes[PEER_HISTORY_MAX_WIRE_SIZE];
     peer_history_result_t result;
 
     bool server_seen_request;
-    uint8_t server_phase, server_limit, server_capture_index;
+    uint8_t server_phase, server_limit, server_capture_index, server_protocol;
     uint32_t server_token, server_crc;
     uint64_t server_started_us, server_sampled_at_us, server_gap_mask;
     unsigned server_wire_size, server_next_chunk, server_crc_offset;

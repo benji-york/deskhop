@@ -2,11 +2,16 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "diagnostic_runtime.h"
 
-#define PEER_STATUS_PROTOCOL 1u
+#define PEER_STATUS_PROTOCOL 2u
+#define PEER_STATUS_LEGACY_PROTOCOL 1u
 #define PEER_STATUS_PACKET_SIZE 8u
-#define PEER_STATUS_SNAPSHOT_SIZE 39u
-#define PEER_STATUS_CHUNK_COUNT 13u
+#define PEER_STATUS_SNAPSHOT_SIZE 78u
+#define PEER_STATUS_CHUNK_COUNT 26u
+#define PEER_STATUS_LEGACY_SNAPSHOT_SIZE 39u
+#define PEER_STATUS_LEGACY_CHUNK_COUNT 13u
+#define PEER_STATUS_FALLBACK_US UINT64_C(150000)
 #define PEER_STATUS_TIMEOUT_US UINT64_C(500000)
 #define PEER_STATUS_QUERY_INTERVAL_US UINT64_C(200000)
 #define PEER_STATUS_TX_INTERVAL_US UINT64_C(1000)
@@ -14,13 +19,14 @@
 /* Identity is captured at boot; uptime is sampled for each accepted request.
  * image_crc_at_boot is metadata, not an independently verified flash digest. */
 typedef struct {
-    uint8_t role;
+    uint8_t role, protocol;
     uint16_t major;
     uint16_t minor;
     uint8_t board_id[8];
     uint64_t boot_session;
     uint64_t uptime_ms;
     uint32_t image_crc_at_boot;
+    diagnostic_runtime_snapshot_t runtime;
 } peer_status_snapshot_t;
 
 typedef enum {
@@ -34,6 +40,8 @@ typedef struct {
     peer_status_outcome_t outcome;
     /* Populated only for PEER_STATUS_OK. */
     peer_status_snapshot_t snapshot;
+    /* Filled by the local observer, never decoded from peer-supplied bytes. */
+    diagnostic_peer_observation_t observation;
 } peer_status_result_t;
 
 typedef enum {
@@ -63,8 +71,10 @@ typedef struct {
     bool client_sent;
     bool result_ready;
     uint32_t client_token;
-    uint64_t client_started_us;
-    uint16_t client_received;
+    uint32_t client_wire_token;
+    uint8_t client_protocol;
+    uint64_t client_started_us, client_sent_at_us;
+    uint32_t client_received;
     uint8_t client_bytes[PEER_STATUS_SNAPSHOT_SIZE];
     peer_status_result_t result;
 
@@ -73,6 +83,7 @@ typedef struct {
     uint32_t server_token;
     uint64_t server_started_us;
     uint8_t server_next_chunk;
+    uint8_t server_chunk_count;
     uint8_t server_bytes[PEER_STATUS_SNAPSHOT_SIZE];
 
     bool tx_attempted;
