@@ -70,6 +70,26 @@ void tud_hid_set_report_cb(uint8_t instance,
         /* The dispatcher accepts normalized packets only. The USB report's
            integrity was checked before constructing this internal checksum. */
         packet.checksum = calc_packet_checksum(&packet);
+
+        /* The Web Config button sends peer then local requests. USB completion
+           does not mean core 0 has drained its UART queue, so latch these two
+           validated commands for the TX task instead of resetting here. UART
+           reception and keyboard maintenance retain their existing handlers. */
+        bool local_bootloader = packet.type == FIRMWARE_UPGRADE_MSG;
+        bool peer_bootloader = packet.type == PROXY_PACKET_MSG
+            && packet.data[0] == FIRMWARE_UPGRADE_MSG;
+        if (local_bootloader || peer_bootloader) {
+            firmware_update_lock();
+            if (!global_state.fw.upgrade_in_progress && !global_state.fw.image_dirty) {
+                if (peer_bootloader)
+                    global_state.config_bootloader_peer_pending = true;
+                else
+                    global_state.config_bootloader_local_pending = true;
+            }
+            firmware_update_unlock();
+            return;
+        }
+
         process_packet(&packet, &global_state);
         return;
     }

@@ -230,7 +230,7 @@ async function rebootHandler() {
 }
 
 async function enterBootloaderHandler() {
-  await sendReport(packetType.firmwareUpgradeMsg, true, true);
+  await sendReport(packetType.firmwareUpgradeMsg, [], true);
 }
 
 async function valueChangedHandler(element) {

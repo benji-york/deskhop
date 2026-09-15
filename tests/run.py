@@ -48,6 +48,7 @@ def main():
         compile_test(name,[f'tests/test_{name}.c',f'src/{unit}.c',*dependencies])
     node=os.environ.get('NODE') or shutil.which('node') or str(pathlib.Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')
     run('WebConfig auto-start',[node,'tests/test_webconfig_autostart.js'])
+    run('WebConfig Bootloader button',[node,'tests/test_webconfig_bootloader.js'])
     hid_flags=['-Wno-unused-parameter','-Wno-sign-compare','-Itests/hid_stubs','-Ipico-sdk/lib/tinyusb/src']
     hid_sources=['src/hid_parser.c','src/hid_report.c','src/keyboard.c','src/usb.c','src/reboot_hotkey.c',
                  'tests/history_stub.c']

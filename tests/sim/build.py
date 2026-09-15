@@ -68,6 +68,8 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
         flags += ['-DSIM_HAS_DIAGNOSTIC_PEER_HISTORY=1']
     if (source_root/'src/keyboard_sync.c').exists():
         flags += ['-DSIM_HAS_KEYBOARD_SYNC=1']
+    if 'config_bootloader_local_pending' in (source_root/'src/include/structs.h').read_text():
+        flags += ['-DSIM_HAS_CONFIG_BOOTLOADER=1']
     cmd = [os.environ.get('CC', 'cc'), *flags, *([] if executable else ['-shared']),
            '-I'+str(output.parent), '-I'+str(ROOT/'tests/sim/include'), '-I'+str(source_root/'src/include'),
            '-I'+str(ROOT/'pico-sdk/src/common/pico_util/include'),

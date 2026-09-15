@@ -71,10 +71,50 @@ void send_value(const uint8_t value, enum packet_type_e packet_type) {
     queue_packet(&value, packet_type, sizeof(uint8_t));
 }
 
+/* Progress only WebHID-originated maintenance on the same core as its callback.
+   A full queue retains the peer request for another poll; normal TX below keeps
+   making room. Never arm the watchdog while waiting for actual wire drain. */
+static bool process_config_bootloader_request(device_t *state) {
+    if (!state->config_bootloader_peer_pending && !state->config_bootloader_local_pending)
+        return false;
+
+    firmware_update_lock();
+    if (state->fw.upgrade_in_progress || state->fw.image_dirty) {
+        state->config_bootloader_peer_pending = false;
+        state->config_bootloader_local_pending = false;
+        firmware_update_unlock();
+        return false;
+    }
+
+    /* The maintenance command has no payload semantics. Serialize a canonical
+       empty payload using the same protected UART frame as normal dispatch. */
+    if (state->config_bootloader_peer_pending
+        && queue_packet_try(NULL, FIRMWARE_UPGRADE_MSG, 0))
+        state->config_bootloader_peer_pending = false;
+
+    bool ready = state->config_bootloader_local_pending
+        && !state->config_bootloader_peer_pending
+        && queue_is_empty(&state->uart_tx_queue)
+        && !dma_channel_is_busy(state->dma_tx_channel)
+        && !(uart_get_hw(SERIAL_UART)->fr & UART_UARTFR_BUSY_BITS);
+    if (ready) {
+        state->config_bootloader_local_pending = false;
+        /* Keep the updater excluded through ROM entry, closing the race between
+           the final active/dirty check and reset. Bit 0 disables the ROM disk. */
+        reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
+    }
+    /* ROM entry does not return on silicon; native reset doubles do. */
+    firmware_update_unlock();
+    return ready;
+}
+
 /* Process outgoing config report messages. */
 void process_uart_tx_task(device_t *state) {
     _Static_assert(RAW_PACKET_LENGTH <= DMA_TX_BUFFER_SIZE, "UART frame exceeds DMA buffer");
     uart_packet_t packet = {0};
+
+    if (process_config_bootloader_request(state))
+        return;
 
     if (dma_channel_is_busy(state->dma_tx_channel))
         return;

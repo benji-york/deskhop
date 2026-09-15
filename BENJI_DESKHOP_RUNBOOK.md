@@ -8,6 +8,21 @@ README.
 
 Snapshot: 2026-09-15
 
+## Prepared v0.103: Bootloader-button fix (not flashed)
+
+`codex/bootloader-button-fix` corrects the Web Config Bootloader button's boolean
+payload and the missing firmware command allowlist entry. The firmware retains
+the peer request through a full queue and defers local ROM entry until queued
+UART traffic, DMA and the UART FIFO/shifter have drained. An active update or
+dirty firmware image on the initiating Pico blocks this path. Actual-click/mock-HID
+and 20 paired-production regressions cover the complete path in both test tiers;
+generated pages and the embedded image are updated together. No remote execution
+acknowledgement is added.
+See the [v0.103 fix record](docs/testing/bootloader-button-v103.md) for validation,
+artifact identity and safe hardware acceptance steps. UART/configuration formats,
+settings and QMK are unchanged. v0.102 below is still the accepted deployment;
+the config-validation and reboot-safety fixes remain separate unfinished work.
+
 ## Current accepted firmware: v0.102 completed fixes
 
 The user requested publication and deployment of the completed fixes. The
@@ -931,6 +946,7 @@ and configuration UI:
 
 ```sh
 node tests/test_webconfig_autostart.js
+node tests/test_webconfig_bootloader.js
 
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Isrc/include tests/test_zoom_tracker.c src/zoom_tracker.c -o /tmp/deskhop-zoom-tracker-test
 /tmp/deskhop-zoom-tracker-test

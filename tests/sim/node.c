@@ -14,9 +14,11 @@ static sim_ioqspi_hw_t io;
 sim_ioqspi_hw_t *ioqspi_hw = &io;
 static sim_sio_hw_t sio;
 sim_sio_hw_t *sio_hw = &sio;
+static sim_uart_hw_t uart_hw;
 static uint64_t now_us, busy_until[3], dma_busy_until, last_kick;
 static bool mounted, suspended, stalled[3], fail_report, led, stopped;
 static bool uart_stalled, diagnostic_request_accepted, diagnostic_poll_ready;
+static bool uart_busy_override;
 #if SIM_HAS_DIAGNOSTIC_PEER
 static peer_status_result_t diagnostic_result;
 #endif
@@ -113,6 +115,13 @@ void gpio_put(uint32_t pin,bool value) { led=value; }
 bool gpio_get(uint32_t pin) { return led; }
 void pico_get_unique_board_id_string(char *s,uint32_t n) { snprintf(s,n,"SIMULATED-%u",global_state.board_role); }
 bool dma_channel_is_busy(uint32_t channel) { return uart_stalled || now_us < dma_busy_until; }
+sim_uart_hw_t *uart_get_hw(unsigned uart) {
+    (void)uart;
+    /* Independent FIFO/shifter control catches DMA-idle-but-not-wire-idle
+       resets that the ordinary whole-frame DMA timing model cannot expose. */
+    uart_hw.fr = (uart_busy_override || now_us < dma_busy_until) ? UART_UARTFR_BUSY_BITS : 0;
+    return &uart_hw;
+}
 void dma_channel_transfer_from_buffer_now(uint32_t channel,const void *p,uint32_t n) {
     /* 8N1 serial duration, rounded upwards. Copying/serialization belongs to
        the transport model; RX feeds the real production DMA ring parser. */
@@ -159,6 +168,8 @@ bool tuh_hid_set_report(uint8_t addr,uint8_t instance,uint8_t id,uint8_t type,vo
 
 void sim_init(uint8_t role, event_cb_t cb) {
     event_cb=cb;
+    uart_busy_override = false;
+    memset(&uart_hw, 0, sizeof(uart_hw));
     history_request_accepted = history_poll_ready = false;
 #if SIM_HAS_DIAGNOSTIC_PEER_HISTORY
     history_borrowed = NULL;
@@ -213,6 +224,7 @@ void sim_host(int connect,int suspend) {
 }
 void sim_endpoint(int instance,int stall,int reject) { stalled[instance]=stall; fail_report=reject; }
 void sim_uart_stall(int stall) { uart_stalled = stall; }
+void sim_uart_busy(int busy) { uart_busy_override = busy; }
 /* Core 0's actual bridge API, with scalar introspection instead of relying on
  * ctypes matching either ARM or the host's structure padding. */
 void sim_diagnostic_request(uint32_t token) {
@@ -392,6 +404,15 @@ int64_t sim_get(int field,int index) {
       case 20:return s->fw.image_dirty; case 21:return s->blinks_left;
       case 22:return s->direct_activity_valid; case 23:return s->peer_activity_valid;
       case 24:return last_kick;
+#if SIM_HAS_CONFIG_BOOTLOADER
+      case 25:return s->config_bootloader_peer_pending;
+      case 26:return s->config_bootloader_local_pending;
+#else
+      case 25:case 26:return 0;
+#endif
+      case 27:return dma_channel_is_busy(s->dma_tx_channel);
+      case 28:return !!(uart_get_hw(SERIAL_UART)->fr & UART_UARTFR_BUSY_BITS);
+      case 29:return s->fw.upgrade_in_progress;
       case 40:return s->zoom_assist[index].debt;
       case 41:return s->zoom_assist[index].overscroll;
       case 42:return s->zoom_assist[index].exit_pending;

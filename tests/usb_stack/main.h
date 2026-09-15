@@ -24,6 +24,8 @@ void send_value(uint8_t, enum packet_type_e);
 bool validate_packet(uart_packet_t *);
 uint32_t calc_packet_checksum(const uart_packet_t *);
 void process_packet(uart_packet_t *, device_t *);
+void firmware_update_lock(void);
+void firmware_update_unlock(void);
 void publish_local_modifiers(device_t *);
 void blink_led(device_t *);
 uint8_t tuh_hid_interface_protocol(uint8_t, uint8_t);

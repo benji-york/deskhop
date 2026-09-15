@@ -24,6 +24,8 @@ typedef struct {
     uint8_t keyboard_leds_desired[NUM_SCREENS];
     bool tud_connected, keyboard_connected, mouse_connected;
     bool reboot_requested, config_mode_active;
+    bool config_bootloader_peer_pending, config_bootloader_local_pending;
+    struct { bool upgrade_in_progress, image_dirty; } fw;
     hid_keyboard_report_t local_kbd_states[MAX_DEVICES], remote_kbd_state;
     reboot_hotkey_sequence_t reboot_hotkey_sequence;
     reboot_hotkey_source_t reboot_hotkey_source[MAX_DEVICES];

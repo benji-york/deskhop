@@ -53,7 +53,7 @@ The subsequent serial check passed five statuses, two histories, and fresh
 PASS/FAIL/PASS scans of both boards with correct/wrong/correct CRC expectations.
 Both full-slot CRCs matched `2db89640`; boot metadata CRC was `be404f8f`.
 B's CRC was measured by its own firmware, without an external picotool readback.
-Both boards are deployed on v0.101. Benji confirmed "Everything works" after
+Both boards were deployed on v0.101 at this stage. Benji confirmed "Everything works" after
 the requested typing, trackball/buttons, and both-Mac switch-and-back check.
 The device-stack harness now
 also executes real CDC control/bulk transfers and the production console,
@@ -61,11 +61,21 @@ including bounded work, malformed command recovery, and HID progress while a
 serial reader is stalled. The paired adapter derives task names and core
 ownership from each firmware's tables, including older baseline builds.
 
-## Unflashed keyboard draft
+## Current release and prepared Bootloader fix
+
+Both boards now run accepted [v0.102](release-v102.md), which releases the keyboard
+and UART fixes below with their required version bump and two-board migration.
+The [v0.103 Bootloader-button fix](bootloader-button-v103.md) is prepared but
+not flashed. It adds an actual page-click/mock-HID test and 20 paired-production
+scenarios for USB admission, peer routing, queue/DMA/UART drain and updater guards.
+These exercise production handlers, not the Pico ROM or physical USB hardware.
+
+## Historical keyboard and UART drafts (released in v0.102)
 
 The successor [UART integrity draft](uart-integrity-draft.md) protects all command
-types and framing, separates WebHID encoding, and requires a deliberate initial
-both-board migration. It remains unflashed at firmware 0.101/configuration 10.
+types and framing, separates WebHID encoding, and required a deliberate initial
+both-board migration. Its original unversioned draft was not flashable; v0.102
+completed that release and migration.
 
 The [keyboard reliability draft](keyboard-reliability-draft.md) adds ordinary
 release recovery under USB/UART saturation and packet loss, bounded peer leases,
@@ -85,7 +95,7 @@ python3 tests/run.py arm
 ```
 
 Requirements: Python 3.10+, Clang with AddressSanitizer/UndefinedBehaviorSanitizer, and Node
-for the existing Web Config test. `CC` and `NODE` override their executables.
+for the Web Config tests. `CC` and `NODE` override their executables.
 The runner can also find Codex's bundled Node when it is absent from PATH.
 Coverage needs LLVM (`llvm-cov`, `llvm-profdata`; Xcode's `xcrun` works on macOS).
 Use matching Clang/LLVM versions; on Linux their shared `bin` directory may need
@@ -105,15 +115,16 @@ in the runbook. No command flashes or uploads firmware.
 - **Deep:** fast tier plus 20,000 HID cases, 16 storage seeds, 32 generated
   paired-input sequences, the backpressure scenario under all 24 fixed priority
   orders of the four modeled cores, equivalent order exploration for peer
-  status/history and simultaneous verification, and 36 compiled production
-  mutations (21 storage and 15 paired, including seven selection mutations).
+  status/history and simultaneous verification, and 38 compiled production
+  mutations (21 storage and 17 paired, including seven selection mutations).
   Model mutations are counted separately. Nine valid-input scenarios also run
   against original `d42c930` source (Git and that local commit are required;
-  no fetching). Three host-effect traces match exactly; five compare ordered
+  no fetching). Three host-effect traces match exactly; four compare ordered
   effects per host, suppressing only redundant keyboard states and allowing
   1 ms drift for non-keyboard effects and 3 ms for the new five-frame keyboard
   transport. The reboot-chord scenario asserts its intentionally earlier
-  source-release sequence and preserves non-keyboard effects. Mouse effects are
+  source-release sequence and preserves non-keyboard effects. The UART-fault
+  scenario separately asserts the intended parser-recovery improvement. Mouse effects are
   never collapsed. New UART reconciliation traffic is excluded. This is bounded
   exploration, not every instruction interleaving or physical timing equivalence.
 - **Coverage:** source coverage artifacts in `build/tests/coverage`. Read the

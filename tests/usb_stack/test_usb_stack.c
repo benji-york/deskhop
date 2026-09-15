@@ -247,6 +247,10 @@ void send_value(uint8_t value, enum packet_type_e type) { CHECK(type == KBD_SET_
 bool validate_packet(uart_packet_t *packet) { return false; }
 uint32_t calc_packet_checksum(const uart_packet_t *packet) { return 0; }
 void process_packet(uart_packet_t *packet, device_t *state) { CHECK(false); }
+/* This stack-only fixture rejects config packets above. Bootloader dispatch and
+ * updater-guard behavior are exercised by the paired production-code simulator. */
+void firmware_update_lock(void) { CHECK(false); }
+void firmware_update_unlock(void) { CHECK(false); }
 void tud_suspend_cb(bool remote_wakeup_en) { ++suspend_callbacks; }
 void tud_resume_cb(void) { ++resume_callbacks; }
 

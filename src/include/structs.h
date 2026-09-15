@@ -163,6 +163,10 @@ typedef struct {
     firmware_metadata_t _running_fw; // RAM copy of running fw metadata
     uint32_t peer_fw_last_seen_us;    // Last heartbeat, used for stalled-pull recovery
     bool reboot_requested;           // If set, stop updating watchdog
+    /* Only core 0's validated WebHID callback and UART TX task own these flags.
+       Keep bootloader sequencing separate from watchdog-driven reboots. */
+    bool config_bootloader_peer_pending;
+    bool config_bootloader_local_pending;
     uint64_t config_mode_timer;      // Counts how long are we to remain in config mode
 
     uint8_t page_buffer[FLASH_PAGE_SIZE]; // For firmware-over-serial upgrades
