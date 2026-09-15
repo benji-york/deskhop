@@ -81,7 +81,11 @@ static void wide_motion(void) {
     }
 }
 static void vendor_diagnostics_cannot_enter_core1(void) {
-    const uint8_t kinds[] = {DIAGNOSTIC_STATUS_REQUEST_MSG, DIAGNOSTIC_STATUS_RESPONSE_MSG};
+    const uint8_t kinds[] = {DIAGNOSTIC_STATUS_REQUEST_MSG, DIAGNOSTIC_STATUS_RESPONSE_MSG,
+#if SIM_HAS_DIAGNOSTIC_PEER_HISTORY
+        DIAGNOSTIC_HISTORY_REQUEST_MSG, DIAGNOSTIC_HISTORY_RESPONSE_MSG,
+#endif
+    };
     for (unsigned proxy = 0; proxy < 2; ++proxy) {
         for (unsigned i = 0; i < sizeof(kinds); ++i) {
             uart_packet_t packet = {.type = proxy ? PROXY_PACKET_MSG : kinds[i]};

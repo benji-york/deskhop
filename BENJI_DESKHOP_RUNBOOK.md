@@ -8,7 +8,60 @@ README.
 
 Snapshot: 2026-09-14
 
-## Current deployment: v0.98 local RAM history
+## Current deployment: v0.99 peer history
+
+`history [count]` collects both boards by default and interleaves their fixed
+snapshots, labeling every row A or B. Timing across boards is approximate;
+each board's sequence stays ordered. A missing peer still permits local
+history. The [deployment record](docs/testing/peer-history-v099.md) describes
+the format, bounds, protocol, and validation. v0.98 was accepted and locally
+checkpointed as `8560d5f`; it is the previous accepted release.
+v0.99 passed all 39 deep-tier steps, six native coverage layers, and
+the ARM build. The frozen UF2 is
+`build/flashing/deskhop-v0.99-peer-history.uf2`, SHA-256
+`0aa74de576024944c7c8195be922bd5dcc48c7f9826b5c528884381f127db9d7`,
+with boot CRC metadata `ce70e3d6`.
+
+Pico A was flashed and normal reboot requested at 2026-09-15 00:09:48 UTC
+(September 14 locally), after Layer 3 A entered disk-free PICOBOOT. Only the
+vendor interface (class 255) appeared, with no mass-storage interface. Its old
+image exactly matched v0.98; all 262,144 new firmware bytes matched an
+independent readback and all 4,096 saved-settings bytes were unchanged. Mac
+checks before and after found five active, nonbusy media clients and no RP2
+boot object after reboot.
+
+Seven serial status snapshots all returned `peer=ok`:
+
+| Board | Physical flash UID | Executing build | Boot session | Sampled uptime range |
+| --- | --- | --- | --- | --- |
+| A | `E6654854574C3E30` | `0.99` | `bf0cb9dbdd5d6c39` | 34,948–39,868 ms |
+| B | `E6654854577F2330` | `0.99` | `5b8f298bd669b78a` | 14,192–19,112 ms |
+
+Both reported boot CRC metadata `ce70e3d6`. Four combined-history responses
+across default/16/64 counts and terminal reopen returned the same five A
+records and three B records, with matching boot sessions and no overwrites or
+gaps. A recorded boot at 17 ms, USB mount at 295 ms, and HID interfaces at
+543/548/555 ms. B recorded boot at 35 ms, USB mount at 443 ms, and its trackball
+HID interface at 576 ms. B's later boot put these A events before its B events
+in these initial merged lists. B's own history
+and executing identity are now read remotely, while its flash integrity remains
+independently unverified.
+
+The checker passed in 5.731 seconds with 8,577 received bytes, including
+fragmented/queued commands, invalid-count rejection, brief read pauses, and
+reconnect. Benji confirmed "Everything works" after the requested typing,
+trackball/buttons, and intentional Layer 3 S switch-and-back check on both Macs.
+Replugging was not separately reported. A subsequent read-only status/history
+capture at 00:12:17 UTC passed with the same builds and sessions. `history 16`
+returned 13 A and 11 B records, including eight output changes per board:
+both directions and both local and peer events on each. These physical rows
+interleaved with no overwrites or gaps; the peer capture bound was 24,320
+microseconds. Approximate ages do not prove cross-board causality or attribute
+every transition to a particular input action. Evidence is in
+`build/flashing/console-v099-switch-check.json` and its `.txt` transcript.
+The v0.95–v0.99 changes remain unpushed.
+
+## Previous accepted deployment: v0.98 local RAM history
 
 Pico A was flashed and rebooted on 2026-09-14 at 21:28 UTC using frozen
 `build/flashing/deskhop-v0.98-history.uf2` (SHA-256

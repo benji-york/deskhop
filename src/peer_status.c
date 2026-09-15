@@ -152,9 +152,10 @@ void peer_status_task(peer_status_t *state, uint64_t now_us, peer_status_tx_fn t
     }
     state->tx_attempted = true;
     state->last_tx_attempt_us = now_us;
-    state->prefer_response = kind == PEER_STATUS_REQUEST;
     if (!tx(context, kind, payload))
         return;
+    /* A denied shared UART slot must not consume this direction's turn. */
+    state->prefer_response = kind == PEER_STATUS_REQUEST;
     if (kind == PEER_STATUS_REQUEST)
         state->client_sent = true;
     else if (++state->server_next_chunk == PEER_STATUS_CHUNK_COUNT)

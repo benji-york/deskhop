@@ -29,9 +29,17 @@ void diagnostic_history_record(history_type_t type, uint8_t a, uint8_t b, uint32
 }
 
 history_window_t diagnostic_history_window(unsigned limit) {
+    return diagnostic_history_window_at(limit, NULL);
+}
+
+history_window_t diagnostic_history_window_at(unsigned limit, uint64_t *sampled_at_us) {
+    if (sampled_at_us)
+        *sampled_at_us = 0;
     if (!initialized)
         return (history_window_t){0};
     critical_section_enter_blocking(&history_lock);
+    if (sampled_at_us)
+        *sampled_at_us = time_us_64();
     history_window_t window = history_store_window(&history_store, limit);
     critical_section_exit(&history_lock);
     return window;

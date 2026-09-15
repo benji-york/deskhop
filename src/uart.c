@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "diagnostic_peer.h"
+#include "diagnostic_peer_history.h"
 #include "diagnostic_history.h"
 
 /* ================================================== *
@@ -84,6 +85,16 @@ static void handle_diagnostic_response(uart_packet_t *packet, device_t *state) {
     diagnostic_peer_receive(true, packet->data, time_us_64());
 }
 
+static void handle_history_request(uart_packet_t *packet, device_t *state) {
+    (void)state;
+    diagnostic_peer_history_receive(false, packet->data, time_us_64());
+}
+
+static void handle_history_response(uart_packet_t *packet, device_t *state) {
+    (void)state;
+    diagnostic_peer_history_receive(true, packet->data, time_us_64());
+}
+
 const uart_handler_t uart_handler[] = {
     /* Core functions */
     {.type = KEYBOARD_REPORT_MSG, .handler = handle_keyboard_uart_msg},
@@ -124,6 +135,8 @@ const uart_handler_t uart_handler[] = {
     {.type = RESPONSE_BYTE_MSG, .handler = handle_response_byte_msg},
     {.type = DIAGNOSTIC_STATUS_REQUEST_MSG, .handler = handle_diagnostic_request},
     {.type = DIAGNOSTIC_STATUS_RESPONSE_MSG, .handler = handle_diagnostic_response},
+    {.type = DIAGNOSTIC_HISTORY_REQUEST_MSG, .handler = handle_history_request},
+    {.type = DIAGNOSTIC_HISTORY_RESPONSE_MSG, .handler = handle_history_response},
     {.type = FIRMWARE_UPGRADE_MSG, .handler = handle_fw_upgrade_msg},
 
     {.type = HEARTBEAT_MSG, .handler = handle_heartbeat_msg},

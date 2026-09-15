@@ -25,9 +25,17 @@ FIELDS={'output':0,'x':1,'y':2,'buttons':3,'reboot':4,'stopped':5,'kbd_queue':6,
         'acceleration':35,'speed':36,'os':37,'led_indicator':38,
         'diagnostic_request_accepted':60,'diagnostic_poll_ready':61,'diagnostic_token':62,
         'diagnostic_outcome':63,'diagnostic_role':64,'diagnostic_major':65,'diagnostic_minor':66,
-        'diagnostic_boot_session':67,'diagnostic_uptime_ms':68,'diagnostic_crc':69,'diagnostic_board_id':70}
+        'diagnostic_boot_session':67,'diagnostic_uptime_ms':68,'diagnostic_crc':69,'diagnostic_board_id':70,
+        'history_request_accepted':80,'history_poll_ready':81,'history_borrowed':82,
+        'history_token':83,'history_outcome':84,'history_role':85,'history_boot_session':86,
+        'history_requested_us':87,'history_first_response_us':88,'history_sampled_us':89,
+        'history_first_seq':90,'history_end_seq':91,'history_oldest_seq':92,
+        'history_overwritten':93,'history_count':94,'history_gap_mask':95,
+        'history_event_seq':96,'history_event_time_us':97,'history_event_value':98,
+        'history_event_type':99,'history_event_a':100,'history_event_b':101,'history_event_reserved':102}
 KINDS={1:'usb',2:'uart_tx',3:'led',4:'watchdog',5:'reset',6:'yield',7:'erase',8:'program',9:'checkpoint',10:'wake',11:'wait_bound',
-       12:'diagnostic_request',13:'diagnostic_result'}
+       12:'diagnostic_request',13:'diagnostic_result',14:'history_request',
+       15:'history_result',16:'history_release',17:'diagnostic_enqueue'}
 CALLBACK=C.CFUNCTYPE(None,C.c_int,C.c_int,C.c_int,C.c_void_p,C.c_int)
 
 class Simulation:
@@ -60,6 +68,9 @@ class Simulation:
                 'sim_watchdog':([],None),
                 'sim_uart_stall':([C.c_int],None),
                 'sim_diagnostic_request':([C.c_uint32],None),'sim_diagnostic_poll':([],None),
+                'sim_history_request':([C.c_uint32,C.c_uint],None),'sim_history_poll':([],None),
+                'sim_history_release':([],None),'sim_history_clear':([],None),
+                'sim_history_record':([C.c_uint8,C.c_uint8,C.c_uint8,C.c_uint32],None),
             }
             for name,(args,ret) in signatures.items():
                 f=getattr(lib,name); f.argtypes=args; f.restype=ret
@@ -191,7 +202,7 @@ class Simulation:
     def do(self,node,op,*args,record=True):
         if record:self.steps.append({'node':node,'op':op,'args':list(args)})
         # Peripheral input and UART handling run on core1; host SET_REPORT on core0.
-        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll') else 1)
+        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll','history_request','history_poll','history_release') else 1)
         self.active.append((node,core))
         try:self._invoke(node,op,list(args))
         finally:self.active.pop()
@@ -219,6 +230,12 @@ class Simulation:
             node,reason,disable_mask,count=args
             ok=sum(x['kind']=='reset' and x['node']==node
                    and x['a']==reason and x['b']==disable_mask for x in self.trace)==count
+        elif predicate=='diagnostic_pacing':
+            node, interval=args
+            attempts=[x['at'] for x in self.trace
+                      if x['kind']=='diagnostic_enqueue' and x['node']==node]
+            ok=bool(attempts) and all(right-left >= interval
+                                     for left,right in zip(attempts,attempts[1:]))
         elif predicate=='usb_bytes':
             node,report_id,index,offset,hexdata=args
             reports=self.reports(node,report_id);expected=bytes.fromhex(hexdata)

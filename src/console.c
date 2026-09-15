@@ -5,6 +5,7 @@
 #include "console.h"
 #include "diagnostic_history.h"
 #include "diagnostic_peer.h"
+#include "diagnostic_peer_history.h"
 #include "tusb.h"
 
 #if DH_CONSOLE && CFG_TUD_CDC
@@ -18,6 +19,7 @@
 #define CONSOLE_LINE_SIZE 64u
 #define CONSOLE_TX_SIZE 1024u
 #define CONSOLE_PEER_TIMEOUT_US UINT64_C(600000)
+#define CONSOLE_HISTORY_TIMEOUT_US UINT64_C(3500000)
 
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
@@ -32,8 +34,11 @@ static struct {
     uint32_t image_crc_at_boot;
     bool connected, previous_cr;
     bool peer_waiting, peer_ready;
-    bool history_active;
-    uint64_t history_next, history_end;
+    bool history_active, history_metadata_sent;
+    unsigned history_count, history_captured, history_local_next, history_peer_next;
+    const char *history_outcome;
+    peer_history_snapshot_t history_local;
+    const peer_history_result_t *history_peer;
     uint32_t query_token;
     uint64_t query_started_us;
     peer_status_result_t peer_result;
@@ -42,6 +47,13 @@ static struct {
     unsigned line_used, tx_used, tx_sent;
 } console;
 
+static void release_history_peer(void) {
+    if (console.history_peer) {
+        diagnostic_peer_history_release();
+        console.history_peer = NULL;
+    }
+}
+
 void console_disconnect(void) {
     console.connected = false;
     console.previous_cr = false;
@@ -49,6 +61,7 @@ void console_disconnect(void) {
     console.line_used = console.tx_used = console.tx_sent = 0;
     console.peer_waiting = console.peer_ready = false;
     console.history_active = false;
+    release_history_peer();
     /* TinyUSB resets CDC endpoints BEFORE the unmount callback. read_flush()
      * rearms OUT, so it must never run after that reset (ep_out is then zero).
      * USB reset already clears those FIFOs; a DTR drop still needs a flush. */
@@ -141,33 +154,95 @@ static char output_name(unsigned output) {
     return output == 0 ? 'A' : output == 1 ? 'B' : '?';
 }
 
-static void begin_history(unsigned count) {
-    const history_window_t window = diagnostic_history_window(count);
-    console.history_next = window.first_seq;
-    console.history_end = window.end_seq;
+static void begin_history(unsigned count, uint64_t now_us) {
+    peer_history_snapshot_t *local = &console.history_local;
+    local->role = console.board == 'A' ? 0 : 1;
+    local->boot_session = console.boot_session;
+    local->window = diagnostic_history_window_at(count, &local->sampled_at_us);
+    local->gap_mask = 0;
+    console.history_count = count;
+    console.history_captured = console.history_local_next = console.history_peer_next = 0;
     console.history_active = true;
-    appendf("BEGIN history\r\nboard=%c\r\nboot_session=%08lx%08lx\r\n"
-            "scope=local\r\npeer=not_implemented\r\ncapacity=%u\r\n"
-            "returned=%u\r\noverwritten=%llu\r\n",
-            console.board, (unsigned long)(console.boot_session >> 32),
-            (unsigned long)(uint32_t)console.boot_session, HISTORY_CAPACITY,
-            window.count, (unsigned long long)window.overwritten);
+    console.history_metadata_sent = false;
+    console.history_outcome = NULL;
+    console.query_started_us = now_us;
+    if (++console.query_token == 0)
+        ++console.query_token;
+    if (!diagnostic_peer_history_request(console.query_token, count, now_us))
+        console.history_outcome = "busy";
+    appendf("BEGIN history\r\nscope=both\r\nrequested_per_board=%u\r\n"
+            "timing=approximate_snapshot_alignment\r\ncapacity_per_board=%u\r\n",
+            count, HISTORY_CAPACITY);
 }
 
-static void append_history_row(void) {
-    /* Copy only one compact event while its slot is protected by the bridge.
-     * Formatting and USB backpressure never hold the history lock. The fixed
-     * end sequence keeps a stalled reader from chasing new producer events. */
-    history_event_t event;
-    uint64_t seq = console.history_next++;
-    if (!diagnostic_history_read(seq, &event)) {
-        appendf("GAP board=%c seq=%llu\r\n", console.board,
+static void poll_history_peer(void) {
+    if (console.history_peer)
+        return; /* The borrowed result cannot be polled until released. */
+    const peer_history_result_t *result = diagnostic_peer_history_poll();
+    if (!result)
+        return;
+    if (!console.history_active || console.history_outcome || result->token != console.query_token) {
+        diagnostic_peer_history_release();
+        return;
+    }
+    if (result->outcome == PEER_HISTORY_OK) {
+        const peer_history_snapshot_t *peer = &result->snapshot;
+        if (peer->role == console.history_local.role || peer->role > 1
+            || peer->window.count > console.history_count
+            || peer->window.end_seq < peer->window.first_seq
+            || peer->window.end_seq - peer->window.first_seq != peer->window.count
+            || result->first_response_us < result->requested_at_us) {
+            console.history_outcome = "invalid";
+            diagnostic_peer_history_release();
+        } else {
+            console.history_peer = result;
+            console.history_outcome = "ok";
+        }
+    } else {
+        console.history_outcome = result->outcome == PEER_HISTORY_TIMEOUT
+                                ? "timeout_or_unsupported" : "invalid";
+        diagnostic_peer_history_release();
+    }
+}
+
+static void capture_history_tick(uint64_t now_us) {
+    if (!console.history_active)
+        return;
+    peer_history_snapshot_t *local = &console.history_local;
+    if (console.history_captured < local->window.count) {
+        unsigned index = console.history_captured++;
+        if (!diagnostic_history_read(local->window.first_seq + index, &local->events[index]))
+            local->gap_mask |= UINT64_C(1) << index;
+    }
+    if (!console.history_outcome && now_us - console.query_started_us >= CONSOLE_HISTORY_TIMEOUT_US)
+        console.history_outcome = "timeout_or_unsupported";
+}
+
+static void append_history_metadata(const peer_history_snapshot_t *snapshot) {
+    appendf("board=%c\r\nboot_session=%08lx%08lx\r\nsampled_uptime_ms=%llu\r\n"
+            "returned=%u\r\noverwritten=%llu\r\n",
+            output_name(snapshot->role), (unsigned long)(snapshot->boot_session >> 32),
+            (unsigned long)(uint32_t)snapshot->boot_session,
+            (unsigned long long)(snapshot->sampled_at_us / 1000), snapshot->window.count,
+            (unsigned long long)snapshot->window.overwritten);
+}
+
+static uint64_t history_age(const peer_history_snapshot_t *snapshot, unsigned index) {
+    return snapshot->sampled_at_us - snapshot->events[index].time_us;
+}
+
+static void append_history_row(const peer_history_snapshot_t *snapshot, unsigned index) {
+    uint64_t seq = snapshot->window.first_seq + index;
+    if (snapshot->gap_mask & (UINT64_C(1) << index)) {
+        appendf("GAP board=%c seq=%llu\r\n", output_name(snapshot->role),
                 (unsigned long long)seq);
         return;
     }
-    appendf("board=%c seq=%llu uptime_ms=%llu event=", console.board,
+    const history_event_t event = snapshot->events[index];
+    appendf("board=%c seq=%llu uptime_ms=%llu age_ms=%llu event=", output_name(snapshot->role),
             (unsigned long long)event.seq,
-            (unsigned long long)(event.time_us / 1000));
+            (unsigned long long)(event.time_us / 1000),
+            (unsigned long long)(history_age(snapshot, index) / 1000));
     switch (event.type) {
     case HISTORY_BOOT:
         appendf("boot build=%u.%u output=%c", (unsigned)(event.value >> 16),
@@ -208,6 +283,51 @@ static void append_history_row(void) {
     append("\r\n");
 }
 
+static void emit_history_tick(void) {
+    if (console.history_captured != console.history_local.window.count || !console.history_outcome)
+        return;
+    const peer_history_snapshot_t *local = &console.history_local;
+    const peer_history_snapshot_t *peer = console.history_peer ? &console.history_peer->snapshot : NULL;
+    if (!console.history_metadata_sent) {
+        append_history_metadata(local);
+        if (peer) {
+            append("\r\n");
+            append_history_metadata(peer);
+        }
+        appendf("peer=%s\r\n", console.history_outcome);
+        if (peer)
+            appendf("peer_capture_bound_us=%llu\r\n",
+                    (unsigned long long)(console.history_peer->first_response_us
+                                       - console.history_peer->requested_at_us));
+        append("\r\n");
+        console.history_metadata_sent = true;
+        return;
+    }
+    unsigned li = console.history_local_next, pi = console.history_peer_next;
+    bool have_local = li < local->window.count;
+    bool have_peer = peer && pi < peer->window.count;
+    if (!have_local && !have_peer) {
+        console.history_active = false;
+        release_history_peer();
+        append("END history\r\n");
+        append(prompt);
+        return;
+    }
+    /* GAP has no time to invent. Emit it when it reaches its board's head;
+     * otherwise merge event ages oldest first, preserving both sequence orders.
+     * A wins equal-age ties regardless of which board owns this terminal. */
+    bool choose_local = !have_peer || (have_local && (local->gap_mask & (UINT64_C(1) << li)));
+    if (have_local && have_peer && !choose_local && !(peer->gap_mask & (UINT64_C(1) << pi))) {
+        uint64_t la = history_age(local, li), pa = history_age(peer, pi);
+        choose_local = la > pa || (la == pa && local->role == 0);
+    }
+    if (choose_local) {
+        append_history_row(local, console.history_local_next++);
+    } else {
+        append_history_row(peer, console.history_peer_next++);
+    }
+}
+
 static void command(uint64_t now_us) {
     console.line[console.line_used] = '\0';
     if (console.line_error == LINE_TOO_LONG) {
@@ -220,11 +340,13 @@ static void command(uint64_t now_us) {
                "\r\n"
                "  help             Show this help.\r\n"
                "  status           Show both boards' identity, build, boot session and uptime.\r\n"
-               "  history [count]  Show this board's recent events (default 16; 1..64).\r\n"
+               "  history [count]  Show both boards' recent events (default 16; 1..64 each).\r\n"
                "\r\n"
                "Status queries both boards by default and prints this board first.\r\n"
                "A missing or older peer is reported after a bounded timeout.\r\n"
-               "History is local in this release; peer history will follow.\r\n"
+               "History merges snapshots by approximate event age; each row identifies its board.\r\n"
+               "Cross-board timing is approximate; each board keeps its own event order.\r\n"
+               "History is volatile; GAP marks a record overwritten during capture.\r\n"
                "Firmware verification will follow in a later release.\r\n"
                "The image CRC is metadata captured at boot, not an integrity check.\r\n"
                "Enter submits; Backspace edits; Ctrl-C cancels a line.\r\n"
@@ -253,7 +375,7 @@ static void command(uint64_t now_us) {
                || strncmp(console.line, "history ", 8) == 0) {
         unsigned count;
         if (history_count(console.line, &count))
-            begin_history(count);
+            begin_history(count, now_us);
         else
             append("ERROR usage: history [count] (decimal 1..64)\r\n");
     } else if (console.line_used != 0) {
@@ -283,6 +405,7 @@ void console_task(uint64_t now_us) {
     if (!tud_cdc_connected()) {
         if (console.connected)
             console_disconnect();
+        poll_history_peer();
         return;
     }
     if (!console.connected) {
@@ -300,18 +423,16 @@ void console_task(uint64_t now_us) {
         console.peer_ready = true;
     }
 
+    poll_history_peer();
+    /* Capture continues even while USB output is stalled. */
+    capture_history_tick(now_us);
+
     transmit();
     if (console.tx_used)
         return;
 
     if (console.history_active) {
-        if (console.history_next < console.history_end) {
-            append_history_row();
-        } else {
-            console.history_active = false;
-            append("END history\r\n");
-            append(prompt);
-        }
+        emit_history_tick();
         return;
     }
 

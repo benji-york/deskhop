@@ -36,6 +36,13 @@
 #if SIM_HAS_DIAGNOSTIC_HISTORY
 #include "diagnostic_history.h"
 #endif
+#if SIM_HAS_DIAGNOSTIC_PEER_HISTORY
+#include "diagnostic_peer_history.h"
+/* Observe attempted enqueues, including full-queue refusal, while delegating
+   storage/locking semantics to the real SDK implementation in queue.c. */
+bool sim_queue_try_add(queue_t *, const void *);
+#define queue_try_add(queue, data) sim_queue_try_add((queue), (data))
+#endif
 
 #define PICO_DEFAULT_LED_PIN 25
 #define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8

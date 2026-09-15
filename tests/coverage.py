@@ -20,7 +20,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 LAYERS = ('paired', 'storage', 'hid', 'policies', 'usb_device', 'usb_host')
 POLICIES = ('zoom_tracker', 'fw_update', 'screensaver_policy', 'reboot_hotkey',
-            'config_migration', 'selection', 'peer_status', 'history')
+            'config_migration', 'selection', 'peer_status', 'history', 'peer_history')
 METRICS = ('lines', 'branches', 'functions', 'regions')
 
 
@@ -95,7 +95,8 @@ def build_and_run(name, output, hid_iterations):
         sources = [ROOT / f'src/{policy}.c' for policy in POLICIES]
         objects = []
         for policy, source in zip(POLICIES, sources):
-            binary = compile_native(output / policy, f'tests/test_{policy}.c', [source])
+            dependencies = [ROOT / 'src/history.c'] if policy == 'peer_history' else []
+            binary = compile_native(output / policy, f'tests/test_{policy}.c', [source, *dependencies])
             run([binary], environment)
             objects.append(binary)
         contract = compile_native(output / 'policy-contract', 'tests/model/policy_contract.c',

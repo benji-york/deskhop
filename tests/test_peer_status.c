@@ -9,6 +9,7 @@ typedef struct {
     unsigned count;
     unsigned refuse;
     bool refuse_all;
+    bool alternating_grant;
     peer_status_packet_t kind[64];
     uint8_t payload[64][8];
 } transport_t;
@@ -16,7 +17,8 @@ typedef struct {
 static bool transmit(void *context, peer_status_packet_t kind, const uint8_t payload[8]) {
     transport_t *transport = context;
     transport->attempts++;
-    if (transport->refuse_all || transport->refuse) {
+    if (transport->refuse_all || transport->refuse
+        || (transport->alternating_grant && transport->attempts % 2)) {
         if (transport->refuse)
             transport->refuse--;
         return false;
@@ -353,7 +355,8 @@ static void test_bidirectional_queries(void) {
         assert_snapshot(&result.snapshot, &snapshots[i ^ 1]);
     }
 
-    /* Queue refusal in the client direction cannot prevent server progress. */
+    /* After a refused slot, the retained request and then server reply both
+     * progress as soon as the shared queue grants space again. */
     peer_status_t state;
     peer_status_init(&state, 0);
     assert(peer_status_start(&state, 20, 0) == PEER_STATUS_STARTED);
@@ -364,12 +367,32 @@ static void test_bidirectional_queries(void) {
     peer_status_task(&state, 0, transmit, &transport);
     transport.refuse_all = false;
     peer_status_task(&state, 1000, transmit, &transport);
-    assert(transport.kind[0] == PEER_STATUS_RESPONSE);
+    assert(transport.kind[0] == PEER_STATUS_REQUEST);
     peer_status_task(&state, 2000, transmit, &transport);
-    assert(transport.kind[1] == PEER_STATUS_REQUEST);
+    assert(transport.kind[1] == PEER_STATUS_RESPONSE);
     peer_status_task(&state, 3000, transmit, &transport);
     assert(transport.kind[2] == PEER_STATUS_RESPONSE);
     assert(transport.payload[2][4] == 1);
+}
+
+static void test_shared_pacer_fairness(void) {
+    peer_status_t state;
+    peer_status_init(&state, 0);
+    assert(peer_status_start(&state, 31, 0) == PEER_STATUS_STARTED);
+    peer_status_snapshot_t snapshot = example(0);
+    uint8_t payload[8];
+    request(payload, 32);
+    assert(peer_status_receive_request(&state, payload, &snapshot, 0));
+    /* Another diagnostic protocol takes every other UART opportunity. Both
+     * directions must progress within two grants, without waiting for all
+     * 13 response chunks. This catches preference changes on denied slots. */
+    transport_t transport = {.alternating_grant = true};
+    for (unsigned tick = 0; tick < 4; ++tick)
+        peer_status_task(&state, tick * 1000, transmit, &transport);
+    assert(transport.count == 2);
+    assert(state.client_sent && state.server_next_chunk == 1);
+    assert(transport.kind[0] == PEER_STATUS_REQUEST);
+    assert(transport.kind[1] == PEER_STATUS_RESPONSE);
 }
 
 int main(void) {
@@ -378,6 +401,7 @@ int main(void) {
     test_client_lifetime_and_refusal();
     test_server_validation_and_rate_limits();
     test_bidirectional_queries();
+    test_shared_pacer_fairness();
     puts("peer status: wire vector, 52 reorderings, 312 corruptions, timeout, backpressure and bidirectional contracts passed");
     return 0;
 }

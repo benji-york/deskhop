@@ -25,7 +25,7 @@ physical disk-free enumeration check passed; the record is in
 3. **Local history (v0.98 deployed and input checked):** a small fixed RAM ring, initially 64 compact records for
    boot, output selection, USB attach/detach, and errors. Add `history [count]`.
    Check recognizable interactions, wraparound, and slow readers.
-4. **Peer history:** `history` collects both boards by default in bounded chunks.
+4. **Peer history (v0.99 deployed and input checked):** `history` collects both boards by default in bounded chunks.
    Interleave records in one list; every row includes the originating board and
    its sequence number. Align times to a common query reference, preserve each
    board's sequence order, and disclose approximate cross-board timing. Report
@@ -43,9 +43,40 @@ Additional events and counters follow troubleshooting needs discovered during
 these sessions. Histories are volatile across reboot. No peer/history/verification
 commands are advertised before their implementation exists.
 
-## Local history slice (v0.98 deployed and input checked)
+## Peer history slice (v0.99 deployed and input checked)
 
-`history [count]` reads the connected board's recent RAM events, with a default
+`history [count]` now collects both boards into one list.
+Each row names its originating board and sequence; the requested count is per
+board. Fixed snapshots merge by approximate age while preserving each board's
+event order. A missing peer still permits local history. Capturing continues
+under serial backpressure, and peer replies remain available while the local
+terminal is paused. See the [deployment record](testing/peer-history-v099.md)
+for the format, clock limitations, protocol, work bounds, and validation.
+
+Pico A was flashed through disk-free PICOBOOT and reboot requested at
+2026-09-15 00:09:48 UTC (September 14 locally). All 262,144 firmware bytes
+matched an independent readback, and all 4,096 saved-configuration bytes were
+unchanged. Only the vendor bootloader interface appeared; Mac checks found five
+active, nonbusy media clients before and after, with no RP2 boot object after
+reboot. Seven status snapshots confirmed both boards executing `0.99`, boot
+CRC metadata `ce70e3d6`, stable distinct sessions, and increasing uptimes.
+
+Four successful combined-history responses preserved the same five A records
+and three B records across terminal reopen, with no gaps or overwrites. These
+were boot, PC USB mount, and peripheral HID enumeration events; B's later boot
+placed its events after A's in these particular responses. This establishes
+live peer history retrieval, without independently verifying B's flash.
+Benji confirmed "Everything works" after the requested typing, trackball/buttons,
+and Layer 3 S switch-and-back check on both Macs. Replugging was not separately
+reported. A subsequent `history 16` capture returned 13 A and 11 B records,
+including eight output changes per board, with both directions and both local
+and peer events on each. These physical rows interleaved without gaps or
+overwrites. Their approximate ages do not establish cross-board causality or
+identify the particular input action responsible for every transition.
+
+## Local history slice (introduced and input checked in v0.98)
+
+In v0.98, `history [count]` reads the connected board's recent RAM events, with a default
 of 16 and a maximum of 64. Every event and gap row names its board. The command
 header identifies the local scope and boot session; peer retrieval is the next
 slice. A fixed sequence window and per-record reads let producers continue
@@ -101,7 +132,7 @@ deskhop>
 
 The placeholders illustrate the format introduced in v0.97. Its 2026-09-14
 deployment confirmed both boards executing that version, as recorded below;
-the current v0.98 observation is recorded above. With a terminal
+the current v0.99 observation is recorded above. With a terminal
 on B, B prints first. Builds may differ during propagation. The peer snapshot
 is taken when it accepts the request; the local snapshot is taken when the
 command is processed. Their uptimes have independent boot origins and are not

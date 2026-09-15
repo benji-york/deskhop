@@ -7,7 +7,7 @@ python3 tests/usb_stack/run.py
 This hardware-free feasibility prototype builds and runs the checked-in TinyUSB
 `tusb.c`, `tusb_fifo.c`, `usbd.c`, `usbd_control.c`, `hid_device.c`,
 `msc_device.c`, and `cdc_device.c`, plus the actual DeskHop `usb_descriptors.c`,
-`usb.c`, and `console.c`. It takes
+`usb.c`, `console.c`, and `history.c`. It takes
 roughly one second on the development Mac and uses ASan and UBSan. It needs Python
 3 and a native C11 compiler (`CC` can select one). All output goes into a temporary
 directory. It does not modify or flash the firmware.
@@ -57,11 +57,17 @@ Verified scenarios include:
   unsent output without accidentally rearming CDC buffers as endpoint zero.
 - Local history uses the production 64-record ring, with default/1/64 counts,
   strict argument validation, ring wrap, all event fields, A/B row labels,
-  and full-width timestamps. A paused CDC reader can lose requested records;
-  explicit gaps preserve the original command window. Queued status/history
+  and full-width timestamps. Capture continues before the CDC backpressure
+  check; overwrites before capture produce explicit gaps, while already copied
+  records remain immutable. Queued status/history
   commands, DTR close/reopen, and bus reset preserve response boundaries.
   Each tick reads at most one event and retains the same RX/TX budgets;
   keyboard reports and LED control requests progress while CDC is stalled.
+- Both-board history uses mocked immutable peer snapshots to verify unequal
+  boot clocks, age ordering, A-first exact ties, gaps, and 128-row output while
+  the live ring wraps. Peer timeout/invalid/busy outcomes and the 3.5-second
+  fallback preserve local history. Stale results and DTR cancellation release
+  the borrowed peer result without affecting a later command.
 
 MSC backing-store callbacks in this prototype are deliberately modeled. Disk
 capacity and returned bytes are fixtures; this is not a TinyUSB-to-real-flash
@@ -69,7 +75,7 @@ end-to-end test. `tests/storage` separately exercises the real ramdisk callbacks
 NOR effects, UF2 and updater. Peripheral LED writes and peer UART messages are
 observable sinks here, not the dual-node simulator's transport. Those layers must
 not be conflated when reporting coverage.
-The peer status request/result bridge is mocked in this harness; `tests/sim`
+The peer status and peer-history request/result bridges are mocked in this harness; `tests/sim`
 separately drives its real SDK queues, protocol and UART across two independent
 production images, including simultaneous queries, repeat queries, disconnected
 wires, a full stalled UART queue, malformed replies, and continued HID progress.

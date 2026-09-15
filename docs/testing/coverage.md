@@ -12,7 +12,8 @@ Run `python3 tests/coverage.py` with Clang and LLVM `llvm-profdata`/`llvm-cov`
 (the runner finds Xcode tools through `xcrun` on macOS). No Python packages are
 required. `--layer paired --layer storage` selects a subset; `--hid-iterations N`
 changes the generated HID workload. Default measurements use scenario seed 1,
-storage seed 1, the five original pure-policy suites plus the selection suite,
+storage seed 1, the five original pure-policy suites plus selection, peer status,
+history storage, and peer history,
 64,128 updater contract cases, and 2,000 generated HID descriptors at seed `0x484944`.
 
 The generated `build/tests/coverage/html/index.html` links each layer's source
@@ -22,18 +23,19 @@ coverage mapping before any cleanup. Application and SDK/stack sources have
 separate denominator groups. `summary.json` is a layer inventory; it deliberately
 has no whole-firmware union percentage.
 
-Measured on 2026-09-14 with the default command after all six layers passed:
+Measured on 2026-09-14 for the v0.99 candidate after all six layers passed
+(`python3 tests/coverage.py --output build/tests/coverage-v099`):
 
 | Layer / source group | Executed lines / mapped lines | Covered branches / mapped branches |
 | --- | ---: | ---: |
-| Paired application + native boundaries | 1,879 / 2,790 (67.35%) | 860 / 1,427 (60.27%) |
+| Paired application + native boundaries | 2,611 / 3,537 (73.82%) | 1,222 / 1,893 (64.55%) |
 | Paired SDK queue implementation | 77 / 83 (92.77%) | 14 / 19 (73.68%) |
-| Storage application units | 450 / 1,238 (36.35%) | 170 / 495 (34.34%) |
-| HID regression + generated inputs | 629 / 885 (71.07%) | 333 / 534 (62.36%) |
-| Pure policy units | 309 / 324 (95.37%) | 213 / 256 (83.20%) |
-| USB device application callbacks/descriptors | 72 / 209 (34.45%) | 30 / 146 (20.55%) |
-| USB device TinyUSB stack | 1,005 / 2,084 (48.22%) | 448 / 1,170 (38.29%) |
-| USB host application units | 506 / 885 (57.18%) | 232 / 534 (43.45%) |
+| Storage application units | 450 / 1,251 (35.97%) | 170 / 499 (34.07%) |
+| HID regression + generated inputs | 629 / 900 (69.89%) | 333 / 548 (60.77%) |
+| Pure policy units | 786 / 806 (97.52%) | 520 / 578 (89.97%) |
+| USB device application callbacks/descriptors/console | 515 / 673 (76.52%) | 258 / 410 (62.93%) |
+| USB device TinyUSB stack | 1,335 / 2,330 (57.30%) | 564 / 1,325 (42.57%) |
+| USB host application units | 516 / 905 (57.02%) | 243 / 548 (44.34%) |
 | USB host TinyUSB stack | 999 / 2,178 (45.87%) | 344 / 1,157 (29.73%) |
 
 These percentages overlap and **cannot be summed or averaged into total
@@ -46,6 +48,14 @@ may have zero mapped executable lines. The generated report is authoritative
 after code/compiler/test changes; these figures are a dated snapshot.
 
 ## Layers and independent oracles
+
+The v0.99 diagnostic additions are exercised at separate boundaries: pure
+history/peer protocol units use independent CRC and wire oracles; the paired
+suite runs real bridges, SDK queues and UART dispatch; the real TinyUSB device
+suite runs the console with mocked peer results. It checks capture under CDC
+backpressure, merging, borrowed-result release, malformed input, and HID progress.
+The [candidate record](peer-history-v099.md) documents work and clock bounds.
+These layers do not prove physical lock contention or interrupt latency.
 
 | Layer | Production code executed | Models / independent oracles | Principal limit |
 | --- | --- | --- | --- |

@@ -4,6 +4,7 @@
 #include "device/usbd_pvt.h"
 #include "peer_status.h"
 #include "diagnostic_history.h"
+#include "diagnostic_peer_history.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -21,7 +22,7 @@ static unsigned msc_reads;
 static uint32_t last_msc_lba;
 static uint8_t host_bytes[2048];
 static size_t host_count;
-static char cdc_bytes[16384];
+static char cdc_bytes[32768];
 static size_t cdc_count;
 static uint64_t cdc_submitted_bytes, console_now_us;
 static bool no_ep0_out_payload;
@@ -32,12 +33,61 @@ void diagnostic_history_init(void) { history_store_init(&history_store); }
 void diagnostic_history_record(history_type_t type, uint8_t a, uint8_t b, uint32_t value) {
     history_store_record(&history_store, console_now_us, type, a, b, value);
 }
+history_window_t diagnostic_history_window_at(unsigned limit, uint64_t *sampled_at_us) {
+    *sampled_at_us = console_now_us;
+    return history_store_window(&history_store, limit);
+}
 history_window_t diagnostic_history_window(unsigned limit) {
     return history_store_window(&history_store, limit);
 }
 bool diagnostic_history_read(uint64_t seq, history_event_t *event) {
     ++history_reads;
     return history_store_read(&history_store, seq, event);
+}
+/* A fixed borrowed result models the production bridge's ownership boundary. */
+static bool history_peer_manual, history_peer_accept = true;
+static bool history_peer_pending, history_peer_ready, history_peer_borrowed;
+static unsigned history_peer_polls, history_peer_releases, history_peer_requests, history_peer_limit;
+static uint32_t history_peer_token;
+static uint64_t history_peer_requested_at;
+static peer_history_result_t history_peer_result;
+bool diagnostic_peer_history_request(uint32_t token, unsigned count, uint64_t requested_at_us) {
+    ++history_peer_requests;
+    CHECK(!history_peer_borrowed && !history_peer_ready);
+    if (!history_peer_accept || history_peer_pending)
+        return false;
+    CHECK(token != 0 && count > 0 && count <= 64);
+    history_peer_token = token;
+    history_peer_limit = count;
+    history_peer_requested_at = requested_at_us;
+    history_peer_pending = true;
+    return true;
+}
+static void history_peer_publish(uint32_t token, peer_history_outcome_t outcome) {
+    CHECK(!history_peer_ready && !history_peer_borrowed);
+    history_peer_result.token = token;
+    history_peer_result.outcome = outcome;
+    history_peer_result.requested_at_us = history_peer_requested_at;
+    history_peer_result.first_response_us = history_peer_requested_at + 5000;
+    history_peer_ready = true;
+}
+const peer_history_result_t *diagnostic_peer_history_poll(void) {
+    CHECK(!history_peer_borrowed);
+    ++history_peer_polls;
+    if (!history_peer_manual && history_peer_pending && !history_peer_ready)
+        history_peer_publish(history_peer_token, PEER_HISTORY_TIMEOUT);
+    if (!history_peer_ready)
+        return NULL;
+    history_peer_ready = false;
+    history_peer_borrowed = true;
+    return &history_peer_result;
+}
+void diagnostic_peer_history_release(void) {
+    CHECK(history_peer_borrowed);
+    history_peer_borrowed = false;
+    if (history_peer_result.token == history_peer_token)
+        history_peer_pending = false;
+    ++history_peer_releases;
 }
 /* The real CDC/console stack crosses the same nonblocking request/result
  * boundary as core 0. UART and core 1 are tested by the paired simulator. */
@@ -339,8 +389,10 @@ static void console_tick(void) {
     int64_t space_before = tud_cdc_write_available();
     uint64_t submitted_before = cdc_submitted_bytes;
     unsigned reads_before = history_reads;
+    unsigned history_polls_before = history_peer_polls;
     console_task(console_now_us);
     CHECK(history_reads - reads_before <= 1);
+    CHECK(history_peer_polls - history_polls_before <= 1);
     if (connected) {
         uint32_t rx_after = tud_cdc_available();
         CHECK(rx_after <= rx_before && rx_before - rx_after <= 32);
@@ -360,7 +412,7 @@ static void console_pump(unsigned ticks) {
 }
 
 static void console_drain(void) {
-    console_pump(512);
+    console_pump(1024);
     CHECK(!endpoint(0x86)->pending && tud_cdc_available() == 0);
 }
 
@@ -409,7 +461,7 @@ static void cdc_status_fields(void) {
     CHECK(occurrences("BEGIN status") == 1 && occurrences("END status") == 1);
     CHECK(strstr(cdc_bytes, "board=A") != NULL);
     CHECK(strstr(cdc_bytes, "board_id=0123456789abcdef") != NULL);
-    CHECK(strstr(cdc_bytes, "build=0.98") != NULL);
+    CHECK(strstr(cdc_bytes, "build=0.99") != NULL);
     CHECK(strstr(cdc_bytes, "image_crc_at_boot=89abcdef") != NULL);
     CHECK(strstr(cdc_bytes, "boot_session=1122334455667788") != NULL);
     CHECK(strstr(cdc_bytes, "board=B\r\n") != NULL);
@@ -432,7 +484,7 @@ static void cdc_command_stream(void) {
     CHECK(strstr(cdc_bytes, "help") && strstr(cdc_bytes, "status"));
     CHECK(strstr(cdc_bytes, "both boards") != NULL);
     CHECK(strstr(cdc_bytes, "history [count]") != NULL);
-    CHECK(strstr(cdc_bytes, "History is local in this release") != NULL);
+    CHECK(strstr(cdc_bytes, "History merges snapshots by approximate event age") != NULL);
     CHECK(occurrences("END help") == 1); /* The complete help fits the fixed TX buffer. */
 
     cdc_capture_clear();
@@ -510,8 +562,9 @@ static void history_fill(unsigned count) {
 static void history_frame(unsigned returned, uint64_t overwritten) {
     char expected[96];
     CHECK(occurrences("BEGIN history") == 1 && occurrences("END history") == 1);
-    CHECK(strstr(cdc_bytes, "board=A\r\nboot_session=1122334455667788\r\n"
-                            "scope=local\r\npeer=not_implemented\r\ncapacity=64\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "scope=both\r\nrequested_per_board=") != NULL);
+    CHECK(strstr(cdc_bytes, "timing=approximate_snapshot_alignment\r\ncapacity_per_board=64\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A\r\nboot_session=1122334455667788\r\nsampled_uptime_ms=") != NULL);
     snprintf(expected, sizeof(expected), "returned=%u\r\noverwritten=%llu\r\n",
              returned, (unsigned long long)overwritten);
     CHECK(strstr(cdc_bytes, expected) != NULL);
@@ -524,16 +577,18 @@ static void history_rows(uint64_t first, uint64_t end, bool allow_gaps) {
     CHECK(p != NULL);
     p = strstr(p, "\r\noverwritten=");
     CHECK(p != NULL);
-    p = strstr(p + 2, "\r\n") + 2;
+    p = strstr(p + 2, "\r\n\r\n");
+    CHECK(p != NULL);
+    p += 4;
     for (uint64_t expected = first; expected < end; ++expected) {
-        unsigned long long seq, uptime;
+        unsigned long long seq, uptime, age;
         int width = 0;
         if (strncmp(p, "GAP ", 4) == 0) {
             CHECK(allow_gaps);
             CHECK(sscanf(p, "GAP board=A seq=%llu%n", &seq, &width) == 1);
             CHECK(p[width] == '\r' && p[width + 1] == '\n');
         } else {
-            CHECK(sscanf(p, "board=A seq=%llu uptime_ms=%llu event=%n", &seq, &uptime, &width) == 2);
+            CHECK(sscanf(p, "board=A seq=%llu uptime_ms=%llu age_ms=%llu event=%n", &seq, &uptime, &age, &width) == 3);
             CHECK(width > 0 && uptime == seq); /* Our fixture time is seq milliseconds. */
             CHECK(strncmp(p + width, "output_local old=", 17) == 0);
         }
@@ -616,7 +671,7 @@ static void cdc_history_event_fields(void) {
     };
     for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
         char row[256];
-        snprintf(row, sizeof(row), "board=A seq=%u uptime_ms=1000 event=%s\r\n", i + 1, expected[i]);
+        snprintf(row, sizeof(row), "board=A seq=%u uptime_ms=1000 age_ms=0 event=%s\r\n", i + 1, expected[i]);
         CHECK(strstr(cdc_bytes, row) != NULL);
     }
     CHECK(occurrences("board=A seq=") == 10 && occurrences("board=B seq=") == 0);
@@ -626,8 +681,10 @@ static void cdc_history_event_fields(void) {
     diagnostic_history_record(HISTORY_UART_DROPPED, 0, 0, UINT32_MAX);
     cdc_capture_clear();
     cdc_send("history 1\n");
-    CHECK(strstr(cdc_bytes, "uptime_ms=18446744073709551 event=uart_dropped packet_type=4294967295") != NULL);
+    CHECK(strstr(cdc_bytes, "uptime_ms=18446744073709551 age_ms=0 event=uart_dropped packet_type=4294967295") != NULL);
     console_now_us = 2000000;
+    diagnostic_history_init();
+    diagnostic_history_record(HISTORY_USB_MOUNT, 0, 0, 0);
 
     /* A terminal attached to B must label every row B as well as the header. */
     console_init(OUTPUT_B, "fedcba9876543210", UINT64_C(0x8877665544332211), UINT32_C(0x12345678));
@@ -707,6 +764,230 @@ static void cdc_history_close_discards_window(void) {
     history_frame(1, 0);
     history_rows(64, 65, false);
     CHECK(occurrences("BEGIN status") == 0);
+}
+
+static void history_peer_fixture(unsigned count) {
+    CHECK(!history_peer_borrowed && !history_peer_ready && !history_peer_pending);
+    memset(&history_peer_result, 0, sizeof(history_peer_result));
+    peer_history_snapshot_t *peer = &history_peer_result.snapshot;
+    peer->role = 1;
+    peer->boot_session = UINT64_C(0x8877665544332211);
+    peer->sampled_at_us = UINT64_C(90000000);
+    peer->window = (history_window_t){.first_seq = 51, .end_seq = 51 + count,
+                                     .oldest_seq = 31, .overwritten = 30, .count = count};
+    for (unsigned i = 0; i < count; ++i)
+        peer->events[i] = (history_event_t){.seq = 51 + i,
+            .time_us = peer->sampled_at_us - (count - i) * 1000,
+            .type = HISTORY_OUTPUT_PEER, .a = 0, .b = 1};
+}
+
+static void cdc_history_interleaving(void) {
+    history_peer_manual = true;
+    diagnostic_history_init();
+    const uint64_t local_times[] = {100000, 400000, 600000, 900000};
+    for (unsigned i = 0; i < 4; ++i)
+        history_store_record(&history_store, local_times[i], HISTORY_OUTPUT_LOCAL, 0, 1, 0);
+    console_now_us = 1000000;
+    history_peer_fixture(4);
+    const unsigned peer_ages[] = {950, 600, 500, 50};
+    for (unsigned i = 0; i < 4; ++i)
+        history_peer_result.snapshot.events[i].time_us = 90000000 - peer_ages[i] * 1000;
+    cdc_capture_clear();
+    cdc_send("history 4\n");
+    CHECK(history_peer_pending && history_peer_limit == 4);
+    CHECK(occurrences("event=") == 0 && occurrences("END history") == 0);
+    unsigned releases_before = history_peer_releases;
+    history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+    console_drain();
+    history_frame(4, 0);
+    CHECK(strstr(cdc_bytes, "board=B\r\nboot_session=8877665544332211\r\nsampled_uptime_ms=90000\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "peer=ok\r\npeer_capture_bound_us=5000\r\n") != NULL);
+    CHECK(history_peer_releases == releases_before + 1 && !history_peer_borrowed);
+    const char *expected[] = {
+        "board=B seq=51 uptime_ms=89050 age_ms=950 event=",
+        "board=A seq=1 uptime_ms=100 age_ms=900 event=",
+        "board=A seq=2 uptime_ms=400 age_ms=600 event=",
+        "board=B seq=52 uptime_ms=89400 age_ms=600 event=",
+        "board=B seq=53 uptime_ms=89500 age_ms=500 event=",
+        "board=A seq=3 uptime_ms=600 age_ms=400 event=",
+        "board=A seq=4 uptime_ms=900 age_ms=100 event=",
+        "board=B seq=54 uptime_ms=89950 age_ms=50 event=",
+    };
+    const char *previous = cdc_bytes;
+    for (unsigned i = 0; i < 8; ++i) {
+        const char *row = strstr(cdc_bytes, expected[i]);
+        CHECK(row != NULL && row > previous);
+        previous = row;
+    }
+    CHECK(occurrences("board=A seq=") == 4 && occurrences("board=B seq=") == 4);
+
+    /* Equal-age ties choose board A even when the terminal runs on B. */
+    console_init(OUTPUT_B, "fedcba9876543210", UINT64_C(0x8877665544332211), UINT32_C(0x12345678));
+    console_drain();
+    history_peer_fixture(1);
+    history_peer_result.snapshot.role = 0;
+    history_peer_result.snapshot.events[0].time_us = 89900000;
+    cdc_capture_clear();
+    cdc_send("history 1\n");
+    history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+    console_drain();
+    CHECK(strstr(cdc_bytes, "board=A seq=51 uptime_ms=89900 age_ms=100 event=") <
+          strstr(cdc_bytes, "board=B seq=4 uptime_ms=900 age_ms=100 event="));
+    CHECK(occurrences("board=A seq=") == 1 && occurrences("board=B seq=") == 1);
+    console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
+    console_drain();
+
+    history_peer_fixture(4);
+    history_peer_result.snapshot.gap_mask = UINT64_C(1) << 1;
+    cdc_capture_clear();
+    cdc_send("history 4\n");
+    history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+    console_drain();
+    CHECK(strstr(cdc_bytes, "GAP board=B seq=52\r\n") != NULL);
+    CHECK(occurrences("board=B seq=") == 4 && occurrences("board=A seq=") == 4);
+    CHECK(occurrences("event=") == 7 && occurrences("END history") == 1);
+    history_peer_manual = false;
+}
+
+static void cdc_history_capture_ignores_usb_backpressure(void) {
+    history_peer_manual = true;
+    history_fill(64);
+    history_peer_fixture(64);
+    unsigned reads_before = history_reads;
+    cdc_capture_clear();
+    complete_short_out(0x06, "history 64\nstatus\n", 18);
+    console_tick(); /* Consume command; both snapshots are now fixed windows. */
+    CHECK(history_peer_pending && history_peer_limit == 64);
+    history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+    for (unsigned tick = 0; tick < 80; ++tick) console_tick();
+    CHECK(history_reads == reads_before + 64);
+    CHECK(history_peer_borrowed && endpoint(0x86)->pending);
+    CHECK(tud_cdc_available() == 7);
+    /* Even after producers overwrite all original slots, captured local rows
+     * remain immutable. The peer result stays borrowed through output stalls. */
+    for (unsigned i = 0; i < 80; ++i) {
+        console_now_us = (uint64_t)(65 + i) * 1000;
+        diagnostic_history_record(HISTORY_OUTPUT_LOCAL, 0, 1, 0);
+    }
+    uint8_t keys[6] = {HID_KEY_D};
+    CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+    host_count = 0;
+    complete(0x81, NULL, 0);
+    CHECK(host_count == 9 && host_bytes[3] == HID_KEY_D);
+    console_drain();
+    CHECK(!history_peer_borrowed && !history_peer_pending);
+    CHECK(occurrences("GAP ") == 0 && occurrences("event=") == 128);
+    CHECK(occurrences("board=A seq=") == 64 && occurrences("board=B seq=") == 64);
+    CHECK(strstr(cdc_bytes, "board=A seq=1 uptime_ms=1 age_ms=63 event=") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A seq=64 uptime_ms=64 age_ms=0 event=") != NULL);
+    CHECK(strstr(cdc_bytes, "END history") < strstr(cdc_bytes, "BEGIN status"));
+    cdc_status_fields();
+    history_peer_manual = false;
+}
+
+static void cdc_history_peer_failures_and_cancel(void) {
+    history_peer_manual = true;
+    history_fill(4);
+    const peer_history_outcome_t outcomes[] = {PEER_HISTORY_TIMEOUT, PEER_HISTORY_INVALID};
+    const char *texts[] = {"peer=timeout_or_unsupported", "peer=invalid"};
+    for (unsigned i = 0; i < 2; ++i) {
+        history_peer_fixture(1);
+        cdc_capture_clear();
+        cdc_send("history 4\n");
+        CHECK(occurrences("event=") == 0);
+        history_peer_publish(history_peer_token, outcomes[i]);
+        console_drain();
+        history_frame(4, 0);
+        CHECK(strstr(cdc_bytes, texts[i]) != NULL);
+        CHECK(occurrences("board=A seq=") == 4 && occurrences("board=B seq=") == 0);
+        CHECK(!history_peer_borrowed);
+    }
+    /* Reject structurally impossible snapshots at the borrow boundary before
+     * any peer array index or timestamp subtraction can use them. */
+    for (unsigned fault = 0; fault < 5; ++fault) {
+        history_peer_fixture(4);
+        cdc_capture_clear();
+        cdc_send("history 4\n");
+        history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+        if (fault == 0) history_peer_result.snapshot.role = 0;
+        if (fault == 1) history_peer_result.snapshot.role = 2;
+        if (fault == 2) history_peer_result.snapshot.window.count = 65;
+        if (fault == 3) history_peer_result.snapshot.window.end_seq++;
+        if (fault == 4) history_peer_result.first_response_us = history_peer_requested_at - 1;
+        console_drain();
+        CHECK(strstr(cdc_bytes, "peer=invalid") != NULL);
+        CHECK(occurrences("board=A seq=") == 4 && occurrences("board=B seq=") == 0);
+        CHECK(!history_peer_borrowed);
+    }
+    history_peer_accept = false;
+    cdc_capture_clear();
+    cdc_send("history 4\n");
+    CHECK(strstr(cdc_bytes, "peer=busy") != NULL && occurrences("event=") == 4);
+    history_peer_accept = true;
+
+    history_peer_fixture(1);
+    cdc_capture_clear();
+    cdc_send("history 4\n");
+    uint32_t abandoned = history_peer_token;
+    console_now_us = history_peer_requested_at + 3499999;
+    console_pump(32);
+    CHECK(occurrences("END history") == 0);
+    console_now_us++;
+    console_drain();
+    CHECK(strstr(cdc_bytes, "peer=timeout_or_unsupported") != NULL && occurrences("event=") == 4);
+    unsigned releases_before = history_peer_releases;
+    history_peer_publish(abandoned, PEER_HISTORY_OK);
+    cdc_capture_clear();
+    console_drain();
+    CHECK(cdc_count == 0 && history_peer_releases == releases_before + 1);
+
+    history_peer_fixture(1);
+    cdc_send("history 4\n");
+    CHECK(history_peer_token != abandoned);
+    history_peer_publish(abandoned, PEER_HISTORY_OK);
+    console_pump(32);
+    CHECK(occurrences("END history") == 0 && history_peer_pending && !history_peer_borrowed);
+    history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+    console_drain();
+    CHECK(strstr(cdc_bytes, "peer=ok") != NULL && occurrences("END history") == 1);
+    CHECK(!history_peer_borrowed);
+
+    /* Close while the core-0 console owns a borrowed successful peer result. */
+    history_fill(64);
+    history_peer_fixture(64);
+    complete_short_out(0x06, "history 64\n", 11);
+    console_tick();
+    history_peer_publish(history_peer_token, PEER_HISTORY_OK);
+    for (unsigned tick = 0; tick < 80; ++tick) console_tick();
+    CHECK(history_peer_borrowed && endpoint(0x86)->pending);
+    releases_before = history_peer_releases;
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    CHECK(!history_peer_borrowed && history_peer_releases == releases_before + 1);
+    complete(0x86, NULL, 0);
+    if (endpoint(0x86)->pending) complete(0x86, NULL, 0);
+    console_drain();
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("event=") == 0 && occurrences("END history") == 0);
+
+    /* Close before a result arrives; the disconnected task still returns late
+     * borrowed storage to core 1, so a missing terminal cannot strand it. */
+    history_peer_fixture(1);
+    cdc_send("history 1\n");
+    abandoned = history_peer_token;
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    history_peer_publish(abandoned, PEER_HISTORY_OK);
+    releases_before = history_peer_releases;
+    console_tick();
+    CHECK(!history_peer_borrowed && history_peer_releases == releases_before + 1);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("event=") == 0 && occurrences("END history") == 0);
+    history_peer_manual = false;
+    cdc_send("history 1\n");
+    CHECK(history_peer_token != abandoned && occurrences("END history") == 1);
 }
 
 static void cdc_peer_wait_is_local_first(void) {
@@ -966,6 +1247,12 @@ int main(void) {
     cdc_history_stalled_reader_and_hid();
     scenario = "CDC history close discards frozen window";
     cdc_history_close_discards_window();
+    scenario = "CDC both-board history age merge and gaps";
+    cdc_history_interleaving();
+    scenario = "CDC history capture during USB backpressure";
+    cdc_history_capture_ignores_usb_backpressure();
+    scenario = "CDC peer history failure, fallback and cancellation";
+    cdc_history_peer_failures_and_cancel();
     scenario = "CDC asynchronous local-first peer status";
     cdc_peer_wait_is_local_first();
     scenario = "CDC peer failure and core-1 fallback";

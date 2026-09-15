@@ -24,6 +24,18 @@ confirmed the requested input/switch/history check. B's history was not retrieve
 its flash was not independently read back. Native coverage now includes the peer/history modules
 in their relevant layers and keeps the isolated history stub outside the
 production-source denominator.
+The [v0.99 peer-history deployment](peer-history-v099.md) adds bounded two-board
+snapshot transfer, a merged console list, and regressions for shared UART
+pacing, result ownership, malformed data, and capture under serial backpressure.
+Its disk-free flash passed A's full readback, unchanged-settings, and Mac
+USB/media checks. Seven statuses confirmed both executing builds; four combined
+histories returned the same five A and three B records across reconnect, with
+no gaps or overwrites. Benji confirmed "Everything works" after the requested
+input and switch-and-back check on both Macs. A subsequent physical capture
+interleaved 13 A and 11 B records, including eight output changes per board
+covering both directions, without gaps or overwrites. B's history and executing identity
+are observed directly through peer replies; B's flash integrity remains
+independently unverified.
 The device-stack harness now
 also executes real CDC control/bulk transfers and the production console,
 including bounded work, malformed command recovery, and HID progress while a

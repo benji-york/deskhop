@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 98)
+set(VERSION_MINOR 99)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -63,6 +63,8 @@ set(COMMON_SOURCES
   ${SRC_DIR}/diagnostic_peer.c
   ${SRC_DIR}/history.c
   ${SRC_DIR}/diagnostic_history.c
+  ${SRC_DIR}/peer_history.c
+  ${SRC_DIR}/diagnostic_peer_history.c
   ${SRC_DIR}/defaults.c
   ${SRC_DIR}/constants.c
   ${SRC_DIR}/protocol.c

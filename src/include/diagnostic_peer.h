@@ -11,3 +11,5 @@ bool diagnostic_peer_poll(peer_status_result_t *result);
 /* Core 1 owns the protocol and immutable local identity. */
 void diagnostic_peer_task(uint64_t now_us);
 void diagnostic_peer_receive(bool response, const uint8_t data[8], uint64_t now_us);
+/* Core 1 only: shared pacing across status and history, including refusals. */
+bool diagnostic_peer_tx_try(uint8_t type, const uint8_t payload[8], uint64_t now_us);

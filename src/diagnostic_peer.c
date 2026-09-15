@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "main.h"
 #include "diagnostic_peer.h"
+#include "diagnostic_peer_history.h"
 
 typedef struct { uint32_t token; uint64_t requested_at_us; } request_t;
 static queue_t requests, results;
@@ -12,8 +13,11 @@ static peer_status_result_t pending_result;
 static bool result_pending;
 static bool query_completed;
 static uint64_t last_query_completed_us;
+static bool tx_attempted, history_first;
+static uint64_t last_tx_attempt_us;
 
 void diagnostic_peer_shutdown(void) {
+    diagnostic_peer_history_shutdown();
     if (initialized) {
         queue_free(&requests);
         queue_free(&results);
@@ -27,9 +31,11 @@ void diagnostic_peer_init(const peer_status_snapshot_t *snapshot) {
     peer_status_init(&protocol, identity.role);
     result_pending = false;
     query_completed = false;
+    tx_attempted = history_first = false;
     queue_init(&requests, sizeof(request_t), 1);
     queue_init(&results, sizeof(peer_status_result_t), 1);
     initialized = true;
+    diagnostic_peer_history_init(snapshot);
 }
 
 bool diagnostic_peer_request(uint32_t token, uint64_t requested_at_us) {
@@ -46,16 +52,22 @@ bool diagnostic_peer_poll(peer_status_result_t *result) {
     return initialized && queue_try_remove(&results, result);
 }
 
-static bool transmit(void *unused, peer_status_packet_t kind, const uint8_t payload[8]) {
-    (void)unused;
-    return queue_packet_try(payload, kind == PEER_STATUS_REQUEST
-                                      ? DIAGNOSTIC_STATUS_REQUEST_MSG
-                                      : DIAGNOSTIC_STATUS_RESPONSE_MSG, 8);
+bool diagnostic_peer_tx_try(uint8_t type, const uint8_t payload[8], uint64_t now_us) {
+    if (!initialized || (tx_attempted && now_us - last_tx_attempt_us < 1000))
+        return false;
+    tx_attempted = true;
+    last_tx_attempt_us = now_us;
+    return queue_packet_try(payload, type, 8);
 }
 
-void diagnostic_peer_task(uint64_t now_us) {
-    if (!initialized)
-        return;
+static bool transmit(void *context, peer_status_packet_t kind, const uint8_t payload[8]) {
+    return diagnostic_peer_tx_try(kind == PEER_STATUS_REQUEST
+                                     ? DIAGNOSTIC_STATUS_REQUEST_MSG
+                                     : DIAGNOSTIC_STATUS_RESPONSE_MSG,
+                                  payload, *(const uint64_t *)context);
+}
+
+static void status_task(uint64_t now_us) {
     if (result_pending && queue_try_add(&results, &pending_result))
         result_pending = false;
     /* Peek rather than drop a request while the previous query completes.
@@ -72,7 +84,7 @@ void diagnostic_peer_task(uint64_t now_us) {
         if (started != PEER_STATUS_BUSY)
             queue_try_remove(&requests, &request);
     }
-    peer_status_task(&protocol, now_us, transmit, NULL);
+    peer_status_task(&protocol, now_us, transmit, &now_us);
     if (!result_pending) {
         result_pending = peer_status_take_result(&protocol, &pending_result);
         if (result_pending) {
@@ -80,6 +92,19 @@ void diagnostic_peer_task(uint64_t now_us) {
             last_query_completed_us = now_us;
         }
     }
+}
+
+void diagnostic_peer_task(uint64_t now_us) {
+    if (!initialized)
+        return;
+    /* One shared UART attempt per millisecond, including queue refusals.
+     * Rotate first service so long history transfers cannot starve status. */
+    if (history_first)
+        diagnostic_peer_history_task(now_us);
+    status_task(now_us);
+    if (!history_first)
+        diagnostic_peer_history_task(now_us);
+    history_first = !history_first;
 }
 
 void diagnostic_peer_receive(bool response, const uint8_t data[8], uint64_t now_us) {

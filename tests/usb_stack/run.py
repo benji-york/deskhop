@@ -16,7 +16,7 @@ def build(directory, sanitize=True, coverage=False):
     binary = Path(directory) / "usb-stack-test"
     command = [os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                "-Wno-unused-parameter", "-Wno-sign-compare", "-ffunction-sections", "-fdata-sections",
-               "-DDH_CONSOLE=1", "-DVERSION_MAJOR=0", "-DVERSION_MINOR=98",
+               "-DDH_CONSOLE=1", "-DVERSION_MAJOR=0", "-DVERSION_MINOR=99",
                "-include", str(ROOT / "tests/usb_stack/native_options.h"),
                "-g", "-O1",
                f"-I{ROOT / 'tests/usb_stack'}", f"-I{TINYUSB}", f"-I{ROOT / 'tests/storage'}", f"-I{ROOT / 'src/include'}",

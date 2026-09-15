@@ -10,11 +10,13 @@ from simulator import Simulation, ROOT
 from fixtures import attach,keyboard,mouse
 from run import replay, minimize
 from test_peer_status import scenario_peer_status_roundtrip
+from test_peer_history import scenario_peer_history_roundtrip
 
 def check_interleaving_cli_selection():
     # Exercise argparse and dispatch, with only expensive firmware execution
     # replaced. A selected scenario must not silently become backpressure.
     for selected, expected in [('peer_status_roundtrip', 'peer_status_roundtrip'),
+                               ('peer_history_roundtrip', 'peer_history_roundtrip'),
                                ('all', 'backpressure')]:
         output = io.StringIO()
         with patch('sys.argv', ['run.py', '--scenario', selected, '--interleavings']), \
@@ -76,6 +78,13 @@ def main():
         try:s.check('usb_bytes',0,2,-1,0,'01')
         except AssertionError as e:assert 'usb_bytes' in str(e)
         else:raise AssertionError('report-byte oracle accepted an incorrect button mask')
+    data=json.loads(path.read_text());assert replay(data)==before
+    with Simulation(seed=73) as s:
+        scenario_peer_history_roundtrip(s)
+        s.save(path)
+        before=s.trace
+        assert {event['core'] for event in s.trace if event['kind']=='history_request'} == {0}
+        assert {event['core'] for event in s.trace if event['kind']=='diagnostic_enqueue'} == {1}
     data=json.loads(path.read_text());assert replay(data)==before
     with Simulation(seed=73) as s:
         scenario_peer_status_roundtrip(s)
