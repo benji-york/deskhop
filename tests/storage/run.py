@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import tempfile
 
@@ -32,6 +33,21 @@ def build(directory, source_root=ROOT / "src", sanitize=True, coverage=False):
     return binary
 
 
+def build_saturation(directory, source_root=ROOT / "src", sanitize=True):
+    """Reach UINT64_MAX using the real guard without a production test hook."""
+    directory = Path(directory)
+    directory.mkdir()
+    for name in SOURCES:
+        shutil.copy2(Path(source_root) / name, directory / name)
+    utils = directory / "utils.c"
+    source = utils.read_text()
+    anchor = "firmware_flash_generation = 0;"
+    if source.count(anchor) != 1:
+        raise RuntimeError("Verification generation startup fixture anchor drifted")
+    utils.write_text(source.replace(anchor, "firmware_flash_generation = UINT64_MAX - 1;"))
+    return build(directory, source_root=directory, sanitize=sanitize)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=lambda x: int(x, 0), default=1)
@@ -48,6 +64,9 @@ def main():
         binary = build(directory, sanitize=not args.no_sanitize)
         for seed in range(args.seed, args.seed + args.seeds):
             subprocess.run([str(binary), str(seed)], check=True, env=environment)
+        saturated = build_saturation(Path(directory) / "saturation", sanitize=not args.no_sanitize)
+        # Keep the optional operation trace scoped to the requested ordinary run.
+        subprocess.run([str(saturated), "1", "generation-saturation"], check=True)
 
 
 if __name__ == "__main__":

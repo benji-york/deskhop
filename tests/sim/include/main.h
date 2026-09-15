@@ -30,6 +30,9 @@
 #include "tasks.h"
 #include "watchdog.h"
 #include "zoom.h"
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+#include "diagnostic_verify.h"
+#endif
 #if SIM_HAS_DIAGNOSTIC_PEER
 #include "diagnostic_peer.h"
 #endif
@@ -73,3 +76,5 @@ void reset_usb_boot(uint32_t, uint32_t);
 void gpio_put(uint32_t, bool);
 bool gpio_get(uint32_t);
 void pico_get_unique_board_id_string(char *, uint32_t);
+
+uint32_t calc_crc32(const uint8_t *, size_t);

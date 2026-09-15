@@ -29,6 +29,11 @@ FIELDS={'output':0,'x':1,'y':2,'buttons':3,'reboot':4,'stopped':5,'kbd_queue':6,
         'diagnostic_protocol':71,'diagnostic_core_valid':72,'diagnostic_ticks':73,
         'diagnostic_core_age':74,'diagnostic_boot_observation':75,'diagnostic_progress':76,
         'diagnostic_execution':77,'diagnostic_update_phase':78,'diagnostic_received':79,
+        'verify_accepted':110,'verify_ready':111,'verify_token':112,'verify_remote':113,
+        'verify_transport':114,'verify_scan':115,'verify_crc':116,'verify_bytes':117,
+        'verify_start':118,'verify_end':119,'verify_gen_start':120,'verify_gen_end':121,
+        'verify_start_ticks':122,'verify_end_ticks':123,'verify_core_age':124,
+        'verify_verdict':125,'verify_reason':126,'verify_minor':127,'verify_boot':128,'verify_metadata_crc':129,
         'history_request_accepted':80,'history_poll_ready':81,'history_borrowed':82,
         'history_token':83,'history_outcome':84,'history_role':85,'history_boot_session':86,
         'history_requested_us':87,'history_first_response_us':88,'history_sampled_us':89,
@@ -74,6 +79,11 @@ class Simulation:
                 'sim_history_request':([C.c_uint32,C.c_uint],None),'sim_history_poll':([],None),
                 'sim_history_release':([],None),'sim_history_clear':([],None),
                 'sim_history_record':([C.c_uint8,C.c_uint8,C.c_uint8,C.c_uint32],None),
+                'sim_verify_prepare':([],None),'sim_verify_request':([C.c_uint32],None),
+                'sim_verify_poll':([],None),'sim_verify_recheck':([],None),
+                'sim_verify_assess':([C.c_uint16,C.c_uint32],None),
+                'sim_verify_mutate':([C.c_uint32,C.c_uint8],None),
+                'sim_verify_update_state':([C.c_uint],None),
             }
             for name,(args,ret) in signatures.items():
                 f=getattr(lib,name); f.argtypes=args; f.restype=ret
@@ -205,7 +215,7 @@ class Simulation:
     def do(self,node,op,*args,record=True):
         if record:self.steps.append({'node':node,'op':op,'args':list(args)})
         # Peripheral input and UART handling run on core1; host SET_REPORT on core0.
-        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll','history_request','history_poll','history_release') else 1)
+        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll','history_request','history_poll','history_release','verify_request','verify_poll','verify_assess','verify_recheck') else 1)
         self.active.append((node,core))
         try:self._invoke(node,op,list(args))
         finally:self.active.pop()

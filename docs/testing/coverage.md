@@ -13,7 +13,7 @@ Run `python3 tests/coverage.py` with Clang and LLVM `llvm-profdata`/`llvm-cov`
 required. `--layer paired --layer storage` selects a subset; `--hid-iterations N`
 changes the generated HID workload. Default measurements use scenario seed 1,
 storage seed 1, the five original pure-policy suites plus selection, peer status,
-history storage, peer history, and peer observations,
+history storage, peer history, peer observations, verification policy and protocol,
 64,128 updater contract cases, and 2,000 generated HID descriptors at seed `0x484944`.
 
 The generated `build/tests/coverage/html/index.html` links each layer's source
@@ -59,6 +59,18 @@ report is `build/tests/coverage-v100/html/index.html`, with final policy and
 USB-device refinements remeasured in
 `build/tests/coverage-v100-final-targeted/html/index.html`; the table above remains
 the dated v0.99 measurement.
+
+The v0.101 candidate adds `verification.c`, `peer_verify.c`, and
+`diagnostic_verify.c` to the paired layer, the policy/protocol to pure units,
+and the actual verdict policy to the real TinyUSB console layer. Storage tests
+execute the new full-slot read guards in `utils.c`, with independent CRC and
+generation/invalidation checks, forced lock contention, and six additional
+mutations. The paired scenarios run real scanners over modeled flash and
+transfer the results through real queues and UART dispatch. Console snapshots
+remain mocked in the USB layer. The production single-attempt hardware spinlock
+adapter is compiled for ARM; native tests substitute an instrumented lock.
+These checks do not measure physical scan timing or prove arbitrary memory
+interleavings. See the [candidate record](verification-v101.md).
 
 ## Layers and independent oracles
 

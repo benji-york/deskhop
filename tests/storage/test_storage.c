@@ -9,6 +9,9 @@ static uint64_t now;
 /* IDs 1/2/3 remain firmware/flash/config; startup then initializes history/runtime. */
 static unsigned current_core, lock_owner[6], lock_depth[6], next_lock;
 static unsigned interrupts[2], erases, programs, resets, watchdog_kicks;
+static bool try_owned[6], verification_call;
+static unsigned try_saved_irq[6], try_attempts[6], blocking_entries;
+static unsigned verification_copies, verification_bytes;
 static uint32_t reset_disable_mask;
 static unsigned sector_erases[STORAGE_SIZE / FLASH_SECTOR_SIZE];
 static unsigned page_programs[STAGING_PAGES_CNT];
@@ -81,6 +84,16 @@ static void interleaved_config_set(void) {
     current_core = saved_core;
 }
 void *storage_memcpy(void *destination, const void *source, size_t length) {
+    if (verification_call) {
+        uintptr_t start = (uintptr_t)storage_flash, address = (uintptr_t)source;
+        CHECK(length && length <= FLASH_PAGE_SIZE);
+        CHECK(address >= start && address - start <= STAGING_IMAGE_SIZE - length);
+        CHECK(lock_depth[1] == 1 && lock_owner[1] == current_core);
+        CHECK(lock_depth[2] == 1 && lock_owner[2] == current_core);
+        CHECK(interrupts[current_core]);
+        CHECK(++verification_copies == 1);
+        verification_bytes += (unsigned)length;
+    }
     if (config_set_on_copy && destination == global_state.page_buffer
         && source == &global_state.config && length == sizeof(config_t)) {
         config_set_on_copy = false;
@@ -101,6 +114,7 @@ void critical_section_init(critical_section_t *cs) {
     CHECK(cs->id <= 5);
 }
 void critical_section_enter_blocking(critical_section_t *cs) {
+    ++blocking_entries;
     CHECK(cs->id && cs->id <= 5);
     if (cs->id <= 3) CHECK(!lock_depth[4] && !lock_depth[5]);
     if (cs->id >= 4) {
@@ -119,9 +133,28 @@ void critical_section_enter_blocking(critical_section_t *cs) {
     lock_owner[cs->id] = current_core;
     lock_depth[cs->id]++;
 }
+bool dh_critical_section_try_enter(critical_section_t *cs) {
+    CHECK(cs->id && cs->id <= 5);
+    ++try_attempts[cs->id];
+    uint32_t saved_irq = save_and_disable_interrupts();
+    if (lock_depth[cs->id]) {
+        restore_interrupts(saved_irq);
+        return false;
+    }
+    CHECK(!lock_depth[4] && !lock_depth[5]);
+    lock_owner[cs->id] = current_core;
+    lock_depth[cs->id] = 1;
+    try_owned[cs->id] = true;
+    try_saved_irq[cs->id] = saved_irq;
+    return true;
+}
 void critical_section_exit(critical_section_t *cs) {
     CHECK(lock_depth[cs->id] == 1 && lock_owner[cs->id] == current_core);
     lock_depth[cs->id]--;
+    if (try_owned[cs->id]) {
+        try_owned[cs->id] = false;
+        restore_interrupts(try_saved_irq[cs->id]);
+    }
     if (cs->id == 3 && config_set_pending) {
         config_set_pending = false;
         interleaved_config_set();
@@ -222,6 +255,10 @@ static void fresh(const char *name) {
     source_state.uart_tx_queue.capacity = 256;
     uart_sink = &global_state.uart_tx_queue;
     memset(lock_depth, 0, sizeof(lock_depth));
+    memset(try_owned, 0, sizeof(try_owned));
+    memset(try_attempts, 0, sizeof(try_attempts));
+    verification_call = false;
+    verification_copies = verification_bytes = blocking_entries = 0;
     memset(interrupts, 0, sizeof(interrupts));
     memset(sector_erases, 0, sizeof(sector_erases));
     memset(page_programs, 0, sizeof(page_programs));
@@ -799,12 +836,219 @@ static void diagnostic_task_checkpoints(void) {
     expect_history(1, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_PAUSED, DIAGNOSTIC_SOURCE_PEER, 193);
 }
 
+/* Probe the actual guard API; only its one-read lock primitive is modeled.
+   Existing locks owned by either core and both IRQ masks must survive a call. */
+static firmware_verify_io_t verification_io(unsigned operation, uint64_t *generation,
+                                             uint32_t offset, uint8_t *destination, size_t length,
+                                             firmware_metadata_t *metadata) {
+    unsigned depths[6], owners[6], irq[2], blocked = blocking_entries;
+    memcpy(depths, lock_depth, sizeof(depths));
+    memcpy(owners, lock_owner, sizeof(owners));
+    memcpy(irq, interrupts, sizeof(irq));
+    verification_copies = verification_bytes = 0;
+    verification_call = true;
+    firmware_verify_io_t result;
+    switch (operation) {
+    case 0: result = firmware_verify_try_start(generation, metadata); break;
+    case 1: result = firmware_verify_try_read(*generation, offset, destination, length); break;
+    default: result = firmware_verify_try_finish(*generation, metadata); break;
+    }
+    verification_call = false;
+    CHECK(blocking_entries == blocked);
+    CHECK(memcmp(depths, lock_depth, sizeof(depths)) == 0);
+    CHECK(memcmp(irq, interrupts, sizeof(irq)) == 0);
+    for (unsigned id = 1; id <= 5; ++id)
+        if (depths[id]) CHECK(owners[id] == lock_owner[id]);
+    CHECK(verification_copies <= 1 && verification_bytes <= FLASH_PAGE_SIZE);
+    if (result != FIRMWARE_VERIFY_OK) CHECK(!verification_copies && !verification_bytes);
+    return result;
+}
+
+static void verify_full_slot_reads(void) {
+    fresh("verify_full_slot_with_live_metadata");
+    uint32_t payload_crc = make_image(image, 201, 0xa1);
+    memcpy(storage_flash, image, STAGING_IMAGE_SIZE);
+    /* The updater's mutable RAM metadata is deliberately unrelated. */
+    global_state._running_fw = (firmware_metadata_t){.magic=0xf00d, .version=202, .checksum=0x12345678};
+    uint64_t generation = UINT64_MAX;
+    firmware_metadata_t metadata, final;
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    CHECK(verification_bytes == sizeof(metadata) && generation != UINT64_MAX);
+    CHECK(metadata.magic == FIRMWARE_METADATA_MAGIC && metadata.version == 201);
+    CHECK(metadata.checksum == payload_crc);
+    uint8_t page[FLASH_PAGE_SIZE];
+    uint32_t crc = UINT32_MAX;
+    unsigned pages = 0;
+    for (uint32_t offset = 0; offset < STAGING_IMAGE_SIZE; offset += sizeof(page)) {
+        CHECK(verification_io(1, &generation, offset, page, sizeof(page), NULL) == FIRMWARE_VERIFY_OK);
+        CHECK(verification_bytes == sizeof(page));
+        CHECK(memcmp(page, image + offset, sizeof(page)) == 0);
+        /* Incremental production CRC runs after both guard locks have closed. */
+        CHECK(!lock_depth[1] && !lock_depth[2]);
+        for (unsigned byte = 0; byte < sizeof(page); ++byte) crc = crc32_iter(crc, page[byte]);
+        ++pages;
+        now += 1000;
+    }
+    CHECK(pages == 1024);
+    CHECK(verification_io(2, &generation, 0, NULL, 0, &final) == FIRMWARE_VERIFY_OK);
+    CHECK(memcmp(&metadata, &final, sizeof(metadata)) == 0);
+    CHECK(~crc == oracle_crc32(image, STAGING_IMAGE_SIZE));
+    CHECK(~crc != payload_crc); /* Full-slot CRC includes the metadata sector. */
+}
+
+static void verify_nonblocking_and_bounds(void) {
+    fresh("verify_one_shot_locks_and_range_rejection");
+    make_image(image, 201, 0xa2);
+    memcpy(storage_flash, image, STAGING_IMAGE_SIZE);
+    uint64_t generation = UINT64_MAX;
+    firmware_metadata_t metadata, saved;
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    uint8_t page[FLASH_PAGE_SIZE], old_page[FLASH_PAGE_SIZE];
+    memset(page, 0x7d, sizeof(page));
+    memcpy(old_page, page, sizeof(page));
+    saved = metadata;
+
+    for (unsigned held = 1; held <= 2; ++held) {
+        /* Model the other core owning firmware or flash before this tick. */
+        lock_depth[held] = 1; lock_owner[held] = 1;
+        for (unsigned operation = 0; operation < 3; ++operation) {
+            unsigned fw_attempts = try_attempts[1], flash_attempts = try_attempts[2];
+            uint64_t old_generation = generation;
+            CHECK(verification_io(operation, &generation, 0, page, sizeof(page), &metadata)
+                  == FIRMWARE_VERIFY_BUSY);
+            CHECK(try_attempts[1] == fw_attempts + 1);
+            CHECK(try_attempts[2] == flash_attempts + (held == 2));
+            CHECK(generation == old_generation && memcmp(&metadata, &saved, sizeof(metadata)) == 0);
+            CHECK(memcmp(page, old_page, sizeof(page)) == 0);
+        }
+        lock_depth[held] = 0;
+    }
+    /* An existing IRQ mask remains disabled after successful and refused tries. */
+    interrupts[0] = 1;
+    CHECK(verification_io(1, &generation, 0, page, sizeof(page), NULL) == FIRMWARE_VERIFY_OK);
+    lock_depth[2] = 1; lock_owner[2] = 1;
+    CHECK(verification_io(1, &generation, 0, page, sizeof(page), NULL) == FIRMWARE_VERIFY_BUSY);
+    lock_depth[2] = 0; interrupts[0] = 0;
+
+    /* A RAM-only config lock is unrelated to the actual flash snapshot. */
+    lock_depth[3] = 1; lock_owner[3] = 1;
+    CHECK(verification_io(1, &generation, 0, page, sizeof(page), NULL) == FIRMWARE_VERIFY_OK);
+    lock_depth[3] = 0;
+    CHECK(verification_io(0, NULL, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_BAD_ARGUMENT);
+    CHECK(verification_io(0, &generation, 0, NULL, 0, NULL) == FIRMWARE_VERIFY_BAD_ARGUMENT);
+    CHECK(verification_io(2, &generation, 0, NULL, 0, NULL) == FIRMWARE_VERIFY_BAD_ARGUMENT);
+    const struct { uint32_t offset; size_t length; } invalid[] = {
+        {0, 0}, {0, FLASH_PAGE_SIZE + 1}, {0, SIZE_MAX},
+        {STAGING_IMAGE_SIZE, 1}, {STAGING_IMAGE_SIZE - 1, 2}, {UINT32_MAX, 1},
+    };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+        CHECK(verification_io(1, &generation, invalid[i].offset, page, invalid[i].length, NULL)
+              == FIRMWARE_VERIFY_BAD_ARGUMENT);
+    CHECK(verification_io(1, &generation, 0, NULL, FLASH_PAGE_SIZE, NULL) == FIRMWARE_VERIFY_BAD_ARGUMENT);
+    CHECK(verification_io(1, &generation, STAGING_IMAGE_SIZE - 1, page, 1, NULL) == FIRMWARE_VERIFY_OK);
+    CHECK(page[0] == image[STAGING_IMAGE_SIZE - 1]);
+    uint64_t wrong_generation = generation + 1;
+    CHECK(verification_io(1, &wrong_generation, 0, page, sizeof(page), NULL) == FIRMWARE_VERIFY_CHANGED);
+    CHECK(verification_io(2, &wrong_generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_CHANGED);
+
+    for (unsigned condition = 0; condition < 3; ++condition) {
+        global_state.fw.upgrade_in_progress = condition == 0;
+        global_state.fw.image_dirty = condition == 1;
+        global_state.reboot_requested = condition == 2;
+        for (unsigned operation = 0; operation < 3; ++operation) {
+            unsigned attempted = try_attempts[2];
+            CHECK(verification_io(operation, &generation, 0, page, sizeof(page), &metadata)
+                  == FIRMWARE_VERIFY_UPDATE_ACTIVE);
+            CHECK(try_attempts[2] == attempted); /* No reason to try flash yet. */
+        }
+    }
+    global_state.reboot_requested = false;
+}
+
+static void verify_flash_mutation_generations(void) {
+    fresh("verify_generation_invalidation_including_identical_and_metadata_writes");
+    make_image(image, 201, 0xa3);
+    memcpy(storage_flash, image, STAGING_IMAGE_SIZE);
+    uint64_t generation;
+    firmware_metadata_t metadata;
+    uint8_t page[FLASH_PAGE_SIZE];
+
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    CHECK(verification_io(1, &generation, 0, page, sizeof(page), NULL) == FIRMWARE_VERIFY_OK);
+    /* An already-read page is programmed with exactly the same bytes. The
+       generation still expires even though a CRC-only ABA check would pass. */
+    owner(1);
+    write_flash_page_erasing(0, page, false);
+    owner(0);
+    CHECK(verification_io(1, &generation, FLASH_PAGE_SIZE, page, sizeof(page), NULL) == FIRMWARE_VERIFY_CHANGED);
+    CHECK(verification_io(2, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_CHANGED);
+    CHECK(memcmp(storage_flash, image, STAGING_IMAGE_SIZE) == 0);
+
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    uint32_t last_page = STAGING_IMAGE_SIZE - FLASH_PAGE_SIZE;
+    memcpy(page, image + last_page, sizeof(page));
+    page[0] = 0; /* Reserved metadata bytes are still part of the verified slot. */
+    uint32_t before = oracle_crc32(storage_flash, STAGING_IMAGE_SIZE);
+    owner(1);
+    write_flash_page_erasing(last_page, page, false);
+    owner(0);
+    CHECK(verification_io(2, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_CHANGED);
+    CHECK(oracle_crc32(storage_flash, STAGING_IMAGE_SIZE) != before);
+
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    before = oracle_crc32(storage_flash, STAGING_IMAGE_SIZE);
+    /* Settings and unused staging writes share flash exclusion but do not
+       overlap the running slot, so they cannot expire its generation. */
+    owner(1);
+    memset(page, 0xa5, sizeof(page));
+    write_flash_page(STAGING_IMAGE_SIZE, page);
+    owner(0);
+    save_config(&global_state);
+    wipe_config();
+    CHECK(verification_io(2, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    CHECK(oracle_crc32(storage_flash, STAGING_IMAGE_SIZE) == before);
+
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    owner(1);
+    diagnostic_update_begin(DIAGNOSTIC_SOURCE_PEER, 201);
+    diagnostic_update_phase(DIAGNOSTIC_UPDATE_FAILED);
+    enter_firmware_recovery();
+    owner(0);
+    CHECK(resets == 1);
+    CHECK(verification_io(2, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_CHANGED);
+}
+
+/* run.py builds a separate fixture with only the private startup generation
+   initialized near exhaustion. The actual guard and mutation logic is unchanged;
+   no test setter or configurable generation is shipped in production. */
+static void verify_generation_saturation(void) {
+    fresh("verify_generation_saturates_instead_of_wrapping");
+    make_image(image, 201, 0xa4);
+    memcpy(storage_flash, image, STAGING_IMAGE_SIZE);
+    uint64_t generation;
+    firmware_metadata_t metadata;
+    CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_OK);
+    CHECK(generation == UINT64_MAX - 1);
+    for (unsigned write = 0; write < 3; ++write) {
+        write_flash_page_erasing(0, image, false);
+        CHECK(verification_io(2, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_CHANGED);
+        CHECK(verification_io(0, &generation, 0, NULL, 0, &metadata) == FIRMWARE_VERIFY_CHANGED);
+        CHECK(generation == UINT64_MAX - 1);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) seed = (uint32_t)strtoul(argv[1], NULL, 0);
     if (!seed) seed = 1;
     replay_seed = seed;
     const char *trace_path = getenv("DESKHOP_STORAGE_TRACE");
     if (trace_path) { trace = fopen(trace_path, "w"); if (!trace) { perror(trace_path); return 2; } }
+    if (argc > 2 && strcmp(argv[2], "generation-saturation") == 0) {
+        verify_generation_saturation();
+        if (trace) fclose(trace);
+        puts("storage verification generation saturation fixture passed");
+        return 0;
+    }
     uf2_reordering_and_duplicate();
     uf2_reject_invalid_and_mixed();
     actual_peer_transfer(false, true);
@@ -818,6 +1062,9 @@ int main(int argc, char **argv) {
     power_cut_observation();
     watchdog_contract();
     diagnostic_task_checkpoints();
+    verify_full_slot_reads();
+    verify_nonblocking_and_bounds();
+    verify_flash_mutation_generations();
     if (trace) fclose(trace);
     printf("storage production-boundary tests passed (seed=%u; 2 full peer images, shuffled UF2, 6 serializations, 8 power cuts)\n", replay_seed);
     return 0;

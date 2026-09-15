@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "critical_try.h"
 
 _Static_assert(sizeof(config_t) <= FLASH_PAGE_SIZE,
                "config_t has grown beyond the configuration flash page");
@@ -24,11 +25,15 @@ _Static_assert(offsetof(config_t, screensaver_system_timeout_sec) == CONFIG_V8_R
 static critical_section_t firmware_update_critical_section;
 static critical_section_t flash_access_critical_section;
 static critical_section_t config_critical_section;
+/* Protected by flash_access_critical_section; UINT64_MAX permanently expires
+   all generations until startup rather than allowing an ABA through wrap. */
+static uint64_t firmware_flash_generation;
 
 void firmware_sync_init(void) {
     critical_section_init(&firmware_update_critical_section);
     critical_section_init(&flash_access_critical_section);
     critical_section_init(&config_critical_section);
+    firmware_flash_generation = 0;
 }
 
 void firmware_update_lock(void) {
@@ -144,11 +149,87 @@ void read_flash_bytes(const uint8_t *source, void *destination, size_t length) {
     critical_section_exit(&flash_access_critical_section);
 }
 
+static void firmware_verify_unlock(void) {
+    critical_section_exit(&flash_access_critical_section);
+    firmware_update_unlock();
+}
+
+/* On success both locks remain held for one bounded copy. Never wait behind
+   flash erase or the updater's longer ownership scope on the other core. */
+static firmware_verify_io_t firmware_verify_try_lock(uint64_t generation, bool compare) {
+    if (!dh_critical_section_try_enter(&firmware_update_critical_section))
+        return FIRMWARE_VERIFY_BUSY;
+    if (global_state.fw.upgrade_in_progress || global_state.fw.image_dirty
+        || global_state.reboot_requested) {
+        firmware_update_unlock();
+        return FIRMWARE_VERIFY_UPDATE_ACTIVE;
+    }
+    if (!dh_critical_section_try_enter(&flash_access_critical_section)) {
+        firmware_update_unlock();
+        return FIRMWARE_VERIFY_BUSY;
+    }
+    if (firmware_flash_generation == UINT64_MAX
+        || (compare && generation != firmware_flash_generation)) {
+        firmware_verify_unlock();
+        return FIRMWARE_VERIFY_CHANGED;
+    }
+    return FIRMWARE_VERIFY_OK;
+}
+
+firmware_verify_io_t firmware_verify_try_start(uint64_t *generation,
+                                               firmware_metadata_t *metadata) {
+    if (!generation || !metadata)
+        return FIRMWARE_VERIFY_BAD_ARGUMENT;
+    firmware_verify_io_t result = firmware_verify_try_lock(0, false);
+    if (result != FIRMWARE_VERIFY_OK)
+        return result;
+    memcpy(metadata, ADDR_FW_METADATA, sizeof(*metadata));
+    *generation = firmware_flash_generation;
+    firmware_verify_unlock();
+    return FIRMWARE_VERIFY_OK;
+}
+
+firmware_verify_io_t firmware_verify_try_read(uint64_t generation, uint32_t offset,
+                                              uint8_t *destination, size_t length) {
+    if (!destination || !length || length > FLASH_PAGE_SIZE
+        || offset > STAGING_IMAGE_SIZE - length)
+        return FIRMWARE_VERIFY_BAD_ARGUMENT;
+    firmware_verify_io_t result = firmware_verify_try_lock(generation, true);
+    if (result != FIRMWARE_VERIFY_OK)
+        return result;
+    memcpy(destination, ADDR_FW_RUNNING + offset, length);
+    firmware_verify_unlock();
+    return FIRMWARE_VERIFY_OK;
+}
+
+firmware_verify_io_t firmware_verify_try_finish(uint64_t generation,
+                                                firmware_metadata_t *metadata) {
+    if (!metadata)
+        return FIRMWARE_VERIFY_BAD_ARGUMENT;
+    firmware_verify_io_t result = firmware_verify_try_lock(generation, true);
+    if (result != FIRMWARE_VERIFY_OK)
+        return result;
+    memcpy(metadata, ADDR_FW_METADATA, sizeof(*metadata));
+    firmware_verify_unlock();
+    return FIRMWARE_VERIFY_OK;
+}
+
+/* Call under the flash lock, before the first byte may change. Include the
+   metadata sector as well as executable/disk data; exclude saved settings. */
+static void firmware_verify_invalidate_range(uint32_t offset, uint32_t length) {
+    uint32_t slot_start = (uint32_t)(uintptr_t)ADDR_FW_RUNNING - XIP_BASE;
+    if (length && (uint64_t)offset < (uint64_t)slot_start + STAGING_IMAGE_SIZE
+        && (uint64_t)offset + length > slot_start
+        && firmware_flash_generation != UINT64_MAX)
+        ++firmware_flash_generation;
+}
+
 /* Never attempt a normal reboot with a known-partial image. Invalidating its
    first sector makes the ROM USB bootloader the deterministic recovery path. */
 void enter_firmware_recovery(void) {
     critical_section_enter_blocking(&flash_access_critical_section);
     uint32_t ints = save_and_disable_interrupts();
+    firmware_verify_invalidate_range((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);
     flash_range_erase((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);
     restore_interrupts(ints);
     critical_section_exit(&flash_access_critical_section);
@@ -177,9 +258,12 @@ void wipe_config(void) {
 void write_flash_page_erasing(uint32_t target_addr, uint8_t *buffer, bool erase_sector) {
     critical_section_enter_blocking(&flash_access_critical_section);
     uint32_t ints = save_and_disable_interrupts();
-    if (erase_sector)
+    if (erase_sector) {
+        firmware_verify_invalidate_range(target_addr & ~(FLASH_SECTOR_SIZE - 1), FLASH_SECTOR_SIZE);
         flash_range_erase(target_addr & ~(FLASH_SECTOR_SIZE - 1), FLASH_SECTOR_SIZE);
+    }
 
+    firmware_verify_invalidate_range(target_addr, FLASH_PAGE_SIZE);
     flash_range_program(target_addr, buffer, FLASH_PAGE_SIZE);
     restore_interrupts(ints);
     critical_section_exit(&flash_access_critical_section);

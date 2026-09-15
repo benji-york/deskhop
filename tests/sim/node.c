@@ -20,6 +20,11 @@ static bool uart_stalled, diagnostic_request_accepted, diagnostic_poll_ready;
 #if SIM_HAS_DIAGNOSTIC_PEER
 static peer_status_result_t diagnostic_result;
 #endif
+static bool verify_request_accepted, verify_poll_ready;
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+static verify_result_t verify_result;
+static verify_assessment_t verify_assessment;
+#endif
 static bool history_request_accepted, history_poll_ready;
 #if SIM_HAS_DIAGNOSTIC_PEER_HISTORY
 static const peer_history_result_t *history_borrowed;
@@ -52,7 +57,12 @@ bool sim_queue_try_add(queue_t *queue, const void *data) {
     if (queue == &global_state.uart_tx_queue) {
         const uart_packet_t *packet = data;
         if (packet->type >= DIAGNOSTIC_STATUS_REQUEST_MSG
-            && packet->type <= DIAGNOSTIC_HISTORY_RESPONSE_MSG)
+            && packet->type <=
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+                DIAGNOSTIC_VERIFY_RESPONSE_MSG)
+#else
+                DIAGNOSTIC_HISTORY_RESPONSE_MSG)
+#endif
             emit(17, packet->type, accepted, NULL, 0);
     }
     return accepted;
@@ -77,6 +87,10 @@ void lock_internal_spin_unlock_with_notify(lock_core_t *l,uint32_t n) { spin_unl
 void lock_internal_spin_unlock_with_wait(lock_core_t *l,uint32_t n) { spin_unlock(l->spin_lock,n); tight_loop_contents(); }
 void critical_section_init(critical_section_t *s) { s->held=0; }
 void critical_section_enter_blocking(critical_section_t *s) { assert(!s->held); s->held=1; critical_depth++; }
+bool dh_critical_section_try_enter(critical_section_t *s) {
+    if (s->held) return false;
+    s->held=1; critical_depth++; return true;
+}
 void critical_section_exit(critical_section_t *s) { assert(s->held); s->held=0; critical_depth--; }
 uint32_t save_and_disable_interrupts(void) { return interrupt_depth++; }
 void restore_interrupts(uint32_t n) { interrupt_depth=n; }
@@ -257,6 +271,64 @@ void sim_history_record(uint8_t type, uint8_t a, uint8_t b, uint32_t value) {
     diagnostic_history_record((history_type_t)type, a, b, value);
 #endif
 }
+/* Verification-only fixture: establish identical boot images before querying.
+ * This is test setup, not a firmware update or a physical reboot model. */
+void sim_verify_prepare(void) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    for (unsigned i = 0; i < STAGING_IMAGE_SIZE; ++i)
+        sim_flash[i] = (uint8_t)((i * 73u + i / 127u) ^ 0x31);
+    firmware_metadata_t metadata = {.magic=FIRMWARE_METADATA_MAGIC, .version=201,
+        .checksum=calc_crc32(sim_flash, STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE)};
+    memcpy(sim_flash + STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE, &metadata, sizeof(metadata));
+    global_state._running_fw = metadata;
+    peer_status_snapshot_t fixture = {.role=global_state.board_role, .minor=101,
+        .boot_session=global_state.board_role + 1, .image_crc_at_boot=metadata.checksum};
+    for (unsigned i=0;i<8;++i) fixture.board_id[i]=global_state.board_role*16+i;
+    diagnostic_peer_init(&fixture);
+#endif
+}
+void sim_verify_request(uint32_t token) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    verify_request_accepted=diagnostic_verify_request(token,now_us);
+#else
+    verify_request_accepted=false;
+#endif
+}
+void sim_verify_poll(void) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    verify_poll_ready=diagnostic_verify_poll(&verify_result);
+#else
+    verify_poll_ready=false;
+#endif
+}
+void sim_verify_assess(uint16_t version, uint32_t crc) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    verify_assessment=verification_assess(&verify_result,version,crc);
+#endif
+}
+void sim_verify_recheck(void) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    diagnostic_verify_recheck_local(&verify_result);
+#endif
+}
+void sim_verify_mutate(uint32_t offset, uint8_t keep_bits) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    assert(offset < sizeof(sim_flash));
+    uint32_t page_offset=offset & ~(FLASH_PAGE_SIZE-1);
+    uint8_t page[FLASH_PAGE_SIZE];
+    memcpy(page,sim_flash+page_offset,sizeof(page));
+    page[offset-page_offset] &= keep_bits;
+    write_flash_page_erasing(page_offset,page,false);
+#endif
+}
+void sim_verify_update_state(unsigned state) {
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+    assert(state <= 3);
+    global_state.fw.upgrade_in_progress=state==1;
+    global_state.fw.image_dirty=state==2;
+    global_state.reboot_requested=state==3;
+#endif
+}
 void sim_mount(uint8_t addr,uint8_t instance,uint8_t proto,const uint8_t *desc,uint16_t len) {
     if (stopped) return;
     assert(addr && addr<=MAX_DEVICES && instance<MAX_INTERFACES);
@@ -326,6 +398,28 @@ int64_t sim_get(int field,int index) {
       case 51:return s->config.screensaver_system_timeout_sec;
       case 60:return diagnostic_request_accepted;
       case 61:return diagnostic_poll_ready;
+      case 110:return verify_request_accepted;
+      case 111:return verify_poll_ready;
+#if SIM_HAS_DIAGNOSTIC_VERIFY
+      case 112:return verify_result.token;
+      case 113:return verify_result.remote;
+      case 114:return verify_result.transport;
+      case 115:return verify_result.snapshot.outcome;
+      case 116:return verify_result.snapshot.slot_crc32;
+      case 117:return verify_result.snapshot.bytes_read;
+      case 118:return verify_result.snapshot.started_us;
+      case 119:return verify_result.snapshot.completed_us;
+      case 120:return verify_result.snapshot.generation_start;
+      case 121:return verify_result.snapshot.generation_end;
+      case 122:assert(index>=0 && index<2);return verify_result.snapshot.start.core_ticks[index];
+      case 123:assert(index>=0 && index<2);return verify_result.snapshot.end.core_ticks[index];
+      case 124:assert(index>=0 && index<2);return verify_result.snapshot.end.core_age_ms[index];
+      case 125:return verify_assessment.verdict;
+      case 126:return verify_assessment.reason;
+      case 127:return verify_result.snapshot.minor;
+      case 128:return verify_result.snapshot.boot_session;
+      case 129:return verify_result.snapshot.metadata_crc32;
+#endif
       case 80:return history_request_accepted;
       case 81:return history_poll_ready;
 #if SIM_HAS_DIAGNOSTIC_PEER_HISTORY

@@ -6,9 +6,52 @@ the coupled Sofle/QMK firmware, how to build and deploy both, and the failure
 modes already diagnosed. It is intentionally more specific than the upstream
 README.
 
-Snapshot: 2026-09-14
+Snapshot: 2026-09-15
 
-## Current deployment: v0.100 update and core observations
+## Current deployment: v0.101 full-slot verification
+
+Both boards are running v0.101 and have completed input acceptance. The
+[deployment record](docs/testing/verification-v101.md) documents the new
+`verify <build> <crc32>` command, native validation, and physical evidence.
+It checks both boards using fresh incremental flash scans, executing-build
+metadata, and both-core progress. Use the **full-slot CRC** from the artifact
+manifest; the boot metadata CRC in `status` covers a different range. Results
+explicitly describe scan snapshots.
+
+Frozen artifact: `build/flashing/deskhop-v0.101-verification.uf2`, SHA-256
+`571e1b24d59e36da1dfce58a05c26bdefdb4c2312e5a4982424f1c0b31c3ec87`.
+The command is `verify 0.101 2db89640`; separate boot metadata CRC is
+`be404f8f`. The source/artifact manifest is `build/flashing/v101-candidate.json`.
+All 46 deep steps, six coverage layers, final affected checks, and ARM build
+passed.
+
+Pico A was flashed through disk-free PICOBOOT and normal reboot requested at
+2026-09-15 09:07:13.250085 UTC. All 262,144 firmware bytes matched an independent
+readback, and all 4,096 saved-settings bytes were unchanged. Only the vendor
+bootloader interface (class 255) appeared. No RP2 boot object remained after
+reboot, and the same 20 Mac media clients including subclasses (five direct
+clients) were active and nonbusy.
+
+A 44-status rollout capture over 23.223 seconds observed B receiving target
+v0.101, reaching `reboot_pending`, then starting a new boot and advancing both
+core counters to `update=confirmed`. There was one bounded peer timeout during
+the transition. A's session is `37dad6e6dd90a647`; B changed from
+`67023817d0aa5245` to `049fe6e4d5d3495e`. UIDs remain `E6654854574C3E30` (A)
+and `E6654854577F2330` (B).
+
+The subsequent serial smoke check passed in 5.537 seconds (11,448 bytes): five
+statuses, two combined histories retaining nine A and three B rows without gaps
+or overwrites, and three fresh image checks. Correct/wrong/correct expected CRCs
+produced PASS/FAIL/PASS on both boards; every full-slot scan measured `2db89640`
+with stable generations and both cores advancing. Scan durations were
+1.046346–1.067426 seconds. B's complete flash was measured by its own firmware;
+it was not read externally with picotool.
+
+Benji confirmed "Everything works" after the requested typing, trackball/buttons,
+and Layer 3 S switch to the other Mac and back check. Replugging was not separately
+reported. No push has been performed.
+
+## Previous accepted deployment: v0.100 update and core observations
 
 The [deployment record](docs/testing/update-observations-v100.md) describes new
 status rows for both core checkpoints and updater state, sparse history events,
@@ -32,7 +75,8 @@ Benji confirmed "Everything works" after the typing/trackball/buttons and
 Layer 3 S switch-and-back check on both Macs. The initial
 rollout correctly reports `update=not_observed`: v0.99 supplied no pre-update
 runtime/target information. This does not independently verify B's flash.
-Full image verification is a later slice. No push has been performed.
+That release was locally checkpointed as `989192b`; it did not independently
+verify the full images. The v0.101 deployment above adds that assurance.
 
 ## Previous accepted deployment: v0.99 peer history
 

@@ -43,6 +43,18 @@ both boards' serial status/core/history checks passed, including a live legacy
 fallback and B's transition from its v0.99 session to a new v0.100 session.
 Benji confirmed "Everything works" after the input and switch-and-back check
 on both Macs.
+The [v0.101 deployment](verification-v101.md) adds fresh full-slot image
+verification for both boards. It adds policy and peer-protocol units, production
+flash-guard checks, paired scanner/queue/UART scenarios, and real-console verdict
+and expiry tests. A's disk-free flash passed full independent readback,
+unchanged-settings, and Mac USB/media checks. A live 44-status rollout capture
+observed B receiving the target, rebooting into v0.101, and advancing both cores.
+The subsequent serial check passed five statuses, two histories, and fresh
+PASS/FAIL/PASS scans of both boards with correct/wrong/correct CRC expectations.
+Both full-slot CRCs matched `2db89640`; boot metadata CRC was `be404f8f`.
+B's CRC was measured by its own firmware, without an external picotool readback.
+Both boards are deployed on v0.101. Benji confirmed "Everything works" after
+the requested typing, trackball/buttons, and both-Mac switch-and-back check.
 The device-stack harness now
 also executes real CDC control/bulk transfers and the production console,
 including bounded work, malformed command recovery, and HID progress while a
@@ -81,8 +93,9 @@ in the runbook. No command flashes or uploads firmware.
   counterexample separately.
 - **Deep:** fast tier plus 20,000 HID cases, 16 storage seeds, 32 generated
   paired-input sequences, the backpressure scenario under all 24 fixed priority
-  orders of the four modeled cores, and 30 compiled production mutations
-  (15 storage and 15 paired, including seven selection mutations).
+  orders of the four modeled cores, equivalent order exploration for peer
+  status/history and simultaneous verification, and 36 compiled production
+  mutations (21 storage and 15 paired, including seven selection mutations).
   Model mutations are counted separately. Nine valid-input scenarios also run
   against original `d42c930` source (Git and that local commit are required;
   no fetching). Four host-effect traces match exactly; five compare ordered

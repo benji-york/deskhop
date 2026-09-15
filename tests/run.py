@@ -42,7 +42,8 @@ def main():
                       ('screensaver_policy','screensaver_policy'),('reboot_hotkey','reboot_hotkey'),
                       ('config_migration','config_migration'),('selection','selection'),
                       ('peer_status','peer_status'),('history','history'),
-                      ('peer_history','peer_history'),('peer_observation','peer_observation')]:
+                      ('peer_history','peer_history'),('peer_observation','peer_observation'),('verification','verification'),
+                      ('peer_verify','peer_verify')]:
         dependencies = ['src/history.c'] if name == 'peer_history' else []
         compile_test(name,[f'tests/test_{name}.c',f'src/{unit}.c',*dependencies])
     node=os.environ.get('NODE') or shutil.which('node') or str(pathlib.Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')
@@ -69,6 +70,7 @@ def main():
     if a.tier=='deep':
         run('bounded core order exploration',[sys.executable,'tests/sim/run.py','--scenario','backpressure','--interleavings'])
         run('peer query core order exploration',[sys.executable,'tests/sim/run.py','--scenario','peer_status_roundtrip','--interleavings'])
+        run('verification core order exploration',[sys.executable,'tests/sim/run.py','--scenario','verify_concurrent','--interleavings'])
         run('peer history core order exploration',[sys.executable,'tests/sim/run.py','--scenario','peer_history_roundtrip','--interleavings'])
         run('generated end-to-end inputs',[sys.executable,'tests/sim/run.py','--scenario','generated','--seeds','32'],timeout=180)
         run('storage source mutations',[sys.executable,'tests/storage/mutations.py'])

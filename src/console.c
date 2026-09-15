@@ -7,6 +7,7 @@
 #include "diagnostic_peer.h"
 #include "diagnostic_peer_history.h"
 #include "diagnostic_runtime.h"
+#include "diagnostic_verify.h"
 #include "tusb.h"
 
 #if DH_CONSOLE && CFG_TUD_CDC
@@ -21,6 +22,7 @@
 #define CONSOLE_TX_SIZE 1024u
 #define CONSOLE_PEER_TIMEOUT_US UINT64_C(600000)
 #define CONSOLE_HISTORY_TIMEOUT_US UINT64_C(3500000)
+#define CONSOLE_VERIFY_TIMEOUT_US UINT64_C(3500000)
 
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
@@ -43,6 +45,11 @@ static struct {
     uint32_t query_token;
     uint64_t query_started_us;
     peer_status_result_t peer_result;
+    bool verify_active, verify_ready[2], verify_emitted[2];
+    uint16_t verify_version;
+    uint32_t verify_crc;
+    verify_result_t verify_results[2];
+    verify_assessment_t verify_assessments[2];
     enum { LINE_OK, LINE_TOO_LONG, LINE_INVALID } line_error;
     char line[CONSOLE_LINE_SIZE], tx[CONSOLE_TX_SIZE];
     unsigned line_used, tx_used, tx_sent;
@@ -62,6 +69,7 @@ void console_disconnect(void) {
     console.line_used = console.tx_used = console.tx_sent = 0;
     console.peer_waiting = console.peer_ready = false;
     console.history_active = false;
+    console.verify_active = false;
     release_history_peer();
     /* TinyUSB resets CDC endpoints BEFORE the unmount callback. read_flush()
      * rearms OUT, so it must never run after that reset (ep_out is then zero).
@@ -106,7 +114,7 @@ static void appendf(const char *format, ...) {
 }
 
 static void finish_status(const char *outcome) {
-    appendf("peer=%s\r\nverification=not_implemented\r\nEND status\r\n", outcome);
+    appendf("peer=%s\r\nverification=available\r\nEND status\r\n", outcome);
     console.peer_waiting = console.peer_ready = false;
 }
 
@@ -449,6 +457,194 @@ static void emit_history_tick(void) {
     }
 }
 
+static bool verify_number(const char **input, char separator, unsigned maximum, unsigned *number) {
+    const char *p = *input;
+    unsigned value = 0;
+    if (*p < '0' || *p > '9')
+        return false;
+    while (*p >= '0' && *p <= '9') {
+        unsigned digit = (unsigned)(*p++ - '0');
+        if (value > maximum / 10 || (value == maximum / 10 && digit > maximum % 10))
+            return false;
+        value = value * 10 + digit;
+    }
+    if (*p != separator)
+        return false;
+    *input = p + 1;
+    *number = value;
+    return true;
+}
+
+static bool verify_arguments(const char *line, uint16_t *version, uint32_t *crc) {
+    if (line[6] != ' ')
+        return false;
+    const char *p = line + 7;
+    unsigned major, minor;
+    if (!verify_number(&p, '.', 65, &major) || !verify_number(&p, ' ', 999, &minor))
+        return false;
+    unsigned encoded = major * 1000 + minor + 100;
+    if (encoded > UINT16_MAX)
+        return false;
+    uint32_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) {
+        unsigned digit;
+        if (p[i] >= '0' && p[i] <= '9') digit = (unsigned)(p[i] - '0');
+        else if (p[i] >= 'a' && p[i] <= 'f') digit = (unsigned)(p[i] - 'a') + 10;
+        else if (p[i] >= 'A' && p[i] <= 'F') digit = (unsigned)(p[i] - 'A') + 10;
+        else return false;
+        value = (value << 4) | digit;
+    }
+    if (p[8] != '\0')
+        return false;
+    *version = (uint16_t)encoded;
+    *crc = value;
+    return true;
+}
+
+static const char *verify_verdict_name(verify_verdict_t verdict) {
+    return verdict == VERIFY_PASS ? "PASS" : verdict == VERIFY_FAIL ? "FAIL" : "UNVERIFIED";
+}
+
+static const char *verify_reason_name(verify_reason_t reason) {
+    switch (reason) {
+    case VERIFY_REASON_MATCH: return "match";
+    case VERIFY_REASON_BUILD: return "build_mismatch";
+    case VERIFY_REASON_CRC: return "crc_mismatch";
+    case VERIFY_REASON_METADATA: return "metadata_invalid";
+    case VERIFY_REASON_UPDATE_ACTIVE: return "update_active";
+    case VERIFY_REASON_CHANGED: return "image_changed";
+    case VERIFY_REASON_BUSY: return "busy";
+    case VERIFY_REASON_TIMEOUT: return "timeout_or_unsupported";
+    case VERIFY_REASON_INVALID: return "invalid_response";
+    case VERIFY_REASON_CORE_UNAVAILABLE: return "core_unavailable";
+    case VERIFY_REASON_CORE_PROGRESS: return "core_progress_unverified";
+    case VERIFY_REASON_EXPIRED: return "expired";
+    default: return "invalid_response";
+    }
+}
+
+static void begin_verify(uint16_t version, uint32_t crc, uint64_t now_us) {
+    console.verify_active = true;
+    console.verify_version = version;
+    console.verify_crc = crc;
+    console.query_started_us = now_us;
+    if (++console.query_token == 0)
+        ++console.query_token;
+    bool started = diagnostic_verify_request(console.query_token, now_us);
+    for (unsigned i = 0; i < 2; ++i) {
+        console.verify_ready[i] = !started;
+        console.verify_emitted[i] = false;
+        console.verify_results[i] = (verify_result_t){.token = console.query_token,
+            .remote = i != 0, .transport = VERIFY_TRANSPORT_BUSY};
+    }
+    append("BEGIN verify\r\nscope=both\r\nclaim=scan_snapshot\r\nexpected_build=");
+    append_version(version);
+    appendf("\r\nexpected_crc32=%08lx\r\ncoverage_start=0x10000000\r\ncoverage_bytes=%lu\r\n",
+            (unsigned long)crc, (unsigned long)VERIFY_IMAGE_BYTES);
+}
+
+static void poll_verify(uint64_t now_us) {
+    verify_result_t result;
+    if (diagnostic_verify_poll(&result) && console.verify_active && result.token == console.query_token) {
+        unsigned index = result.remote ? 1 : 0;
+        if (!console.verify_ready[index]) {
+            unsigned expected_role = (console.board == 'A' ? 0u : 1u) ^ index;
+            if (result.transport == VERIFY_TRANSPORT_OK && result.snapshot.role != expected_role)
+                result.transport = VERIFY_TRANSPORT_INVALID;
+            console.verify_results[index] = result;
+            console.verify_ready[index] = true;
+        }
+    }
+    if (console.verify_active && now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US) {
+        for (unsigned i = 0; i < 2; ++i) {
+            if (!console.verify_ready[i]) {
+                console.verify_results[i] = (verify_result_t){.token = console.query_token,
+                    .remote = i != 0, .transport = VERIFY_TRANSPORT_TIMEOUT};
+                console.verify_ready[i] = true;
+            }
+        }
+    }
+}
+
+static void append_verify_board(unsigned index, uint64_t now_us) {
+    verify_result_t *result = &console.verify_results[index];
+    char board = index ? (console.board == 'A' ? 'B' : 'A') : console.board;
+    if (!index && result->transport == VERIFY_TRANSPORT_OK)
+        diagnostic_verify_recheck_local(result);
+    verify_assessment_t assessment = verification_assess(result, console.verify_version, console.verify_crc);
+    if (now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US)
+        assessment = (verify_assessment_t){VERIFY_UNVERIFIED, VERIFY_REASON_EXPIRED};
+    console.verify_assessments[index] = assessment;
+    appendf("board=%c result=%s reason=%s\r\n", board, verify_verdict_name(assessment.verdict),
+            verify_reason_name(assessment.reason));
+    if (result->transport != VERIFY_TRANSPORT_OK) {
+        appendf("board=%c evidence=unavailable\r\n", board);
+        return;
+    }
+    const verify_snapshot_t *snapshot = &result->snapshot;
+    char uid[17];
+    static const char hex[] = "0123456789ABCDEF";
+    for (unsigned i = 0; i < 8; ++i) {
+        uid[2 * i] = hex[snapshot->board_id[i] >> 4];
+        uid[2 * i + 1] = hex[snapshot->board_id[i] & 15];
+    }
+    uid[16] = 0;
+    appendf("board=%c build=%u.%u board_id=%s boot_session=%08lx%08lx\r\n"
+            "board=%c scan_start_us=%llu scan_end_us=%llu bytes=%lu crc32=",
+            board, (unsigned)snapshot->major, (unsigned)snapshot->minor, uid,
+            (unsigned long)(snapshot->boot_session >> 32), (unsigned long)(uint32_t)snapshot->boot_session,
+            board, (unsigned long long)snapshot->started_us, (unsigned long long)snapshot->completed_us,
+            (unsigned long)snapshot->bytes_read);
+    if (snapshot->outcome == VERIFY_SCAN_COMPLETE && snapshot->bytes_read == VERIFY_IMAGE_BYTES)
+        appendf("%08lx", (unsigned long)snapshot->slot_crc32);
+    else
+        append("unavailable");
+    appendf("\r\nboard=%c metadata_magic=%08lx metadata_version=%u metadata_reserved=%u metadata_crc32=%08lx\r\n"
+            "board=%c boot_crc32=%08lx generation_start=%llu generation_end=%llu\r\n", board,
+            (unsigned long)snapshot->metadata_magic, (unsigned)snapshot->metadata_version,
+            (unsigned)snapshot->metadata_reserved, (unsigned long)snapshot->metadata_crc32, board,
+            (unsigned long)snapshot->image_crc_at_boot,
+            (unsigned long long)snapshot->generation_start, (unsigned long long)snapshot->generation_end);
+    for (unsigned core = 0; core < 2; ++core)
+        appendf("board=%c core=%u start=%lu end=%lu age_ms=%lu valid=%u\r\n", board, core,
+                (unsigned long)snapshot->start.core_ticks[core], (unsigned long)snapshot->end.core_ticks[core],
+                (unsigned long)snapshot->end.core_age_ms[core],
+                (unsigned)!!((snapshot->start.core_valid & snapshot->end.core_valid) & (1u << core)));
+}
+
+static void emit_verify_tick(uint64_t now_us) {
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!console.verify_emitted[i]) {
+            if (console.verify_ready[i]) {
+                append_verify_board(i, now_us);
+                console.verify_emitted[i] = true;
+            }
+            return;
+        }
+    }
+    /* Board rows describe their scan snapshots. Before the final verdict,
+     * discard local PASS if a change became known while those rows drained. */
+    if (console.verify_assessments[0].verdict == VERIFY_PASS) {
+        diagnostic_verify_recheck_local(&console.verify_results[0]);
+        console.verify_assessments[0] = verification_assess(&console.verify_results[0],
+                                                         console.verify_version, console.verify_crc);
+    }
+    verify_verdict_t overall = VERIFY_PASS;
+    for (unsigned i = 0; i < 2; ++i) {
+        verify_verdict_t verdict = console.verify_assessments[i].verdict;
+        if (verdict == VERIFY_FAIL || (verdict == VERIFY_UNVERIFIED && overall == VERIFY_PASS))
+            overall = verdict;
+    }
+    bool expired = now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US;
+    if (overall == VERIFY_PASS && expired)
+        overall = VERIFY_UNVERIFIED;
+    const char *reason = overall == VERIFY_PASS ? "both_match" : overall == VERIFY_FAIL ? "board_failure"
+                                                              : expired ? "expired" : "incomplete";
+    appendf("result=%s reason=%s\r\nEND verify\r\n", verify_verdict_name(overall), reason);
+    console.verify_active = false;
+    append(prompt);
+}
+
 static void command(uint64_t now_us) {
     console.line[console.line_used] = '\0';
     if (console.line_error == LINE_TOO_LONG) {
@@ -459,19 +655,19 @@ static void command(uint64_t now_us) {
         append("BEGIN help\r\n"
                "DeskHop console - all commands are read-only.\r\n"
                "\r\n"
-               "  help             Show help.\r\n"
-               "  status           Show build, boot, core checkpoints and update state.\r\n"
-               "  history [count]  Show both boards' recent events (default 16; 1..64 each).\r\n"
+               "  help                  Show help.\r\n"
+               "  status                Show build, core and update state.\r\n"
+               "  history [count]       Show recent events (default 16; 1..64 per board).\r\n"
+               "  verify <build> <crc32> Check both firmware images.\r\n"
                "\r\n"
-               "Status queries both boards by default and prints this board first.\r\n"
-               "A missing peer has a bounded timeout; older firmware may lack runtime data.\r\n"
+               "Commands query both boards; missing peers have a bounded timeout.\r\n"
                "Core counts mark diagnostic task checkpoints.\r\n"
-               "Peer observations update only when status is queried.\r\n"
-               "Confirmation is historical and version-only; progress compares the latest queries.\r\n"
-               "History merges snapshots by approximate event age; each board keeps its own order.\r\n"
-               "History and observations live in RAM until reboot.\r\n"
-               "GAP means unavailable during capture or through an older peer protocol.\r\n"
-               "The image CRC is boot metadata, not an integrity check.\r\n"
+               "Peer confirmation is historical/version-only; progress compares status queries.\r\n"
+               "History/observations are in RAM until reboot; event ages align approximately.\r\n"
+               "GAP means unavailable capture data or older peer support.\r\n"
+               "Verify CRC: full 256KiB firmware including metadata; configuration excluded.\r\n"
+               "PASS describes a fresh scan; rerun verify after changes.\r\n"
+               "Status image CRC is boot metadata only; it is not the verify CRC.\r\n"
                "Enter submits; Backspace edits; Ctrl-C cancels a line.\r\n"
                "END help\r\n");
     } else if (strcmp(console.line, "status") == 0) {
@@ -503,12 +699,19 @@ static void command(uint64_t now_us) {
             begin_history(count, now_us);
         else
             append("ERROR usage: history [count] (decimal 1..64)\r\n");
+    } else if (strcmp(console.line, "verify") == 0 || strncmp(console.line, "verify ", 7) == 0) {
+        uint16_t version;
+        uint32_t crc;
+        if (verify_arguments(console.line, &version, &crc))
+            begin_verify(version, crc, now_us);
+        else
+            append("ERROR usage: verify <major.minor> <8 hex CRC32 digits>\r\n");
     } else if (console.line_used != 0) {
         append("ERROR unknown command; type help\r\n");
     }
     console.line_used = 0;
     console.line_error = LINE_OK;
-    if (!console.peer_waiting && !console.history_active)
+    if (!console.peer_waiting && !console.history_active && !console.verify_active)
         append(prompt);
 }
 
@@ -531,6 +734,7 @@ void console_task(uint64_t now_us) {
         if (console.connected)
             console_disconnect();
         poll_history_peer();
+        poll_verify(now_us);
         return;
     }
     if (!console.connected) {
@@ -549,12 +753,18 @@ void console_task(uint64_t now_us) {
     }
 
     poll_history_peer();
+    poll_verify(now_us);
     /* Capture continues even while USB output is stalled. */
     capture_history_tick(now_us);
 
     transmit();
     if (console.tx_used)
         return;
+
+    if (console.verify_active) {
+        emit_verify_tick(now_us);
+        return;
+    }
 
     if (console.history_active) {
         emit_history_tick();

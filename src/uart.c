@@ -13,6 +13,7 @@
 #include "diagnostic_peer.h"
 #include "diagnostic_peer_history.h"
 #include "diagnostic_history.h"
+#include "diagnostic_verify.h"
 
 /* ================================================== *
  * ===============  Sending Packets  ================ *
@@ -74,6 +75,16 @@ void process_uart_tx_task(device_t *state) {
 /* ================================================== *
  * ===============  Parsing Packets  ================ *
  * ================================================== */
+
+static void handle_verify_request(uart_packet_t *packet, device_t *state) {
+    (void)state;
+    diagnostic_verify_receive(false, packet->data, time_us_64());
+}
+
+static void handle_verify_response(uart_packet_t *packet, device_t *state) {
+    (void)state;
+    diagnostic_verify_receive(true, packet->data, time_us_64());
+}
 
 static void handle_diagnostic_request(uart_packet_t *packet, device_t *state) {
     (void)state;
@@ -137,6 +148,8 @@ const uart_handler_t uart_handler[] = {
     {.type = DIAGNOSTIC_STATUS_RESPONSE_MSG, .handler = handle_diagnostic_response},
     {.type = DIAGNOSTIC_HISTORY_REQUEST_MSG, .handler = handle_history_request},
     {.type = DIAGNOSTIC_HISTORY_RESPONSE_MSG, .handler = handle_history_response},
+    {.type = DIAGNOSTIC_VERIFY_REQUEST_MSG, .handler = handle_verify_request},
+    {.type = DIAGNOSTIC_VERIFY_RESPONSE_MSG, .handler = handle_verify_response},
     {.type = FIRMWARE_UPGRADE_MSG, .handler = handle_fw_upgrade_msg},
 
     {.type = HEARTBEAT_MSG, .handler = handle_heartbeat_msg},

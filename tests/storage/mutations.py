@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from run import ROOT, SOURCES, build
+from run import ROOT, SOURCES, build, build_saturation
 
 # Each change is intentionally small and directly tied to a production invariant.
 MUTATIONS = [
@@ -57,6 +57,22 @@ MUTATIONS = [
     ("omit-console-disabled-checkpoint", "tasks.c",
      "    diagnostic_runtime_checkpoint(0);\n#if DH_CONSOLE && CFG_TUD_CDC",
      "#if DH_CONSOLE && CFG_TUD_CDC\n    diagnostic_runtime_checkpoint(0);"),
+    ("omit-verification-program-generation", "utils.c",
+     "firmware_verify_invalidate_range(target_addr, FLASH_PAGE_SIZE);",
+     "/* mutant: programming leaves verification generation unchanged */"),
+    ("omit-verification-recovery-generation", "utils.c",
+     "firmware_verify_invalidate_range((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);",
+     "/* mutant: recovery leaves verification generation unchanged */"),
+    ("exclude-metadata-from-verification-generation", "utils.c",
+     "(uint64_t)slot_start + STAGING_IMAGE_SIZE",
+     "(uint64_t)slot_start + STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE"),
+    ("verify-during-update-or-reboot", "utils.c",
+     "global_state.fw.upgrade_in_progress || global_state.fw.image_dirty\n        || global_state.reboot_requested",
+     "false"),
+    ("omit-verification-generation-check", "utils.c",
+     "(compare && generation != firmware_flash_generation)", "false"),
+    ("wrap-verification-generation", "utils.c",
+     "&& firmware_flash_generation != UINT64_MAX", "&& true"),
 ]
 
 
@@ -82,8 +98,13 @@ def main():
             # Replacing every flash-lock acquisition also catches readers via
             # balanced-release checks; all other anchors are unique.
             target.write_text(text.replace(old, new))
-            binary = build(path, source_root=path)
-            result = subprocess.run([str(binary), args.seed], capture_output=True, text=True)
+            if name == "wrap-verification-generation":
+                binary = build_saturation(path / "saturation", source_root=path)
+                command = [str(binary), args.seed, "generation-saturation"]
+            else:
+                binary = build(path, source_root=path)
+                command = [str(binary), args.seed]
+            result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode == 0:
                 raise RuntimeError(f"SURVIVED: {name}")
             details = result.stderr.splitlines()

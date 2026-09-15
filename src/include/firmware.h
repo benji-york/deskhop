@@ -25,6 +25,24 @@
  bool     firmware_image_is_valid(uint16_t, uint32_t, bool);
  void     read_flash_bytes(const uint8_t *, void *, size_t);
  bool     read_running_firmware_word(uint32_t, uint32_t *);
+
+ /* Verification reads the complete 256 KiB slot, including its metadata.
+    All calls make single nonblocking attempts in firmware->flash lock order;
+    CRC work and output stay outside these locks. Failure leaves outputs alone.
+    A generation describes this boot only and is invalidated by any overlapping
+    erase/program, even one that writes the same bytes. UINT64_MAX is invalid. */
+ typedef enum {
+     FIRMWARE_VERIFY_OK = 0,
+     FIRMWARE_VERIFY_BUSY,
+     FIRMWARE_VERIFY_UPDATE_ACTIVE,
+     FIRMWARE_VERIFY_CHANGED,
+     FIRMWARE_VERIFY_BAD_ARGUMENT,
+ } firmware_verify_io_t;
+
+ firmware_verify_io_t firmware_verify_try_start(uint64_t *, firmware_metadata_t *);
+ firmware_verify_io_t firmware_verify_try_read(uint64_t, uint32_t, uint8_t *, size_t);
+ firmware_verify_io_t firmware_verify_try_finish(uint64_t, firmware_metadata_t *);
+
  void     reboot(void);
  void     write_flash_page(uint32_t, uint8_t *);
  void     write_flash_page_erasing(uint32_t, uint8_t *, bool);

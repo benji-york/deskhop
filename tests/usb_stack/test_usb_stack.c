@@ -6,6 +6,7 @@
 #include "diagnostic_history.h"
 #include "diagnostic_peer_history.h"
 #include "diagnostic_runtime.h"
+#include "diagnostic_verify.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -37,6 +38,64 @@ static unsigned runtime_reads;
 diagnostic_runtime_snapshot_t diagnostic_runtime_snapshot(void) {
     ++runtime_reads;
     return local_runtime;
+}
+/* The production assessment policy consumes fixed scalar bridge fixtures. */
+static verify_result_t verify_queue[4], verify_fixture[2];
+static unsigned verify_queued, verify_head, verify_polls, verify_requests, verify_rechecks;
+static bool verify_accept = true, verify_auto = true;
+static uint32_t verify_token;
+static uint64_t verify_requested_at;
+static verify_scan_outcome_t verify_recheck_outcome = VERIFY_SCAN_COMPLETE;
+static void verify_publish(unsigned index, uint32_t token) {
+    CHECK(verify_queued < 4);
+    verify_result_t result = verify_fixture[index];
+    result.token = token;
+    result.remote = index != 0;
+    verify_queue[(verify_head + verify_queued++) % 4] = result;
+}
+bool diagnostic_verify_request(uint32_t token, uint64_t requested_at_us) {
+    ++verify_requests;
+    verify_token = token;
+    verify_requested_at = requested_at_us;
+    if (!verify_accept)
+        return false;
+    if (verify_auto) {
+        verify_publish(0, token);
+        verify_publish(1, token);
+    }
+    return true;
+}
+bool diagnostic_verify_poll(verify_result_t *result) {
+    ++verify_polls;
+    if (!verify_queued)
+        return false;
+    *result = verify_queue[verify_head];
+    verify_head = (verify_head + 1) % 4;
+    --verify_queued;
+    return true;
+}
+void diagnostic_verify_recheck_local(verify_result_t *result) {
+    CHECK(!result->remote);
+    ++verify_rechecks;
+    if (verify_recheck_outcome != VERIFY_SCAN_COMPLETE)
+        result->snapshot.outcome = verify_recheck_outcome;
+}
+static void verify_fixtures(void) {
+    CHECK(!verify_queued);
+    verify_auto = verify_accept = true;
+    verify_recheck_outcome = VERIFY_SCAN_COMPLETE;
+    for (unsigned i = 0; i < 2; ++i) {
+        verify_fixture[i] = (verify_result_t){.remote = i != 0, .transport = VERIFY_TRANSPORT_OK,
+            .snapshot = {.role = i, .major = 0, .minor = 101,
+                .board_id = {1,2,3,4,5,6,7,8}, .boot_session = UINT64_C(0x1122334455667788) + i,
+                .image_crc_at_boot = UINT32_C(0x89abcdef), .started_us = 1000000, .completed_us = 2000000,
+                .generation_start = 7, .generation_end = 7, .bytes_read = VERIFY_IMAGE_BYTES,
+                .slot_crc32 = UINT32_C(0x12345678), .metadata_magic = 0xf00d, .metadata_version = 201,
+                .metadata_crc32 = UINT32_C(0x89abcdef), .outcome = VERIFY_SCAN_COMPLETE,
+                .start = {.core_valid = 3, .core_ticks = {100, 200}},
+                .end = {.core_valid = 3, .core_ticks = {1100, 1200}, .core_age_ms = {0, 1}},
+            }};
+    }
 }
 /* Exercise the production ring; only the Pico lock/time adapter is replaced. */
 static history_store_t history_store;
@@ -411,9 +470,11 @@ static void console_tick(void) {
     uint64_t submitted_before = cdc_submitted_bytes;
     unsigned reads_before = history_reads;
     unsigned history_polls_before = history_peer_polls;
+    unsigned verify_polls_before = verify_polls;
     console_task(console_now_us);
     CHECK(history_reads - reads_before <= 1);
     CHECK(history_peer_polls - history_polls_before <= 1);
+    CHECK(verify_polls - verify_polls_before <= 1);
     if (connected) {
         uint32_t rx_after = tud_cdc_available();
         CHECK(rx_after <= rx_before && rx_before - rx_after <= 32);
@@ -482,7 +543,7 @@ static void cdc_status_fields(void) {
     CHECK(occurrences("BEGIN status") == 1 && occurrences("END status") == 1);
     CHECK(strstr(cdc_bytes, "board=A") != NULL);
     CHECK(strstr(cdc_bytes, "board_id=0123456789abcdef") != NULL);
-    CHECK(strstr(cdc_bytes, "build=0.100") != NULL);
+    CHECK(strstr(cdc_bytes, "build=0.101") != NULL);
     CHECK(strstr(cdc_bytes, "image_crc_at_boot=89abcdef") != NULL);
     CHECK(strstr(cdc_bytes, "board=A core=0 checkpoints=123 age_ms=0\r\n") != NULL);
     CHECK(strstr(cdc_bytes, "board=A core=1 checkpoints=456 age_ms=1\r\n") != NULL);
@@ -501,7 +562,7 @@ static void cdc_status_fields(void) {
     CHECK(strstr(cdc_bytes, "boot_session=8877665544332211") != NULL);
     CHECK(strstr(cdc_bytes, "uptime_ms=7654321") != NULL);
     CHECK(strstr(cdc_bytes, "peer=ok") != NULL);
-    CHECK(strstr(cdc_bytes, "verification=not_implemented") != NULL);
+    CHECK(strstr(cdc_bytes, "verification=available") != NULL);
     CHECK(strstr(cdc_bytes, "deskhop> ") != NULL);
 }
 
@@ -514,12 +575,14 @@ static void cdc_command_stream(void) {
     CHECK(strstr(cdc_bytes, "help") && strstr(cdc_bytes, "status"));
     CHECK(strstr(cdc_bytes, "both boards") != NULL);
     CHECK(strstr(cdc_bytes, "history [count]") != NULL);
-    CHECK(strstr(cdc_bytes, "History merges snapshots by approximate event age") != NULL);
+    CHECK(strstr(cdc_bytes, "event ages align approximately") != NULL);
     CHECK(strstr(cdc_bytes, "Core counts mark diagnostic task checkpoints") != NULL);
-    CHECK(strstr(cdc_bytes, "Confirmation is historical and version-only; progress compares the latest queries") != NULL);
-    CHECK(strstr(cdc_bytes, "observations update only when status is queried") != NULL);
-    CHECK(strstr(cdc_bytes, "History and observations live in RAM until reboot") != NULL);
-    CHECK(strstr(cdc_bytes, "GAP means unavailable during capture or through an older peer protocol") != NULL);
+    CHECK(strstr(cdc_bytes, "Peer confirmation is historical/version-only; progress compares status queries") != NULL);
+    CHECK(strstr(cdc_bytes, "progress compares status queries") != NULL);
+    CHECK(strstr(cdc_bytes, "History/observations are in RAM until reboot") != NULL);
+    CHECK(strstr(cdc_bytes, "GAP means unavailable capture data or older peer support") != NULL);
+    CHECK(strstr(cdc_bytes, "Verify CRC: full 256KiB firmware including metadata; configuration excluded") != NULL);
+    CHECK(strstr(cdc_bytes, "PASS describes a fresh scan; rerun verify after changes") != NULL);
     CHECK(occurrences("END help") == 1); /* The complete help fits the fixed TX buffer. */
 
     cdc_capture_clear();
@@ -678,6 +741,310 @@ static void cdc_runtime_rows_and_legacy(void) {
     cdc_send(erase_line);
     CHECK(occurrences("BEGIN help") == 1 && occurrences("END help") == 1);
     CHECK(occurrences("deskhop> ") == 1 && occurrences("ERROR") == 0);
+}
+
+static void verify_frame(const char *overall) {
+    CHECK(occurrences("BEGIN verify") == 1 && occurrences("END verify") == 1);
+    CHECK(strstr(cdc_bytes, "scope=both\r\nclaim=scan_snapshot\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "coverage_start=0x10000000\r\ncoverage_bytes=262144\r\n") != NULL);
+    char expected[64];
+    snprintf(expected, sizeof(expected), "\r\nresult=%s reason=", overall);
+    CHECK(strstr(cdc_bytes, expected) != NULL);
+    CHECK(strstr(cdc_bytes, "END verify\r\ndeskhop> ") != NULL);
+    CHECK(occurrences("board=A result=") == 1 && occurrences("board=B result=") == 1);
+    CHECK(strstr(cdc_bytes, "board=A result=") < strstr(cdc_bytes, "board=B result="));
+}
+
+static void cdc_verify_parser_and_results(void) {
+    verify_fixtures();
+    cdc_capture_clear();
+    unsigned rechecks_before = verify_rechecks;
+    cdc_send("ver");
+    CHECK(occurrences("BEGIN verify") == 0);
+    cdc_send("ify 0.101 12345678\r\n");
+    verify_frame("PASS");
+    CHECK(strstr(cdc_bytes, "expected_build=0.101\r\nexpected_crc32=12345678\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A result=PASS reason=match\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B result=PASS reason=match\r\n") != NULL);
+    CHECK(occurrences("bytes=262144 crc32=12345678\r\n") == 2);
+    CHECK(strstr(cdc_bytes, "board=A core=1 start=200 end=1200 age_ms=1 valid=1\r\n") != NULL);
+    CHECK(verify_rechecks == rechecks_before + 2 && occurrences("deskhop> ") == 1);
+
+    const char *invalid[] = {
+        "verify\n", "verify 0.101\n", "verify 0.101 1234567\n", "verify 0.101 123456789\n",
+        "verify 0.101 0x12345678\n", "verify 0.101 1234567g\n", "verify +0.101 12345678\n",
+        "verify -0.101 12345678\n", "verify 0.-1 12345678\n", "verify 0.1000 12345678\n",
+        "verify 65.436 12345678\n", "verify 66.0 12345678\n", "verify 0. 12345678\n",
+        "verify .101 12345678\n", "verify 4294967296.1 12345678\n", "verify 0.4294967296 12345678\n",
+        "verify 0.101 12345678 extra\n", "verify  0.101 12345678\n", "verify 0.101  12345678\n",
+        "verify 0.101 12345678 \n", "verify 0.101.1 12345678\n",
+    };
+    unsigned requests_before = verify_requests;
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        cdc_capture_clear();
+        cdc_send(invalid[i]);
+        CHECK(occurrences("ERROR usage: verify") == 1 && occurrences("BEGIN verify") == 0);
+        CHECK(occurrences("deskhop> ") == 1);
+    }
+    CHECK(verify_requests == requests_before);
+    cdc_capture_clear();
+    cdc_send("verify 00.0101 ABCDEF12\n");
+    verify_frame("FAIL");
+    CHECK(strstr(cdc_bytes, "expected_build=0.101\r\nexpected_crc32=abcdef12\r\n") != NULL);
+    cdc_capture_clear();
+    cdc_send("verify 65.435 00000000\n");
+    verify_frame("FAIL");
+    CHECK(strstr(cdc_bytes, "expected_build=65.435") != NULL);
+
+    for (unsigned side = 0; side < 2; ++side) {
+        for (unsigned fault = 0; fault < 12; ++fault) {
+            verify_fixtures();
+            verify_result_t *result = &verify_fixture[side];
+            const char *reason = "";
+            const char *verdict = "UNVERIFIED";
+            switch (fault) {
+            case 0: result->snapshot.minor = 102; result->snapshot.metadata_version = 202;
+                    reason = "build_mismatch"; verdict = "FAIL"; break;
+            case 1: result->snapshot.slot_crc32++; reason = "crc_mismatch"; verdict = "FAIL"; break;
+            case 2: result->snapshot.metadata_magic = 0; reason = "metadata_invalid"; verdict = "FAIL"; break;
+            case 3: result->snapshot.outcome = VERIFY_SCAN_UPDATE_ACTIVE; reason = "update_active"; break;
+            case 4: result->snapshot.generation_end++; reason = "image_changed"; break;
+            case 5: result->transport = VERIFY_TRANSPORT_BUSY; reason = "busy"; break;
+            case 6: result->transport = VERIFY_TRANSPORT_TIMEOUT; reason = "timeout_or_unsupported"; break;
+            case 7: result->transport = VERIFY_TRANSPORT_INVALID; reason = "invalid_response"; break;
+            case 8: result->snapshot.end.core_valid = 1; reason = "core_unavailable"; break;
+            case 9: result->snapshot.end.core_ticks[1] = result->snapshot.start.core_ticks[1];
+                    reason = "core_progress_unverified"; break;
+            case 10: result->snapshot.role ^= 1; reason = "invalid_response"; break;
+            case 11: result->snapshot.bytes_read = 128; reason = "invalid_response"; break;
+            }
+            cdc_capture_clear();
+            cdc_send("verify 0.101 12345678\n");
+            verify_frame(verdict);
+            char expected[128];
+            snprintf(expected, sizeof(expected), "board=%c result=%s reason=%s\r\n", side ? 'B' : 'A', verdict, reason);
+            CHECK(strstr(cdc_bytes, expected) != NULL);
+            if (fault == 11) CHECK(strstr(cdc_bytes, "bytes=128 crc32=unavailable") != NULL);
+        }
+    }
+    /* Reading the final byte does not imply the final guard succeeded or that
+     * the scan assigned its CRC. Never render that unassigned zero as evidence. */
+    const verify_scan_outcome_t unfinished[] = {VERIFY_SCAN_CHANGED, VERIFY_SCAN_TIMEOUT};
+    for (unsigned side = 0; side < 2; ++side) {
+        for (unsigned fault = 0; fault < sizeof(unfinished) / sizeof(unfinished[0]); ++fault) {
+            verify_fixtures();
+            verify_fixture[side].snapshot.outcome = unfinished[fault];
+            verify_fixture[side].snapshot.bytes_read = VERIFY_IMAGE_BYTES;
+            verify_fixture[side].snapshot.slot_crc32 = 0;
+            cdc_capture_clear();
+            cdc_send("verify 0.101 12345678\n");
+            verify_frame("UNVERIFIED");
+            CHECK(occurrences("bytes=262144 crc32=unavailable\r\n") == 1);
+            CHECK(occurrences("bytes=262144 crc32=12345678\r\n") == 1);
+            CHECK(strstr(cdc_bytes, "bytes=262144 crc32=00000000") == NULL);
+        }
+    }
+    verify_fixtures();
+    verify_fixture[0].transport = VERIFY_TRANSPORT_TIMEOUT;
+    verify_fixture[1].snapshot.slot_crc32++;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    verify_frame("FAIL"); // A definite mismatch dominates the other board's missing evidence.
+    verify_fixtures();
+    verify_accept = false;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    verify_frame("UNVERIFIED");
+    CHECK(occurrences("result=UNVERIFIED reason=busy") == 2);
+    verify_fixtures();
+    for (unsigned i = 0; i < 2; ++i) {
+        verify_snapshot_t *snapshot = &verify_fixture[i].snapshot;
+        snapshot->major = 65; snapshot->minor = 435;
+        memset(snapshot->board_id, 0xff, sizeof(snapshot->board_id));
+        snapshot->boot_session = UINT64_MAX;
+        snapshot->started_us = UINT64_MAX - 1000000;
+        snapshot->completed_us = UINT64_MAX;
+        snapshot->generation_start = snapshot->generation_end = UINT64_MAX;
+        snapshot->slot_crc32 = snapshot->image_crc_at_boot = snapshot->metadata_crc32 = UINT32_MAX;
+        snapshot->metadata_magic = UINT32_MAX;
+        snapshot->metadata_version = snapshot->metadata_reserved = UINT16_MAX;
+        snapshot->start.core_ticks[0] = snapshot->start.core_ticks[1] = UINT32_MAX;
+        snapshot->end.core_ticks[0] = snapshot->end.core_ticks[1] = UINT32_MAX;
+        snapshot->end.core_age_ms[0] = snapshot->end.core_age_ms[1] = UINT32_MAX;
+    }
+    cdc_capture_clear();
+    cdc_send("verify 65.435 FFFFFFFF\n");
+    verify_frame("FAIL");
+    CHECK(occurrences("metadata_magic=ffffffff metadata_version=65535 metadata_reserved=65535 metadata_crc32=ffffffff\r\n") == 2);
+    CHECK(occurrences("generation_start=18446744073709551615 generation_end=18446744073709551615\r\n") == 2);
+    CHECK(occurrences("start=4294967295 end=4294967295 age_ms=4294967295 valid=1\r\n") == 4);
+    CHECK(occurrences("END verify") == 1 && occurrences("deskhop> ") == 1);
+    verify_fixtures();
+    console_init(OUTPUT_B, "fedcba9876543210", UINT64_C(0x8877665544332211), UINT32_C(0x12345678));
+    console_drain();
+    verify_fixture[0].snapshot.role = 1;
+    verify_fixture[1].snapshot.role = 0;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    CHECK(strstr(cdc_bytes, "board=B result=PASS reason=match") != NULL);
+    CHECK(strstr(cdc_bytes, "board=A result=PASS reason=match") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B result=") < strstr(cdc_bytes, "board=A result="));
+    CHECK(strstr(cdc_bytes, "\r\nresult=PASS reason=both_match\r\nEND verify\r\ndeskhop> ") != NULL);
+    console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
+    console_drain();
+    verify_fixtures();
+}
+
+static void cdc_verify_backpressure_freshness_and_reconnect(void) {
+    /* A local change after its PASS row must invalidate the final verdict.
+     * The already-sent rows retain their scan evidence, including the peer's. */
+    const verify_scan_outcome_t late_guard[] = {
+        VERIFY_SCAN_CHANGED, VERIFY_SCAN_BUSY, VERIFY_SCAN_UPDATE_ACTIVE,
+    };
+    for (unsigned fault = 0; fault < sizeof(late_guard) / sizeof(late_guard[0]); ++fault) {
+        verify_fixtures();
+        verify_auto = false;
+        cdc_capture_clear();
+        unsigned rechecks_before = verify_rechecks;
+        cdc_send("verify 0.101 12345678\n");
+        verify_publish(0, verify_token);
+        console_drain();
+        CHECK(strstr(cdc_bytes, "board=A result=PASS reason=match\r\n") != NULL);
+        CHECK(occurrences("board=B result=") == 0 && occurrences("END verify") == 0);
+        CHECK(verify_rechecks == rechecks_before + 1);
+        verify_recheck_outcome = late_guard[fault];
+        verify_publish(1, verify_token);
+        console_drain();
+        verify_frame("UNVERIFIED");
+        CHECK(verify_rechecks == rechecks_before + 2);
+        CHECK(strstr(cdc_bytes, "board=A result=PASS reason=match\r\n") != NULL);
+        CHECK(strstr(cdc_bytes, "board=B result=PASS reason=match\r\n") != NULL);
+        CHECK(occurrences("bytes=262144 crc32=12345678\r\n") == 2);
+        CHECK(strstr(cdc_bytes, "\r\nresult=UNVERIFIED reason=incomplete\r\nEND verify") != NULL);
+    }
+
+    verify_fixtures();
+    verify_auto = false;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    CHECK(occurrences("END verify") == 0 && occurrences("board=A result=") == 0);
+    verify_publish(1, verify_token); // The peer can finish first; output remains local-first.
+    console_pump(8);
+    CHECK(occurrences("board=B result=") == 0);
+    verify_publish(0, verify_token);
+    verify_recheck_outcome = VERIFY_SCAN_CHANGED;
+    console_drain();
+    verify_frame("UNVERIFIED");
+    CHECK(strstr(cdc_bytes, "board=A result=UNVERIFIED reason=image_changed") != NULL);
+    CHECK(strstr(cdc_bytes, "board=B result=PASS reason=match") != NULL);
+
+    verify_fixtures();
+    verify_auto = false;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    verify_publish(0, verify_token);
+    console_pump(2);
+    verify_fixture[0].snapshot.slot_crc32++;
+    verify_publish(0, verify_token); // A duplicate must not replace accepted local evidence.
+    verify_publish(1, verify_token);
+    console_drain();
+    verify_frame("PASS");
+    CHECK(occurrences("bytes=262144 crc32=12345678\r\n") == 2);
+
+    verify_fixtures();
+    verify_auto = false;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    verify_publish(0, verify_token);
+    console_drain();
+    CHECK(strstr(cdc_bytes, "board=A result=PASS reason=match") != NULL);
+    CHECK(occurrences("END verify") == 0);
+    console_now_us = verify_requested_at + 3500000;
+    console_drain();
+    verify_frame("UNVERIFIED");
+    CHECK(strstr(cdc_bytes, "board=B result=UNVERIFIED reason=expired") != NULL);
+    CHECK(strstr(cdc_bytes, "\r\nresult=UNVERIFIED reason=expired") != NULL);
+
+    verify_fixtures();
+    cdc_capture_clear();
+    complete_short_out(0x06, "verify 0.101 12345678\nstatus\n", 29);
+    for (unsigned tick = 0; tick < 64; ++tick) console_tick();
+    CHECK(!verify_queued && endpoint(0x86)->pending && tud_cdc_available() == 7);
+    uint8_t keys[6] = {HID_KEY_E};
+    CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+    host_count = 0;
+    complete(0x81, NULL, 0);
+    CHECK(host_count == 9 && host_bytes[3] == HID_KEY_E);
+    console_now_us = verify_requested_at + 3500000;
+    console_drain();
+    verify_frame("UNVERIFIED");
+    CHECK(occurrences("result=UNVERIFIED reason=expired") == 3);
+    CHECK(occurrences("result=PASS") == 0);
+    CHECK(strstr(cdc_bytes, "END verify") < strstr(cdc_bytes, "BEGIN status"));
+    cdc_status_fields();
+
+    verify_fixtures();
+    verify_auto = false;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    uint32_t abandoned = verify_token;
+    console_now_us = verify_requested_at + 3500000;
+    console_drain();
+    verify_frame("UNVERIFIED");
+    CHECK(occurrences("result=UNVERIFIED reason=expired") == 3);
+    verify_publish(0, abandoned);
+    verify_publish(1, abandoned);
+    cdc_capture_clear();
+    console_drain();
+    CHECK(cdc_count == 0 && !verify_queued);
+
+    cdc_send("verify 0.101 12345678\n");
+    CHECK(verify_token != abandoned);
+    verify_publish(0, abandoned);
+    verify_publish(1, abandoned);
+    console_pump(8);
+    CHECK(occurrences("board=A result=") == 0);
+    verify_publish(1, verify_token);
+    verify_publish(0, verify_token);
+    console_drain();
+    verify_frame("PASS");
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    console_drain();
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    abandoned = verify_token;
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    verify_publish(0, abandoned);
+    verify_publish(1, abandoned);
+    unsigned polls_before = verify_polls;
+    console_tick();
+    CHECK(verify_queued == 1 && verify_polls == polls_before + 1);
+    console_tick();
+    CHECK(!verify_queued && verify_polls == polls_before + 2);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("END verify") == 0 && occurrences("board=A result=") == 0);
+    verify_fixtures();
+    cdc_capture_clear();
+    complete_short_out(0x06, "verify 0.101 12345678\n", 22);
+    for (unsigned tick = 0; tick < 32; ++tick) console_tick();
+    CHECK(endpoint(0x86)->pending && !verify_queued);
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    complete(0x86, NULL, 0);
+    if (endpoint(0x86)->pending) {
+        CHECK(endpoint(0x86)->length == 0);
+        complete(0x86, NULL, 0);
+    }
+    console_drain();
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    cdc_capture_clear();
+    console_drain();
+    CHECK(occurrences("END verify") == 0 && occurrences("board=A result=") == 0);
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    verify_frame("PASS");
 }
 
 static void history_fill(unsigned count) {
@@ -1398,6 +1765,10 @@ int main(void) {
     cdc_command_stream();
     scenario = "CDC runtime rows, legacy peer and bounded response chunks";
     cdc_runtime_rows_and_legacy();
+    scenario = "CDC verification grammar and policy results";
+    cdc_verify_parser_and_results();
+    scenario = "CDC verification freshness, backpressure and reconnect";
+    cdc_verify_backpressure_freshness_and_reconnect();
     scenario = "CDC history counts and ring wrap";
     cdc_history_count_and_wrap();
     scenario = "CDC history event fields";

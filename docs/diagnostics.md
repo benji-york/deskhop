@@ -34,28 +34,52 @@ physical disk-free enumeration check passed; the record is in
 5. **Update/boot observations (v0.100 deployed and input checked):** record receiving, validation, reboot pending,
    and new executing-build observations separately. Require new boot sessions
    after an observed update, then increasing uptime and progress on both cores.
-6. **Image assurance:** `verify <expected-build>` checks both boards by default,
-   with fresh observations and boot-time flash checksums compared against the
-   expected artifact. Report checksum coverage; invalidate cached verification
-   when flash changes. Results distinguish PASS, FAIL, and UNVERIFIED with reasons.
+6. **Image assurance (v0.101 deployed and input checked):** `verify <build> <crc32>` checks both
+   boards by default against the expected artifact. Each query freshly scans
+   the complete 262,144-byte firmware slot, including metadata and padding.
+   Results distinguish PASS, FAIL, and UNVERIFIED with reasons; scans that
+   overlap an update cannot pass. There is no cached verification result.
 
 Additional events and counters follow troubleshooting needs discovered during
 these sessions. Histories are volatile across reboot. No peer/history/verification
 commands are advertised before their implementation exists.
 
-## Update observations slice (v0.100 deployed and input checked)
+## Image assurance slice (v0.101 deployed and input checked)
+
+`verify 0.101 <eight-hex-digit-full-slot-crc>` adds one command. Its two board
+results include executing identity, scan interval, coverage, fresh CRC, metadata,
+and core progress. PASS requires both image/build matches and both cores advancing
+during each scan. The checksum supplied here covers the full binary; it differs
+from the payload-only checksum shown by `status` as `image_crc_at_boot`.
+
+The [deployment record](testing/verification-v101.md) describes exact verdicts,
+work bounds, and the physical results. Pico A's disk-free flash passed full
+readback, unchanged-settings, and Mac USB/media checks. A live 44-status capture
+observed B receiving target v0.101, reaching reboot pending, starting a new boot
+session, and advancing both core counters to `update=confirmed`.
+
+Both boards now execute v0.101. A subsequent 5.537-second serial check passed
+five statuses, two combined histories, and fresh PASS/FAIL/PASS image scans using
+the correct/wrong/correct full-slot CRC. The correct command is
+`verify 0.101 2db89640`; the separate boot metadata CRC is `be404f8f`.
+A has an independent external readback; B's full-slot CRC came from its own
+firmware scanner. A result describes its scan interval. Benji confirmed
+"Everything works" after typing, trackball/buttons, and Layer 3 S switching to
+the other Mac and back.
+
+## Update observations slice (v0.100 previously deployed and input checked)
 
 `status` now includes both cores' diagnostic checkpoints and updater phase,
 source, byte progress, target, and attempt. Fresh peer queries distinguish first
 contact from a new boot and compare both core counters. RAM history records
 sparse update milestones and peer observations. The [deployment record](testing/update-observations-v100.md)
 describes the exact evidence required for target-version confirmation, legacy
-protocol support, limits, and the physical flash/readback/serial results. Both boards now report
+protocol support, limits, and the physical flash/readback/serial results. Both boards reported
 v0.100 with advancing core checkpoints; A's history captured B's old v0.99 boot,
 new v0.100 boot, and later progress. Benji confirmed "Everything works" after the input and switch-and-back check
 on both Macs. Observations are
 query-driven and volatile; the first v0.99-to-v0.100 rollout cannot prove the
-whole update retrospectively. Image integrity remains the next slice.
+whole update retrospectively. Image integrity was the following slice.
 
 ## Peer history slice (v0.99 deployed and input checked)
 
@@ -146,7 +170,7 @@ deskhop>
 
 The placeholders illustrate the format introduced in v0.97. Its 2026-09-14
 deployment confirmed both boards executing that version, as recorded below;
-the current v0.99 observation is recorded above. With a terminal
+the later deployment observations are recorded above. With a terminal
 on B, B prints first. Builds may differ during propagation. The peer snapshot
 is taken when it accepts the request; the local snapshot is taken when the
 command is processed. Their uptimes have independent boot origins and are not

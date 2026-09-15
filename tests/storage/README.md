@@ -63,6 +63,16 @@ at reset entry; it does not infer that volatile history survives a real reset.
 The core 1 diagnostic transport is a boundary stub here that checks checkpoint
 publication before transport entry. Dedicated peer suites exercise its UART work.
 
+The verification guard also runs from production `utils.c`. Only
+`dh_critical_section_try_enter` is replaced by a native one-attempt lock primitive;
+the RP2040 implementation lives in `src/include/critical_try.h`. Guard tests
+preserve the other core's lock ownership and both interrupt masks, prohibit any
+blocking acquisition inside the API, and observe each actual flash copy. They
+read all 1,024 pages, including the metadata sector, and compare the resulting
+full-slot CRC with the independent bit-at-a-time oracle. This CRC differs from
+the payload checksum stored in boot metadata. These tests cover the flash guard;
+console/peer verification policy and scan scheduling have their own suites.
+
 ## Coverage and oracles
 
 | Scenario | Actual behavior checked | Independent oracle / model boundary |
@@ -84,17 +94,29 @@ publication before transport entry. Dedicated peer suites exercise its UART work
 | Update history | Successful and corrupt full peer/UF2 images; receiving, 25/50/75/100% progress, validating, reboot pending or failure | Exact seven-record timelines in the real ring; failure visible before reset; no duplicate progress-age refresh, invalid-UF2 events, or stale peer takeover |
 | Update state changes | Clean abandonment, dirty pause, resume, live-peer stall restart, source version/CRC changes, host takeover | Runtime phase/target/attempt and retained-event assertions against actual updater branches |
 | Core checkpoints and observation bounds | Both diagnostic task entries, console disabled, invalid core numbers, duplicate/decreasing/out-of-range progress and paused progress | Exact counters/ages; update begin preserves core counters; rejected progress and phase changes do not refresh progress age; duplicate phase emits no extra row |
+| Full-slot verification reads | Actual start/read/finish APIs over all 262,144 slot bytes, including live metadata; mutable updater metadata deliberately differs | Exact 1,024-page contents and independent full-slot CRC; at most one 256-byte copy per call, CRC outside locks |
+| Nonblocking verification | Firmware lock busy, flash lock busy, IRQ already disabled, unrelated config lock held, invalid pointers/lengths/ranges, active/dirty update and pending reboot | One attempt per needed lock, no blocking acquisition, no leaked ownership/IRQ state, no copied bytes on refusal |
+| Verification generation | Identical programming, previously read bytes, reserved metadata, recovery erase, nonoverlapping settings/staging writes | Old generation refuses subsequent reads/finish; settings/staging writes preserve generation; counter exhaustion remains invalid instead of wrapping |
 
-`mutations.py` compiles and runs fifteen isolated production variants. It must kill all
+`mutations.py` compiles and runs twenty-one isolated production variants. It must kill all
 of them at runtime: duplicate UF2 programming, early completion, skipped embedded
 CRC, UF2 after reboot reservation, consuming a word on TX failure, premature page
 zero commit, missing final page, stale response acceptance, config-save guard
 removal, removal of cross-core flash locking, SET_VAL bypassing the config
 snapshot lock, missing peer/USB progress observations, missing failure observation
 before reset, and suppressing the core 0 checkpoint when the console is disabled.
+Verification variants omit program/recovery invalidation, exclude metadata from
+invalidation, allow an active update/reboot, ignore generation changes, or wrap
+the exhausted counter.
 Compile failures do not count.
 This demonstrates sensitivity to these concrete errors; it is not a universal
 mutation score or proof of correctness.
+
+The generation-exhaustion fixture builds a temporary copy with only the private
+startup generation initialized to `UINT64_MAX - 1`. It runs the actual guard and
+write hooks through exhaustion and repeated later writes. Production has no
+test setter or configurable generation. The wrap mutant uses that same fixture;
+normal storage seeds continue to start at zero.
 
 The configuration format remains 10 in firmware v0.94. `save_config` copies RAM
 under a short config lock and calculates the persisted checksum from that copy;

@@ -13,8 +13,9 @@ from test_mouse_extra import SCENARIOS as MOUSE_EXTRA, BACKGROUND_FALSE as MOUSE
 from test_selection import SCENARIOS as SELECTION
 from test_peer_status import SCENARIOS as PEER_STATUS
 from test_peer_history import SCENARIOS as PEER_HISTORY
+from test_verification import SCENARIOS as VERIFICATION
 BACKGROUND_FALSE = BEHAVIOR_BACKGROUND_FALSE | MOUSE_BACKGROUND_FALSE
-SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,**PEER_STATUS,**PEER_HISTORY,'generated':scenario_generated}
+SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,**PEER_STATUS,**PEER_HISTORY,**VERIFICATION,'generated':scenario_generated}
 
 def run_case(name,seed,library=None,artifact_dir=None,core_order=None,expected_gap=False):
     fn=KNOWN_GAPS[name] if expected_gap else SCENARIOS[name]

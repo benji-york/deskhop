@@ -4,6 +4,7 @@
 #include "diagnostic_peer_history.h"
 #include "diagnostic_history.h"
 #include "peer_observation.h"
+#include "diagnostic_verify.h"
 
 typedef struct { uint32_t token; uint64_t requested_at_us; } request_t;
 static queue_t requests, results;
@@ -17,10 +18,12 @@ static peer_status_result_t pending_result;
 static bool result_pending;
 static bool query_completed;
 static uint64_t last_query_completed_us;
-static bool tx_attempted, history_first;
+static bool tx_attempted;
+static unsigned first_service;
 static uint64_t last_tx_attempt_us;
 
 void diagnostic_peer_shutdown(void) {
+    diagnostic_verify_shutdown();
     diagnostic_peer_history_shutdown();
     if (initialized) {
         queue_free(&requests);
@@ -37,11 +40,13 @@ void diagnostic_peer_init(const peer_status_snapshot_t *snapshot) {
     peer_status_init(&protocol, identity.role);
     result_pending = false;
     query_completed = false;
-    tx_attempted = history_first = false;
+    tx_attempted = false;
+    first_service = 0;
     queue_init(&requests, sizeof(request_t), 1);
     queue_init(&results, sizeof(peer_status_result_t), 1);
     initialized = true;
     diagnostic_peer_history_init(snapshot);
+    diagnostic_verify_init(snapshot);
 }
 
 bool diagnostic_peer_request(uint32_t token, uint64_t requested_at_us) {
@@ -119,14 +124,16 @@ static void status_task(uint64_t now_us) {
 void diagnostic_peer_task(uint64_t now_us) {
     if (!initialized)
         return;
-    /* One shared UART attempt per millisecond, including queue refusals.
-     * Rotate first service so long history transfers cannot starve status. */
-    if (history_first)
-        diagnostic_peer_history_task(now_us);
-    status_task(now_us);
-    if (!history_first)
-        diagnostic_peer_history_task(now_us);
-    history_first = !history_first;
+    /* All services get CPU work every tick; rotate UART priority across all
+     * three while preserving one shared attempt per millisecond. */
+    for (unsigned n = 0; n < 3; ++n) {
+        switch ((first_service + n) % 3) {
+        case 0: status_task(now_us); break;
+        case 1: diagnostic_peer_history_task(now_us); break;
+        case 2: diagnostic_verify_task(now_us); break;
+        }
+    }
+    first_service = (first_service + 1) % 3;
 }
 
 void diagnostic_peer_receive(bool response, const uint8_t data[8], uint64_t now_us) {
