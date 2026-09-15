@@ -20,7 +20,7 @@
 typedef struct { unsigned unused; } queue_t;
 typedef struct {
     uint8_t kbd_dev_addr, kbd_instance;
-    uint8_t active_output, board_role, max_kbd_idx;
+    uint8_t active_output, board_role, max_kbd_idx, peer_modifiers;
     uint8_t keyboard_leds_desired[NUM_SCREENS];
     bool tud_connected, keyboard_connected, mouse_connected;
     bool reboot_requested, config_mode_active;
@@ -29,6 +29,10 @@ typedef struct {
     reboot_hotkey_source_t reboot_hotkey_source[MAX_DEVICES];
     hid_interface_t iface[MAX_DEVICES][MAX_INTERFACES];
     queue_t kbd_queue;
+    hid_keyboard_report_t kbd_latest;
+    bool kbd_latest_pending;
+    uint32_t kbd_host_generation;
+    uint32_t kbd_remote_generation;
     struct {
         bool enforce_ports, force_kbd_boot_protocol, force_mouse_boot_mode;
     } config;
@@ -101,3 +105,9 @@ void tuh_hid_report_received_cb(uint8_t, uint8_t, const uint8_t *, uint16_t);
 #define DECLARE_HANDLER(name) void name(device_t *, hid_keyboard_report_t *);
 HID_TEST_HOTKEY_HANDLERS(DECLARE_HANDLER)
 #undef DECLARE_HANDLER
+
+void keyboard_host_reset(device_t *);
+void keyboard_sync_publish(void);
+void keyboard_sync_reset(void);
+void firmware_update_lock(void);
+void firmware_update_unlock(void);

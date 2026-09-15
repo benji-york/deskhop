@@ -78,13 +78,13 @@ def scenario_critical_queue(s):
     attach(s)
     s.do(0,'endpoint',0,1,0);s.do(0,'fill',0,128)
     start=s.now;s.do(0,'select',1)
-    # Critical release waits exactly the production 100 ms boundary, then
-    # requests watchdog reboot instead of reporting success after a drop.
-    s.expect(0,'reboot',1)
-    s.expect(0,'kbd_queue',128)
-    s.check('time_range',start+100000,start+100999)
+    # A focus boundary discards obsolete queued downs and retains all-up;
+    # keyboard backpressure never initiates reset or blocks the input core.
+    s.expect(0,'reboot',0)
+    s.expect(0,'kbd_queue',1)
+    s.check('time_range',start,start+999)
     s.do(0,'endpoint',0,0,0);s.advance(510000)
-    s.expect(0,'stopped',1)
+    s.expect(0,'stopped',0);s.expect_report(0,1,keyboard())
 
 def scenario_uart_queue_switch(s):
     attach(s)

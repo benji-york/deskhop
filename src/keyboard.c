@@ -11,8 +11,6 @@
 
 #include "main.h"
 
-#define KBD_CRITICAL_QUEUE_TIMEOUT_US 100000
-
 /* ==================================================== *
  * Hotkeys to trigger actions via the keyboard.
  * ==================================================== */
@@ -210,6 +208,7 @@ void release_all_keys(device_t *state) {
     memset(state->local_kbd_states, 0, sizeof(state->local_kbd_states));
     memset(&state->remote_kbd_state, 0, sizeof(hid_keyboard_report_t));
     publish_local_modifiers(state);
+    keyboard_sync_publish();
     
     static hid_keyboard_report_t empty_report = {0};
     queue_kbd_report_critical(&empty_report, state);
@@ -226,88 +225,93 @@ void combine_kbd_states(device_t *state, hid_keyboard_report_t *combined_report)
         add_keys(combined_report, &state->local_kbd_states[i]);
     }
     
-    /* Add remote keyboard */
-    combined_report->modifier |= state->remote_kbd_state.modifier;
-    add_keys(combined_report, &state->remote_kbd_state);
+    /* A USB reset invalidates the peer cache before core 1's next sync tick. */
+    if (state->kbd_remote_generation == state->kbd_host_generation) {
+        combined_report->modifier |= state->remote_kbd_state.modifier;
+        add_keys(combined_report, &state->remote_kbd_state);
+    }
 }
 
 /* ==================================================== *
  * Keyboard Queue Section
  * ==================================================== */
 
+/* The short firmware lock serializes the FIFO and durable tail with core 0.
+ * USB submission is nonblocking; no polling/wait/flash operation occurs here. */
 void process_kbd_queue_task(device_t *state) {
-    hid_keyboard_report_t report;
-
-    /* If we're not connected, we have nowhere to send reports to. */
     if (!state->tud_connected)
         return;
-
-    /* Peek first, if there is anything there... */
-    if (!queue_try_peek(&state->kbd_queue, &report))
+    hid_keyboard_report_t waiting;
+    if (!queue_try_peek(&state->kbd_queue, &waiting))
         return;
-
-    /* If we are suspended, let's wake the host up */
     if (tud_suspended())
         tud_remote_wakeup();
-
-    /* If it's not ok to send yet, we'll try on the next pass */
     if (!tud_hid_n_ready(ITF_NUM_HID))
         return;
 
-    /* ... try sending it to the host, if it's successful */
-    bool succeeded = tud_hid_keyboard_report(REPORT_ID_KEYBOARD, report.modifier, report.keycode);
-
-    /* ... then we can remove it from the queue. Race conditions shouldn't happen [tm] */
-    if (succeeded)
+    firmware_update_lock();
+    hid_keyboard_report_t report;
+    if (queue_try_peek(&state->kbd_queue, &report)
+        && tud_hid_keyboard_report(REPORT_ID_KEYBOARD, report.modifier, report.keycode))
         queue_try_remove(&state->kbd_queue, &report);
+    if (state->kbd_latest_pending && queue_try_add(&state->kbd_queue, &state->kbd_latest))
+        state->kbd_latest_pending = false;
+    firmware_update_unlock();
+}
+
+static void queue_kbd_report_locked(hid_keyboard_report_t *report, device_t *state) {
+    if (state->tud_connected) {
+        state->kbd_latest = *report;
+        /* Once overflowed, retain only the latest tail until a slot opens.
+         * Never append newer transitions ahead of that pending tail. */
+        if (state->kbd_latest_pending || !queue_try_add(&state->kbd_queue, report))
+            state->kbd_latest_pending = true;
+    }
 }
 
 void queue_kbd_report(hid_keyboard_report_t *report, device_t *state) {
-    /* It wouldn't be fun to queue up a bunch of messages and then dump them all on host */
-    if (!state->tud_connected)
-        return;
-
-    queue_try_add(&state->kbd_queue, report);
+    firmware_update_lock();
+    queue_kbd_report_locked(report, state);
+    firmware_update_unlock();
 }
 
-/* Key-up reports are switch-critical: silently dropping one can leave a
-   modifier latched in the host's input stack. A functioning endpoint normally
-   frees a slot within one USB poll. Bound the wait so an unresponsive endpoint
-   cannot hang core 1 forever; rebooting is the fail-safe because it resets both
-   the USB device and all internal keyboard state. */
+void keyboard_queue_current(device_t *state) {
+    firmware_update_lock();
+    hid_keyboard_report_t combined;
+    combine_kbd_states(state, &combined);
+    queue_kbd_report_locked(&combined, state);
+    firmware_update_unlock();
+}
+
 bool queue_kbd_report_critical(hid_keyboard_report_t *report, device_t *state) {
-    if (!state->tud_connected)
-        return false;
-
-    uint64_t started = time_us_64();
-    while (!queue_try_add(&state->kbd_queue, report)) {
-        if (!state->tud_connected)
-            return false;
-
-        if (time_us_64() - started >= KBD_CRITICAL_QUEUE_TIMEOUT_US) {
-            state->reboot_requested = true;
-            return false;
-        }
-
-        tight_loop_contents();
-    }
-
-    return true;
+    queue_kbd_report(report, state);
+    return state->tud_connected;
 }
 
-/* If keys need to go locally, queue packet to kbd queue, else send them through UART */
-void send_key(hid_keyboard_report_t *report, device_t *state) {
-    /* Create a combined report from all device states */
-    hid_keyboard_report_t combined_report;
-    combine_kbd_states(state, &combined_report);
+/* Bus reset/unplug cannot retain historical downs for a newly enumerated host.
+ * The next accepted source state supplies the current state, without replay. */
+void keyboard_host_reset(device_t *state) {
+    firmware_update_lock();
+    hid_keyboard_report_t discarded;
+    while (queue_try_remove(&state->kbd_queue, &discarded)) {}
+    state->kbd_latest_pending = false;
+    ++state->kbd_host_generation;
+    state->peer_modifiers = 0;
+    state->kbd_latest = (hid_keyboard_report_t){0};
+    firmware_update_unlock();
+}
 
-    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
-        /* Queue the combined report */
-        queue_kbd_report(&combined_report, state);
-    } else {
-        /* Send the combined report to ensure all keys are included */
-        queue_packet((uint8_t *)&combined_report, KEYBOARD_REPORT_MSG, KBD_REPORT_LENGTH);
-    }
+void keyboard_focus_changed(device_t *state) {
+    keyboard_host_reset(state);
+    release_all_keys(state);
+    keyboard_sync_reset();
+}
+
+void send_key(hid_keyboard_report_t *report, device_t *state) {
+    (void)report;
+    keyboard_sync_publish();
+    if (CURRENT_BOARD_IS_ACTIVE_OUTPUT)
+        keyboard_queue_current(state);
 }
 
 /* Decide if consumer control reports go local or to the other board */
@@ -374,8 +378,10 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
     publish_local_modifiers(state);
     record_local_activity(state, state->active_output);
 
-    if (reboot_result == REBOOT_HOTKEY_SWALLOW)
+    if (reboot_result == REBOOT_HOTKEY_SWALLOW) {
+        send_key(&stored_report, state);
         return;
+    }
 
     if (reboot_result == REBOOT_HOTKEY_TAP)
         blink_led(state);
@@ -394,6 +400,15 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
         /* Provide visual feedback we received the action */
         if (hotkey->acknowledge)
             blink_led(state);
+
+        /* Consumed chords must never enter a later source snapshot or another
+         * keyboard's aggregate. Also deliver any release hidden by the chord. */
+        if (!hotkey->pass_to_os) {
+            stored_report = (hid_keyboard_report_t){0};
+            update_kbd_state(state, &stored_report, itf);
+            publish_local_modifiers(state);
+            send_key(&stored_report, state);
+        }
 
         /* Execute the corresponding handler */
         hotkey->action_handler(state, &new_report);

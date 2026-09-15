@@ -57,7 +57,7 @@ static bool request_graceful_reboot(device_t *state, bool notify_peer) {
 
     /* Queue host all-up after the reboot decision. Core 0 continues servicing
        HID and UART queues throughout the watchdog's 500 ms grace period. */
-    release_all_keys(state);
+    keyboard_focus_changed(state);
     return true;
 }
 
@@ -207,7 +207,7 @@ void config_enable_hotkey_handler(device_t *state, hid_keyboard_report_t *report
         watchdog_hw->scratch[6] = MAGIC_WORD_2;
     }
 
-    release_all_keys(state);
+    keyboard_focus_changed(state);
     state->reboot_requested = true;
 };
 
@@ -218,24 +218,7 @@ void config_enable_hotkey_handler(device_t *state, hid_keyboard_report_t *report
 
 /* Function handles received keypresses from the other board */
 void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
-    hid_keyboard_report_t *report = (hid_keyboard_report_t *)packet->data;
-    hid_keyboard_report_t combined_report;
-
-    /* A forwarded keyboard report is ordered with the host-visible key event,
-       so it is also a reliable modifier-state update if the dedicated mirror
-       packet was ever dropped. */
-    state->peer_modifiers = report->modifier;
-    state->peer_modifiers_last_seen = time_us_64();
-
-    /* Update the keyboard state for the remote device  */
-    update_remote_kbd_state(state, report);
-
-    /* Create a combined report from all device states */
-    combine_kbd_states(state, &combined_report);
-
-    /* Queue the combined report */
-    queue_kbd_report(&combined_report, state);
-    record_remote_activity(state, BOARD_ROLE);
+    keyboard_synthetic_receive(packet, state);
 }
 
 /* Function handles received mouse moves from the other board */
@@ -393,8 +376,7 @@ static void receive_output_selection(uart_packet_t *packet, device_t *state, boo
         diagnostic_history_record(HISTORY_OUTPUT_PEER, previous_output, selected_output, 0);
     /* Queue and USB operations can wait; never perform them under the state lock. */
     if (changed || legacy) {
-        if (state->tud_connected)
-            release_all_keys(state);
+        keyboard_focus_changed(state);
         if (changed)
             release_mouse_host_buttons(state);
         restore_leds(state);
@@ -761,7 +743,7 @@ void set_active_output(device_t *state, uint8_t new_output) {
 
     /* If we were holding a key down and drag the mouse to another screen, the key gets stuck.
        Changing outputs = no more keypresses on the previous system. */
-    release_all_keys(state);
+    keyboard_focus_changed(state);
     if (changed)
         release_mouse_host_buttons(state);
 }
@@ -775,7 +757,9 @@ void announce_initial_output(device_t *state) {
     firmware_update_unlock();
     restore_leds(state);
     queue_packet_blocking(payload, OUTPUT_SELECT_MSG, sizeof(payload));
-    release_all_keys(state);
+    /* Core 1 is already live. Its source/protocol state was initialized before
+     * launch; the core-0 announcement must not mutate its ring or snapshots. */
+    keyboard_host_reset(state);
 }
 
 /* Also sent after an accepted merge for prompt joining. Dropped/full-queue

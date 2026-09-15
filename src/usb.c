@@ -85,6 +85,7 @@ void tud_hid_set_report_cb(uint8_t instance,
 
 /* Invoked when device is mounted */
 void tud_mount_cb(void) {
+    keyboard_host_reset(&global_state);
     global_state.tud_connected = true;
     diagnostic_history_record(HISTORY_USB_MOUNT, 0, 0, 0);
 #if DH_CONSOLE && CFG_TUD_CDC
@@ -97,6 +98,7 @@ void tud_mount_cb(void) {
 /* Invoked when device is unmounted */
 void tud_umount_cb(void) {
     global_state.tud_connected = false;
+    keyboard_host_reset(&global_state);
     diagnostic_history_record(HISTORY_USB_UNMOUNT, 0, 0, 0);
 #if DH_CONSOLE && CFG_TUD_CDC
     console_disconnect();

@@ -2,10 +2,12 @@
 """Finite preservation contracts against the original main baseline.
 
 All nine scenarios execute their independent endpoint/state/deadline assertions
-on both builds. Four additionally require identical timestamped USB/LED/reset/
-wake traces. Five require identical ordered effects on each separate host,
-allowing at most one modeled HID poll (1 ms) of timestamp drift per retained
-effect. Only repeated identical keyboard states are removed, starting from the
+on both builds. Reboot-chord suppression additionally checks its deliberately
+new immediate-release sequence instead of claiming keyboard trace equivalence.
+Three additionally require identical timestamped USB/LED/reset/wake traces. Five require identical ordered effects on each separate host,
+allowing at most 1 ms of drift for non-keyboard effects and 3 ms for keyboard
+effects (the new 1 kHz state task plus five modeled UART frame polls). Only
+repeated identical keyboard states are removed, starting from the
 fixtures' empty keyboard state; a release after held keys is always retained.
 Mouse reports, wheel/motion events, LED transitions, wake and reset events are
 never collapsed. The latter contract excludes global ordering between separate
@@ -30,9 +32,12 @@ from test_selection import check_legacy_receiver
 NAMES=('pointer','pointer_sync','uart_faults','backpressure','f24_releases_held_modifiers',
        'reboot_three_completed_taps','led_focus_and_acknowledgement',
        'zoom_scroll_debt_and_quiet_exit','timed_system_wide_keepawake')
-EXACT = {'backpressure', 'led_focus_and_acknowledgement',
+EXACT = {'backpressure',
          'zoom_scroll_debt_and_quiet_exit', 'timed_system_wide_keepawake'}
 MAX_EFFECT_DRIFT_US = 1000
+# Source state now crosses a 1 kHz task and five modeled UART packet polls.
+MAX_KEYBOARD_DRIFT_US = 3000
+CHANGED = {'reboot_three_completed_taps'}
 
 
 def host_state_effects(trace):
@@ -63,7 +68,9 @@ def compare_host_state_effects(name, previous, current):
                 k: v for k, v in after.items() if k != 'at'
             }, f'{name}: host {node} effect {index} changed: {before} -> {after}'
             drift = abs(before['at'] - after['at'])
-            assert drift <= MAX_EFFECT_DRIFT_US, f'{name}: host {node} effect drift {drift} us exceeds 1 ms'
+            keyboard = before['kind'] == 'usb' and before['a'] == 0 and before['b'] == 1
+            limit = MAX_KEYBOARD_DRIFT_US if keyboard else MAX_EFFECT_DRIFT_US
+            assert drift <= limit, f'{name}: host {node} effect drift {drift} us exceeds {limit} us'
             worst_drift = max(worst_drift, drift)
     return sum(map(len, previous.values())), worst_drift
 
@@ -108,7 +115,20 @@ def main():
                     # same-image replay separately checks the complete trace.
                     traces.append([event for event in sim.trace
                                    if event['kind'] in ('usb', 'led', 'reset', 'wake')])
-            if name in EXACT:
+            if name in CHANGED:
+                # Swallowing a reboot chord now immediately releases the prior
+                # source state. Assert the intentional new sequence explicitly,
+                # while both builds retain the scenario's guarded-reset oracle.
+                effects = host_state_effects(traces[1])[1]
+                keyboard = [e['data'] for e in effects if e['kind'] == 'usb' and e['b'] == 1]
+                assert keyboard == ['0200000000000000', '0000000000000000',
+                                    '2100000000000000', '0000000000000000',
+                                    '2100000000000000', '0000000000000000']
+                nonkeyboard = [[e for e in trace if not (e['kind'] == 'usb' and e['b'] == 1)]
+                               for trace in traces]
+                compare_host_state_effects(name, *nonkeyboard)
+                print(f'INTENTIONAL release change: {name}; exact new keyboard sequence and preserved non-keyboard effects')
+            elif name in EXACT:
                 if traces[0] != traces[1]:
                     mismatch = next(((left, right) for left, right in zip(*traces)
                                      if left != right), ('length', list(map(len, traces))))
@@ -119,6 +139,6 @@ def main():
                 print(f'PRESERVED per-host state effects: {name} ({count} effects; max drift {drift} us)')
         check_legacy_receiver(new, old)
     print(f'{len(NAMES)} independent scenario contracts passed on baseline/current; '
-          f'{len(EXACT)} exact effect traces and {len(NAMES)-len(EXACT)} per-host state comparisons passed. '
+          f'{len(EXACT)} exact traces, {len(NAMES)-len(EXACT)-len(CHANGED)} per-host comparisons and {len(CHANGED)} explicit behavior changes passed. '
           'UART changes excluded; no universal equivalence claim.')
 if __name__=='__main__':main()

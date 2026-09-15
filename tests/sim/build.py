@@ -6,7 +6,7 @@ SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'key
            'mouse', 'reboot_hotkey', 'screensaver_policy', 'zoom_tracker', 'zoom',
            'tasks', 'handlers', 'led', 'uart', 'usb', 'usb_descriptors', 'utils',
            'fw_update', 'config_migration', 'selection']
-OPTIONAL_SOURCES = ['peer_status', 'diagnostic_peer', 'history', 'diagnostic_history',
+OPTIONAL_SOURCES = ['keyboard_sync', 'peer_status', 'diagnostic_peer', 'history', 'diagnostic_history',
                     'peer_history', 'diagnostic_peer_history', 'diagnostic_runtime', 'peer_observation',
                     'verification', 'peer_verify', 'diagnostic_verify']
 
@@ -66,6 +66,8 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
         flags += ['-DSIM_HAS_DIAGNOSTIC_HISTORY=1']
     if (source_root/'src/diagnostic_peer_history.c').exists():
         flags += ['-DSIM_HAS_DIAGNOSTIC_PEER_HISTORY=1']
+    if (source_root/'src/keyboard_sync.c').exists():
+        flags += ['-DSIM_HAS_KEYBOARD_SYNC=1']
     cmd = [os.environ.get('CC', 'cc'), *flags, *([] if executable else ['-shared']),
            '-I'+str(output.parent), '-I'+str(ROOT/'tests/sim/include'), '-I'+str(source_root/'src/include'),
            '-I'+str(ROOT/'pico-sdk/src/common/pico_util/include'),

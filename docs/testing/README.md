@@ -61,6 +61,13 @@ including bounded work, malformed command recovery, and HID progress while a
 serial reader is stalled. The paired adapter derives task names and core
 ownership from each firmware's tables, including older baseline builds.
 
+## Unflashed keyboard draft
+
+The [keyboard reliability draft](keyboard-reliability-draft.md) adds ordinary
+release recovery under USB/UART saturation and packet loss, bounded peer leases,
+focus/session replay rejection, source aggregation and synthetic lock release.
+Version 0.101/configuration 10 remain unchanged for this test-only draft.
+
 ## Commands
 
 From the repository root:
@@ -98,9 +105,11 @@ in the runbook. No command flashes or uploads firmware.
   mutations (21 storage and 15 paired, including seven selection mutations).
   Model mutations are counted separately. Nine valid-input scenarios also run
   against original `d42c930` source (Git and that local commit are required;
-  no fetching). Four host-effect traces match exactly; five compare ordered
+  no fetching). Three host-effect traces match exactly; five compare ordered
   effects per host, suppressing only redundant keyboard states and allowing
-  at most one modeled HID poll (1 ms) of timestamp drift. Mouse effects are
+  1 ms drift for non-keyboard effects and 3 ms for the new five-frame keyboard
+  transport. The reboot-chord scenario asserts its intentionally earlier
+  source-release sequence and preserves non-keyboard effects. Mouse effects are
   never collapsed. New UART reconciliation traffic is excluded. This is bounded
   exploration, not every instruction interleaving or physical timing equivalence.
 - **Coverage:** source coverage artifacts in `build/tests/coverage`. Read the

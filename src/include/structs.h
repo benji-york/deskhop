@@ -142,6 +142,10 @@ typedef struct {
     config_t config;       // Device configuration, loaded from flash or defaults used
     queue_t hid_queue_out; // Queue that stores outgoing hid messages
     queue_t kbd_queue;     // Queue that stores keyboard reports
+    hid_keyboard_report_t kbd_latest; // Durable tail if the FIFO fills
+    bool kbd_latest_pending;
+    uint32_t kbd_host_generation;
+    uint32_t kbd_remote_generation;
     queue_t mouse_queue;   // Queue that stores mouse reports
     queue_t uart_tx_queue; // Queue that stores outgoing packets
 

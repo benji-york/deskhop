@@ -1824,3 +1824,6 @@ int main(void) {
     puts("TinyUSB virtual-DCD tests passed (normal/config CDC enumeration and real console streams, per-tick budgets, HID progress under CDC backpressure, control stages, HID LED, MSC SCSI, reconnect)");
     return 0;
 }
+
+/* Queue invalidation is covered by the paired production keyboard layer. */
+void keyboard_host_reset(device_t *state) { (void)state; }

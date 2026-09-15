@@ -9,3 +9,10 @@ void diagnostic_history_record(history_type_t type, uint8_t a, uint8_t b, uint32
     (void)b;
     (void)value;
 }
+
+/* Isolated HID/host-stack tests do not link the paired keyboard transport or
+ * multicore HAL. Their USB queue/source behavior remains production C. */
+void keyboard_sync_publish(void) {}
+void keyboard_sync_reset(void) {}
+void firmware_update_lock(void) {}
+void firmware_update_unlock(void) {}

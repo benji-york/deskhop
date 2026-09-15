@@ -108,6 +108,14 @@ static void handle_history_response(uart_packet_t *packet, device_t *state) {
 
 const uart_handler_t uart_handler[] = {
     /* Core functions */
+    {.type = KEYBOARD_STATE_RESET_MSG, .handler = keyboard_sync_receive},
+    {.type = KEYBOARD_STATE_REQUEST_MSG, .handler = keyboard_sync_receive},
+    {.type = KEYBOARD_STATE_0_MSG, .handler = keyboard_sync_receive},
+    {.type = KEYBOARD_STATE_1_MSG, .handler = keyboard_sync_receive},
+    {.type = KEYBOARD_STATE_2_MSG, .handler = keyboard_sync_receive},
+    {.type = KEYBOARD_STATE_3_MSG, .handler = keyboard_sync_receive},
+    {.type = KEYBOARD_STATE_4_MSG, .handler = keyboard_sync_receive},
+
     {.type = KEYBOARD_REPORT_MSG, .handler = handle_keyboard_uart_msg},
     {.type = MOUSE_REPORT_MSG, .handler = handle_mouse_abs_uart_msg},
     {.type = MOUSE_SOURCE_REPORT_MSG, .handler = handle_mouse_source_uart_msg},

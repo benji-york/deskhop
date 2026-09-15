@@ -8,6 +8,18 @@ README.
 
 Snapshot: 2026-09-15
 
+## Unflashed keyboard reliability draft
+
+The first bug-fix-stack draft starts at `af100bc` on
+`codex/keyboard-state-recovery`. See the [design and test note](docs/testing/keyboard-reliability-draft.md).
+Ordinary releases now have a durable USB tail and session/focus-checked peer
+snapshots. A 500 ms peer lease bounds remote holds during link outages; a 20 ms
+synthetic lease repairs a lost lock-shortcut all-up. Keyboard backpressure no
+longer requests a reboot. Mouse timeout/reboot safety is a later stack task.
+This RAM-only draft keeps version 0.101/configuration 10 and is **not for rollout**;
+its keyboard protocol requires both upgraded boards and a deliberate release
+version bump. The accepted deployment below remains unchanged.
+
 ## Current deployment: v0.101 full-slot verification
 
 Both boards are running v0.101 and have completed input acceptance. The
@@ -534,10 +546,10 @@ physical source button masks for subsequent input on the new host.
 
 The immediate output-selection message uses a blocking queue; periodic
 reconciliation repairs lost wire messages when both upgraded peers resume
-delivery. Critical keyboard and switch/detach mouse releases wait up to 100 ms
-for a queue slot. If one cannot be enqueued—typically because a stalled endpoint
-has filled the queue—the board requests a watchdog reboot instead of silently
-dropping that release.
+delivery. In the accepted v0.101 deployment, critical keyboard and switch/detach mouse
+releases wait up to 100 ms for a queue slot. If one cannot be enqueued, that
+version requests a watchdog reboot. The unflashed keyboard draft above replaces
+the keyboard wait with durable state; the mouse path is unchanged.
 
 If Caps-like behavior remains after DeskHop is physically unplugged and clears
 only after restarting Karabiner, the bad state is in the Mac's virtual input

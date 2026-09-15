@@ -111,7 +111,7 @@ TinyUSB and Pico-PIO-USB contain additional source outside this inventory.
 | Production units | Test inclusion / exercised responsibility | Remaining responsibilities |
 | --- | --- | --- |
 | `hid_parser.c`, `hid_report.c` | Original HID suite, generated HID tests, paired/native boundary builds; usage carry/list capacity, report offsets, NKRO, bit extraction, malformed/truncated inputs | All legal HID combinations, collection semantics and an independent full HID parser |
-| `keyboard.c`, `reboot_hotkey.c` | Original recognizer/HID suites and paired scenarios; report routing, modifiers, F24 and exact reboot sequence | Real host virtual-keyboard state; all possible multi-keyboard interactions |
+| `keyboard.c`, `keyboard_sync.c`, `reboot_hotkey.c` | Original recognizer/HID suites and paired scenarios; report routing, modifiers, F24 and exact reboot sequence | Real host virtual-keyboard state; all possible multi-keyboard interactions |
 | `mouse.c` | Paired scenarios and sanitized native boundaries; descriptor-driven decoding, absolute/relative output, per-interface/peer button masks, detach, focus all-up, nonmotion and synthetic desktop reports | All pointing-device descriptors, arbitrary loss of ordinary physical reports, physical host button semantics |
 | `zoom.c`, `zoom_tracker.c` | Original tracker suite plus paired debt/quiet-exit/manual-mode scenarios | Whether macOS is actually magnified; host scroll interpretation; exhaustive shared-edge paths |
 | `screensaver_policy.c` | Original policy suite and actual `tasks.c` timed paired keep-awake | Real macOS idle counter and lock/sleep policy |
@@ -128,7 +128,7 @@ TinyUSB and Pico-PIO-USB contain additional source outside this inventory.
 | `ramdisk.c` | Actual UF2 MSC callbacks in storage suite | FAT/macOS copy behavior, SCSI transport and host request fragmentation through a complete stack |
 | `constants.c`, `defaults.c` | Production constants/default configuration linked in relevant native layers | Compiled data is not proof every option works in every combination |
 | `setup.c` | ARM build only | Role-probe GPIO/isolator logic, USB/PIO/DMA/clock initialization, startup flash/RAM behavior |
-| `main.c` | ARM build; task tables extracted for native scheduling | Production startup, two real loops/core launch and exact in-core instruction order |
+| `main.c` | ARM build; task tables extracted for native scheduling; explicit keyboard init-before-launch and core0 announcement ownership assertions | Production startup, two real loops/core launch and exact in-core instruction order |
 
 `disk/webconfig.html` auto-start behavior retains the existing JavaScript suite.
 The generated disk image, browser UI, field persistence, and full USB mass-storage
@@ -148,7 +148,8 @@ No QMK checkout or target Mac is modified by these tests.
 | IDs 0–255, offsets and bounded usage lists | original HID `test_all_report_id_receivers`, `test_distinct_report_capacity`, generated HID cases; native mouse ID loop | Receiver-map/offset distinction preserved; 24 report offsets and four NKRO blocks remain representation limits |
 | Multi-block NKRO, usage carry, consumer/system reports | original HID named tests plus `hid_fuzz` | Independent outputs/activity guards; exact allocations expose memory errors. Multiple keyboard reports/collections still share collapsed state |
 | Malformed/truncated reports and false activity | generated HID, scalar oracle, `test_native_boundaries` | Exact short inputs and independent state/activity invariants; finite corpus, not every malformed descriptor |
-| F24/held modifiers and all-up | `f24_releases_held_modifiers`, `critical_queue`, `uart_queue_switch` | All modifier bits, exact output releases, actual queue saturation and 100 ms failure path; no Karabiner proof |
+| Ordinary keyboard state recovery | `keyboard_*` in `test_keyboard_reliability.py` | Real queue saturation, loss/corruption, source FIFO overload, duplicate/stale/session/context rejection, focus and USB reconnect, peer lease, multiple sources, consumed hotkeys, synthetic lock release and diagnostics; both directions. [Draft contract and limits](keyboard-reliability-draft.md) |
+| F24/held modifiers and all-up | `f24_releases_held_modifiers`, `critical_queue`, `uart_queue_switch` | All modifier bits, exact output releases, actual queue saturation and durable all-up without keyboard reset; mouse timeout remains separate; no Karabiner proof |
 | USB enumeration, disconnect, reconnect, suspend and backpressure | paired `disconnect`, `backpressure`; USB stack `enumerate`, `hid_data_and_leds`, `suspend_and_unplug` | Device/config/HID/string requests, partial/multi-packet control transfers, address/configure/unconfigure, invalid-request stall, real HID busy/completion, LED SET_REPORT, remote wake and unplug/re-enumeration. DCD/host transaction model; no physical host-driver execution |
 | Keyboard LED focus and acknowledgement pulses | `led_focus_and_acknowledgement`; USB stack `hid_data_and_leds` | Actual host SET_REPORT passes through TinyUSB to application; paired focus policy/five 80 ms transitions with sync suppression. Outgoing Sofle SET_REPORT acceptance remains modeled |
 | Zoom activation, debt, overscroll and quiet time | `zoom_scroll_debt_and_quiet_exit`, original `test_zoom_tracker.c` | Checks active relative reports, debt repayment, six-unit overscroll and quiet-deadline restart/expiry; helper tests cover debt saturation and stale modifiers |

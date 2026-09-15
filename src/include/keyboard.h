@@ -13,6 +13,7 @@
 
 #include "structs.h"
 #include "hid_parser.h"
+#include "keyboard_sync.h"
 
 /*==============================================================================
  *  Data Extraction
@@ -47,6 +48,9 @@ void     queue_kbd_report(hid_keyboard_report_t *, device_t *);
 bool     queue_kbd_report_critical(hid_keyboard_report_t *, device_t *);
 void     queue_system_packet(uint8_t *, device_t *);
 void     release_all_keys(device_t *);
+void     keyboard_focus_changed(device_t *);
+void     keyboard_host_reset(device_t *);
+void     keyboard_queue_current(device_t *);
 void     send_consumer_control(uint8_t *, device_t *);
 void     send_key(hid_keyboard_report_t *, device_t *);
 

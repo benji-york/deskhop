@@ -60,6 +60,7 @@ void core1_main() {
         [6] = {.exec = &heartbeat_output_task,   .frequency = _HZ(1)},       // | Output periodic heartbeats
         [7] = {.exec = &zoom_assist_task,        .frequency = _HZ(100)},     // | Finish inferred zoom-out after a quiet period
         [8] = {.exec = &diagnostic_peer_status_task, .frequency = _HZ(1000)}, // | Bounded read-only peer queries
+        [9] = {.exec = &keyboard_sync_task, .frequency = _HZ(1000)},
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core1);
 

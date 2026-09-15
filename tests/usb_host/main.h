@@ -35,3 +35,6 @@ bool tud_suspended(void);
 bool tud_remote_wakeup(void);
 bool tud_hid_n_ready(uint8_t);
 bool tud_hid_keyboard_report(uint8_t, uint8_t, uint8_t *);
+
+void firmware_update_lock(void);
+void firmware_update_unlock(void);

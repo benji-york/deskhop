@@ -29,7 +29,21 @@ def check_interleaving_cli_selection():
         assert {tuple(call.args[4]) for call in explored} == set(itertools.permutations(range(4)))
         assert f'PASS {expected}: all 24' in output.getvalue()
 
+def check_keyboard_startup_ownership():
+    # This harness doesn't execute RP2040 multicore launch. Keep its production
+    # startup boundary explicit: init before launch; later core0 announcement
+    # may invalidate USB output via its locked generation but not mutate sync.
+    setup = (ROOT/'src/setup.c').read_text()
+    assert setup.index('keyboard_sync_init(boot_session)') < setup.index('multicore_launch_core1(core1_main)')
+    handlers = (ROOT/'src/handlers.c').read_text()
+    announcement = handlers.split('void announce_initial_output(', 1)[1].split('\n}', 1)[0]
+    assert 'keyboard_host_reset(state)' in announcement
+    for forbidden in ('keyboard_sync_', 'keyboard_focus_changed(', 'release_all_keys('):
+        assert forbidden not in announcement
+
+
 def main():
+    check_keyboard_startup_ownership()
     check_interleaving_cli_selection()
     with Simulation(background=False) as s:
         # The new core0 entry must not silently shift manual core1 polls onto
@@ -37,12 +51,12 @@ def main():
         for name,core in [('process_mouse_queue_task',0),('process_uart_tx_task',0),
                           ('diagnostic_console_task',0),('usb_host_task',1),
                           ('packet_receiver_task',1),('heartbeat_output_task',1),
-                          ('diagnostic_peer_status_task',1)]:
+                          ('diagnostic_peer_status_task',1),('keyboard_sync_task',1)]:
             task=s.task_id(0,name)
             assert s.nodes[0].sim_task_name(task).decode('ascii')==name
             assert s.nodes[0].sim_task_core(task)==core
         assert sum(s.nodes[0].sim_task_core(task) == 1
-                   for task in range(s.nodes[0].sim_task_count())) == 9
+                   for task in range(s.nodes[0].sim_task_count())) == 10
         s.do(0,'task','diagnostic_console_task')
         assert s.steps[-1]['args']==['diagnostic_console_task']
         assert not s.trace # CDC is disabled at this simulator boundary.

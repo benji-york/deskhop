@@ -81,6 +81,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/handlers.c
   ${SRC_DIR}/setup.c
   ${SRC_DIR}/keyboard.c
+  ${SRC_DIR}/keyboard_sync.c
   ${SRC_DIR}/mouse.c
   ${SRC_DIR}/reboot_hotkey.c
   ${SRC_DIR}/screensaver_policy.c
