@@ -8,7 +8,7 @@ README.
 
 Snapshot: 2026-09-15
 
-## Current firmware: v0.102 completed fixes; input acceptance pending
+## Current accepted firmware: v0.102 completed fixes
 
 The user requested publication and deployment of the completed fixes. The
 `codex/release-v0.102` branch contains keyboard recovery `b8992dc`, followed by
@@ -25,9 +25,11 @@ hardware check is `verify 0.102 dabb9b75`.
 rebooted on 2026-09-15.** All firmware bytes matched; saved settings were unchanged.
 The paired console check passed: both execute v0.102, have fresh stable boot
 sessions and advancing cores, and pass fresh full-slot scans over the new UART
-link. Both host cables were on this Mac for that check. Returning B to its
-original Mac and physical input acceptance remain pending. v0.101 is the last
-user-accepted deployment, not the currently installed firmware.
+link. A repeat check passed after B's host cable was returned to its original
+Mac. Benji confirmed "Working great" in response to the requested typing,
+trackball/right-click, and switching checks on both Macs. v0.102 is now the
+user-accepted deployment. LEDs/arrows, zoom assist, keep-awake soak and future
+automatic firmware updates were not separately accepted in this check.
 
 The draft notes below describe the original unversioned commits; v0.102 supplies
 their required release version. Release source/artifact commit: `fea46a8`.
@@ -587,7 +589,7 @@ The immediate output-selection message uses a blocking queue; periodic
 reconciliation repairs lost wire messages when both upgraded peers resume
 delivery. In the accepted v0.101 deployment, critical keyboard and switch/detach mouse
 releases wait up to 100 ms for a queue slot. If one cannot be enqueued, that
-version requests a watchdog reboot. The unflashed keyboard draft above replaces
+version requests a watchdog reboot. The deployed v0.102 keyboard recovery replaces
 the keyboard wait with durable state; the mouse path is unchanged.
 
 If Caps-like behavior remains after DeskHop is physically unplugged and clears

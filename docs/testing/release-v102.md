@@ -2,9 +2,10 @@
 
 Prepared 2026-09-15 at the user's request to commit, push, and flash the finished
 fixes. **Both Picos are programmed, externally verified, and running v0.102.**
-Paired runtime verification passed with both host cables on this Mac. Returning
-B's cable to its original Mac and user input acceptance remain pending. The last
-user-accepted paired hardware version is v0.101.
+Paired runtime verification passed both before and after returning B's cable to
+its original Mac. Benji confirmed "Working great" after the requested typing,
+trackball/right-click, and switching checks. **v0.102 is the current user-accepted
+paired deployment.**
 
 ## Scope and history
 
@@ -126,10 +127,26 @@ Evidence: `build/flashing/console-v102-smoke-20260915T170927.300864Z.json` and
 matching `.txt`. The checker was adapted from v0.101 and passed its offline
 full-sequence self-test, including 42 rejected invalid fixtures, before use.
 
-Both host cables were still attached to this Mac. The user has been asked to
-return B to its original Mac. Post-relocation runtime checks and physical
-typing/releases, buttons, switching/arrows, zoom assist and keep-awake acceptance
-are not yet established.
+Both host cables were still attached to this Mac during that first runtime check.
+
+### Post-relocation check and user acceptance
+
+On 2026-09-15, Benji replied "Working great" to the request to return B's host
+cable to its original Mac and test typing, trackball/right-click, and switching
+on both Macs. A fresh USB inventory then showed only A attached to this Mac,
+with no RP2 Boot device. The same read-only console checker passed again via A
+at 17:13:57 UTC in 5.748 seconds (13,027 bytes), with B responding over UART.
+Five statuses confirmed both v0.102 builds, stable sessions, idle updaters and
+advancing counters on all four cores. Three fresh full-slot checks again gave
+PASS/FAIL/PASS for correct/wrong/correct expectations; all measured `dabb9b75`
+with boot metadata CRC `d9e9f64d`. Scan durations were 1.110871–1.136939 seconds.
+A retained session `b0bce00bb487c0ee`; B had restarted into `93c98994a187e251`
+and remained stable throughout the check.
+
+Evidence: `build/flashing/console-v102-smoke-20260915T171357.580848Z.json` and
+matching `.txt`. The migration and basic input acceptance are complete. The
+user's report does not separately establish LEDs/arrows, zoom assist, keep-awake
+soak or future automatic-update acceptance. The known limitations above remain.
 
 ## Validation and deployment evidence
 
@@ -142,7 +159,8 @@ deep **46/46**, ARM **2/2**, with all results successful. Deep includes the
 21 storage and 17 paired mutation checks, and nine historical behavior contracts.
 Native fixtures retain explicit historical build identities where appropriate;
 the actual ARM artifact's metadata was independently checked as version 202.
-RAM use remains **220,092 / 262,144 bytes**. No hardware acceptance is claimed yet.
+RAM use remains **220,092 / 262,144 bytes**. Physical runtime and basic input
+acceptance are recorded separately above, not inferred from these test results.
 
 Frozen files are under `build/flashing/` in the main workspace:
 
