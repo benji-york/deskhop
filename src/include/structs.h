@@ -63,7 +63,7 @@ typedef struct {
     uint8_t report_id;
     uint8_t type;
     uint8_t len;
-    uint8_t data[RAW_PACKET_LENGTH];
+    uint8_t data[CONFIG_PACKET_LENGTH];
 } hid_generic_pkt_t;
 
 typedef enum { IDLE, READING_PACKET, PROCESSING_PACKET } receiver_state_t;

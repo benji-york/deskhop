@@ -2,9 +2,10 @@
 """Finite preservation contracts against the original main baseline.
 
 All nine scenarios execute their independent endpoint/state/deadline assertions
-on both builds. Reboot-chord suppression additionally checks its deliberately
-new immediate-release sequence instead of claiming keyboard trace equivalence.
-Three additionally require identical timestamped USB/LED/reset/wake traces. Five require identical ordered effects on each separate host,
+on both builds. Reboot-chord suppression checks its deliberately new immediate
+release sequence. UART truncation checks the deliberately restored first intact
+frame, then compares all retained historical effects.
+Three additionally require identical timestamped USB/LED/reset/wake traces. Four require identical ordered effects on each separate host,
 allowing at most 1 ms of drift for non-keyboard effects and 3 ms for keyboard
 effects (the new 1 kHz state task plus five modeled UART frame polls). Only
 repeated identical keyboard states are removed, starting from the
@@ -29,6 +30,7 @@ from build import ROOT,build
 from simulator import Simulation
 from run import SCENARIOS,BACKGROUND_FALSE
 from test_selection import check_legacy_receiver
+from test_transport import out_mouse
 NAMES=('pointer','pointer_sync','uart_faults','backpressure','f24_releases_held_modifiers',
        'reboot_three_completed_taps','led_focus_and_acknowledgement',
        'zoom_scroll_debt_and_quiet_exit','timed_system_wide_keepawake')
@@ -37,7 +39,7 @@ EXACT = {'backpressure',
 MAX_EFFECT_DRIFT_US = 1000
 # Source state now crosses a 1 kHz task and five modeled UART packet polls.
 MAX_KEYBOARD_DRIFT_US = 3000
-CHANGED = {'reboot_three_completed_taps'}
+CHANGED = {'reboot_three_completed_taps', 'uart_faults'}
 
 
 def host_state_effects(trace):
@@ -115,7 +117,19 @@ def main():
                     # same-image replay separately checks the complete trace.
                     traces.append([event for event in sim.trace
                                    if event['kind'] in ('usb', 'led', 'reset', 'wake')])
-            if name in CHANGED:
+            if name == 'uart_faults':
+                # The protected start delimiter rescues the first intact frame
+                # after truncation. Retain every old effect and independently
+                # assert the single newly delivered mouse position.
+                recovered = [e for e in traces[1] if e['kind'] == 'usb'
+                             and e['node'] == 0 and e['b'] == 2
+                             and e['data'] == out_mouse(0, 16020, 16000)]
+                assert len(recovered) == 1, 'first intact frame was not rescued exactly once'
+                assert recovered[0] not in traces[0]
+                preserved = [e for e in traces[1] if e is not recovered[0]]
+                compare_host_state_effects(name, traces[0], preserved)
+                print('INTENTIONAL parser recovery change: uart_faults; first intact frame after truncation delivered')
+            elif name in CHANGED:
                 # Swallowing a reboot chord now immediately releases the prior
                 # source state. Assert the intentional new sequence explicitly,
                 # while both builds retain the scenario's guarded-reset oracle.

@@ -19,22 +19,31 @@
  * ===============  Sending Packets  ================ *
  * ================================================== */
 
-/* Takes a packet as uart_packet_t struct, adds preamble, checksum and encodes it to a raw array. */
+/* UART v1: bounded nibble encoding excludes delimiters and the old AA55
+   preamble, even when arbitrary payload/CRC bytes contain that sequence.
+   All meaningful fields have one CRC32; no unprotected command/type path. */
 void write_raw_packet(uint8_t *dst, uart_packet_t *packet) {
-    uint8_t pkt[RAW_PACKET_LENGTH] = {[0] = START1,
-                                      [1] = START2,
-                                      [2] = packet->type,
-                                      /* [3-10] is data, defaults to 0 */
-                                      [11] = calc_checksum(packet->data, PACKET_DATA_LENGTH)};
-
-    memcpy(&pkt[START_LENGTH + TYPE_LENGTH], packet->data, PACKET_DATA_LENGTH);
-    memcpy(dst, &pkt, RAW_PACKET_LENGTH);
+    uint8_t body[UART_FRAME_BODY_LENGTH] = {UART_FRAME_VERSION, PACKET_DATA_LENGTH, packet->type};
+    memcpy(body + 3, packet->data, PACKET_DATA_LENGTH);
+    uint32_t crc = calc_packet_checksum(packet);
+    for (unsigned i = 0; i < 4; ++i)
+        body[11 + i] = (uint8_t)(crc >> (8 * i));
+    dst[0] = UART_FRAME_START;
+    for (unsigned i = 0; i < sizeof(body); ++i) {
+        dst[1 + 2 * i] = 0x40 | (body[i] >> 4);
+        dst[2 + 2 * i] = 0x40 | (body[i] & 0xf);
+    }
+    dst[RAW_PACKET_LENGTH - 1] = UART_FRAME_END;
 }
 
 /* Schedule packet for sending to the other box */
 bool queue_packet_try(const uint8_t *data, enum packet_type_e packet_type, int length) {
+    if (length < 0 || length > PACKET_DATA_LENGTH || (length && !data)
+        || packet_type <= 0 || packet_type > UINT8_MAX)
+        return false;
     uart_packet_t packet = {.type = packet_type};
-    memcpy(packet.data, data, length);
+    if (length)
+        memcpy(packet.data, data, length);
 
     return queue_try_add(&global_state.uart_tx_queue, &packet);
 }
@@ -44,11 +53,15 @@ void queue_packet(const uint8_t *data, enum packet_type_e packet_type, int lengt
         diagnostic_history_record(HISTORY_UART_DROPPED, 0, 0, packet_type);
 }
 
-/* Firmware receivers prior to v0.85 have no timeout. Never silently drop the
-   response that would strand one of those receivers until its next power cycle. */
+/* Preserve source-response backpressure. This helper sends protected frames
+   only; it does not enable communication with legacy UART receivers. */
 void queue_packet_blocking(const uint8_t *data, enum packet_type_e packet_type, int length) {
+    if (length < 0 || length > PACKET_DATA_LENGTH || (length && !data)
+        || packet_type <= 0 || packet_type > UINT8_MAX)
+        return;
     uart_packet_t packet = {.type = packet_type};
-    memcpy(packet.data, data, length);
+    if (length)
+        memcpy(packet.data, data, length);
 
     queue_add_blocking(&global_state.uart_tx_queue, &packet);
 }
@@ -60,6 +73,7 @@ void send_value(const uint8_t value, enum packet_type_e packet_type) {
 
 /* Process outgoing config report messages. */
 void process_uart_tx_task(device_t *state) {
+    _Static_assert(RAW_PACKET_LENGTH <= DMA_TX_BUFFER_SIZE, "UART frame exceeds DMA buffer");
     uart_packet_t packet = {0};
 
     if (dma_channel_is_busy(state->dma_tx_channel))
@@ -169,6 +183,11 @@ void process_packet(uart_packet_t *packet, device_t *state) {
         diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, packet->type);
         return;
     }
+
+    /* A proxy is a configuration-only envelope. In particular it may not
+       recursively unwrap another proxy or tunnel arbitrary input/update types. */
+    if (packet->type == PROXY_PACKET_MSG && !validate_packet(packet))
+        return;
 
     for (int i = 0; i < ARRAY_SIZE(uart_handler); i++) {
         if (uart_handler[i].type == packet->type) {

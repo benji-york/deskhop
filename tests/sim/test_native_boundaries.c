@@ -1,6 +1,7 @@
 /* Exact allocation and independent state/output oracles for actual mouse code.
  * This executable runs with ASan/UBSan (separate from the Python-loaded nodes). */
 #include "main.h"
+#include "config_packet.h"
 #include <assert.h>
 void sim_init(uint8_t,void (*)(int,int,int,const void *,int));
 void sim_destroy(void);
@@ -92,17 +93,86 @@ static void vendor_diagnostics_cannot_enter_core1(void) {
             packet.data[0] = proxy ? kinds[i] : 1;
             packet.data[1] = 0x12;
             packet.data[4] = 1;
-            packet.checksum = calc_checksum(packet.data, PACKET_DATA_LENGTH);
+            packet.checksum = calc_packet_checksum(&packet);
             assert(verify_checksum(&packet));
             assert(!validate_packet(&packet));
         }
         /* An otherwise valid configuration read still crosses this boundary. */
         uart_packet_t allowed = {.type = proxy ? PROXY_PACKET_MSG : GET_VAL_MSG};
         allowed.data[0] = proxy ? GET_VAL_MSG : 83;
-        allowed.checksum = calc_checksum(allowed.data, PACKET_DATA_LENGTH);
+        allowed.checksum = calc_packet_checksum(&allowed);
         assert(verify_checksum(&allowed));
         assert(validate_packet(&allowed));
     }
+}
+
+/* Polynomial long division is independent of the production CRC8 routine. */
+static uint8_t config_crc_oracle(const uint8_t *data, unsigned length) {
+    unsigned remainder = 0;
+    for (unsigned i = 0; i < length * 8 + 8; ++i) {
+        unsigned bit = i < length * 8 ? (data[i / 8] >> (7 - i % 8)) & 1u : 0;
+        remainder = (remainder << 1) | bit;
+        if (remainder & 0x100u)
+            remainder ^= 0x107u;
+    }
+    return (uint8_t)remainder;
+}
+
+static void vendor_transport_integrity(void) {
+    assert(config_crc_oracle((const uint8_t *)"123456789", 9) == 0xf4);
+    uint8_t valid[CONFIG_PACKET_LENGTH] = {0xaa, 0x55, SET_VAL_MSG, 83, 123};
+    valid[11] = config_crc_oracle(valid, 11);
+    const uint32_t before = global_state.config.screensaver_system_timeout_sec;
+    const bool was_enabled = global_state.config_mode_active;
+    global_state.config_mode_active = true;
+    for (unsigned bit = 0; bit < sizeof(valid) * 8; ++bit) {
+        uint8_t corrupt[sizeof(valid)];
+        memcpy(corrupt, valid, sizeof(valid));
+        corrupt[bit / 8] ^= 1u << (bit % 8);
+        tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                              HID_REPORT_TYPE_OUTPUT, corrupt, sizeof(corrupt));
+        assert(global_state.config.screensaver_system_timeout_sec == before);
+        assert(!global_state.reboot_requested);
+    }
+    for (unsigned length = 0; length < sizeof(valid); ++length)
+        tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                              HID_REPORT_TYPE_OUTPUT, valid, length);
+    tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                          HID_REPORT_TYPE_FEATURE, valid, sizeof(valid));
+    assert(global_state.config.screensaver_system_timeout_sec == before);
+
+    /* Even CRC-correct malformed preambles and nested proxies are refused. */
+    uint8_t malformed[sizeof(valid)];
+    memcpy(malformed, valid, sizeof(valid));
+    malformed[0] = 0;
+    malformed[11] = config_crc_oracle(malformed, 11);
+    tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                          HID_REPORT_TYPE_OUTPUT, malformed, sizeof(malformed));
+    assert(global_state.config.screensaver_system_timeout_sec == before);
+    uart_packet_t nested = {.type = PROXY_PACKET_MSG, .data = {PROXY_PACKET_MSG, WIPE_CONFIG_MSG}};
+    assert(!validate_packet(&nested));
+
+    tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                          HID_REPORT_TYPE_OUTPUT, valid, sizeof(valid));
+    assert(global_state.config.screensaver_system_timeout_sec == 123);
+
+    /* Real response queue preserves descriptor length and independently
+       verified CRC, even when UART frames have a different size. */
+    hid_generic_pkt_t queued;
+    while (queue_try_remove(&global_state.hid_queue_out, &queued)) { }
+    valid[2] = GET_VAL_MSG;
+    memset(valid + 4, 0, 7);
+    valid[11] = config_crc_oracle(valid, 11);
+    tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
+                          HID_REPORT_TYPE_OUTPUT, valid, sizeof(valid));
+    assert(queue_try_remove(&global_state.hid_queue_out, &queued));
+    assert(queued.instance == ITF_NUM_HID_VENDOR && queued.report_id == REPORT_ID_VENDOR);
+    assert(queued.len == CONFIG_PACKET_LENGTH && queued.data[2] == GET_VAL_MSG);
+    assert(queued.data[3] == 83 && queued.data[4] == 123);
+    assert(queued.data[11] == config_crc_oracle(queued.data, 11));
+    global_state.config.screensaver_system_timeout_sec = before;
+    global_state.config_mode_active = was_enabled;
+    puts("WebHID transport: independent CRC8, all 96 single-bit errors, lengths/types/preamble, nested proxy and real response queue passed");
 }
 
 #if SIM_HAS_DIAGNOSTIC_HISTORY
@@ -142,7 +212,7 @@ static void history_hooks(void) {
     selection_request(&incoming, OUTPUT_A, OUTPUT_B);
     uart_packet_t selected = {.type = OUTPUT_SELECT_SYNC_MSG};
     selection_encode(&incoming, selected.data);
-    selected.checksum = calc_checksum(selected.data, PACKET_DATA_LENGTH);
+    selected.checksum = calc_packet_checksum(&selected);
     process_packet(&selected, &global_state);
     assert(global_state.active_output == OUTPUT_A && history_next() == seq + 1);
     expect_history(seq, HISTORY_OUTPUT_PEER, OUTPUT_B, OUTPUT_A, 0);
@@ -197,16 +267,16 @@ static void history_hooks(void) {
     const config_t saved_config = global_state.config;
     const unsigned hid_before = queue_get_level(&global_state.hid_queue_out);
     uart_packet_t config_read = {.type = GET_VAL_MSG, .data = {83}};
-    uint8_t raw[RAW_PACKET_LENGTH];
-    write_raw_packet(raw, &config_read);
-    raw[RAW_PACKET_LENGTH - 1] ^= 1;
+    uint8_t raw[CONFIG_PACKET_LENGTH];
+    write_config_packet(raw, &config_read);
+    raw[CONFIG_PACKET_LENGTH - 1] ^= 1;
     tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
                           HID_REPORT_TYPE_OUTPUT, raw, sizeof(raw));
     expect_history(seq++, HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, GET_VAL_MSG);
     assert(history_next() == seq);
     assert(queue_get_level(&global_state.hid_queue_out) == hid_before);
     assert(memcmp(&global_state.config, &saved_config, sizeof(saved_config)) == 0);
-    raw[RAW_PACKET_LENGTH - 1] ^= 1;
+    raw[CONFIG_PACKET_LENGTH - 1] ^= 1;
     tud_hid_set_report_cb(ITF_NUM_HID_VENDOR, REPORT_ID_VENDOR,
                           HID_REPORT_TYPE_OUTPUT, raw, sizeof(raw));
     assert(queue_get_level(&global_state.hid_queue_out) == hid_before + 1);
@@ -252,13 +322,14 @@ int main(void) {
     /* A corrupted/malformed output value must never become an array index. */
     for(unsigned output=2;output<=255;output++) {
         uart_packet_t p={.type=OUTPUT_SELECT_MSG,.data={output}};
-        p.checksum=calc_checksum(p.data,PACKET_DATA_LENGTH);
+        p.checksum=calc_packet_checksum(&p);
         process_packet(&p,&global_state);
         assert(global_state.active_output==0);
     }
     sim_task(3);assert(outputs==1);
     wide_motion();
     vendor_diagnostics_cannot_enter_core1();
+    vendor_transport_integrity();
 #if SIM_HAS_DIAGNOSTIC_HISTORY
     history_hooks();
 #endif

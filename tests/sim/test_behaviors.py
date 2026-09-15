@@ -7,6 +7,7 @@ boundaries and minutes of inactivity without a wall-clock wait.
 import struct
 
 from fixtures import KEYBOARD, attach, keyboard, mouse
+from test_transport import decode_frame
 
 
 # USB HID usages/modifier bits are fixture values, independent of C headers.
@@ -63,11 +64,11 @@ def maintenance_boot(s, target):
     s.expect(survivor, 'stopped', 0)
     s.check('reset_count', target, 1, 1, 1)
     if target == 1:
-        # The existing peer request remains wire-compatible: type 4, ENABLE.
-        requests = [bytes.fromhex(x['data']) for x in s.trace
+        # The command retains its meaning inside the protected UART envelope.
+        requests = [decode_frame(bytes.fromhex(x['data'])) for x in s.trace
                     if x['kind'] == 'uart_tx' and x['node'] == 0
-                    and bytes.fromhex(x['data'])[2] == 4]
-        assert len(requests) == 1 and requests[0][3:] == bytes([1] + [0] * 7 + [1])
+                    and decode_frame(bytes.fromhex(x['data']))[0] == 4]
+        assert requests == [(4, bytes([1] + [0] * 7))]
     # Pass one full watchdog deadline; the board left running still services
     # its cores after the target has left the firmware and UART link.
     s.advance(510000)

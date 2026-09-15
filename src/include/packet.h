@@ -18,7 +18,7 @@
  *  Constants
  *==============================================================================*/
 
-/* Preamble */
+/* WebHID configuration preamble. Never accepted by the UART receiver. */
 #define START1        0xAA
 #define START2        0x55
 #define START_LENGTH  2
@@ -30,12 +30,15 @@
 #define MOUSE_QUEUE_LENGTH 512
 
 /* Packet Lengths and Offsets */
-#define PACKET_LENGTH          (TYPE_LENGTH + PACKET_DATA_LENGTH + CHECKSUM_LENGTH)
-#define RAW_PACKET_LENGTH      (START_LENGTH + PACKET_LENGTH)
+#define CONFIG_PACKET_LENGTH   12
+#define UART_FRAME_VERSION     1
+#define UART_FRAME_START       0x7e
+#define UART_FRAME_END         0x7f
+#define UART_FRAME_BODY_LENGTH 15
+#define RAW_PACKET_LENGTH      (2 + 2 * UART_FRAME_BODY_LENGTH)
 
 #define TYPE_LENGTH             1
 #define PACKET_DATA_LENGTH      8 // For simplicity, all packet types are the same length
-#define CHECKSUM_LENGTH         1
 
 #define KEYARRAY_BIT_OFFSET     16
 #define KEYS_IN_USB_REPORT      6
@@ -56,5 +59,7 @@
         uint16_t data16[4];   // We can treat it as 4 16-byte chunks
         uint32_t data32[2];   // We can treat it as 2 32-byte chunks
     };
-    uint8_t checksum; // Checksum, a simple XOR-based one
+    /* CRC32 of UART version, payload length, command type and all payload bytes.
+       This is an internal packet, never a cast of incoming UART or USB bytes. */
+    uint32_t checksum;
 } __attribute__((packed)) uart_packet_t;

@@ -11,6 +11,7 @@ from fixtures import attach,keyboard,mouse
 from run import replay, minimize
 from test_peer_status import scenario_peer_status_roundtrip
 from test_peer_history import scenario_peer_history_roundtrip
+from test_uart_integrity import scenario_uart_fault_positions
 
 def check_interleaving_cli_selection():
     # Exercise argparse and dispatch, with only expensive firmware execution
@@ -92,6 +93,12 @@ def main():
         try:s.check('usb_bytes',0,2,-1,0,'01')
         except AssertionError as e:assert 'usb_bytes' in str(e)
         else:raise AssertionError('report-byte oracle accepted an incorrect button mask')
+    data=json.loads(path.read_text());assert replay(data)==before
+    with Simulation(seed=73, background=False) as s:
+        scenario_uart_fault_positions(s)
+        s.save(path)
+        before=s.trace
+        assert {'fault_xor','fault_bits','fault_delete_byte','fault_duplicate_byte','fault_delay_byte'} <= {event['kind'] for event in before}
     data=json.loads(path.read_text());assert replay(data)==before
     with Simulation(seed=73) as s:
         scenario_peer_history_roundtrip(s)

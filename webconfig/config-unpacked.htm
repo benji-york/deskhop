@@ -1735,6 +1735,7 @@ img {
 
   <script>
   const mgmtReportId = 6;
+const configReportLength = 12;
 const jitterMode = 2;
 const disabledMode = 0;
 const screensaverModeKeys = [19, 49];
@@ -1747,11 +1748,15 @@ const packetType = {
 };
 
 function calcChecksum(report) {
-  let checksum = 0;
-  for (let i = 3; i < 11; i++)
-    checksum ^= report[i];
-
-  return checksum;
+  /* CRC-8/ATM, polynomial 0x07, init/xorout 0, no reflection. Keep the
+     12-byte USB contract independent of the protected UART wire format. */
+  let crc = 0;
+  for (let i = 0; i < configReportLength - 1; i++) {
+    crc ^= report[i];
+    for (let bit = 0; bit < 8; bit++)
+      crc = ((crc << 1) ^ ((crc & 0x80) ? 0x07 : 0)) & 0xff;
+  }
+  return crc;
 }
 
 async function sendReport(type, payload = [], sendBoth = false) {
@@ -1769,16 +1774,19 @@ async function sendReport(type, payload = [], sendBoth = false) {
 }
 
 function makeReport(type, payload, proxy=false) {
-  var dataOffset = proxy ? 4 : 3;
-  report = new Uint8Array([0xaa, 0x55, type, ...new Array(9).fill(0)]);
-
+  const dataOffset = proxy ? 4 : 3;
+  const bytes = payload ? [...payload] : [];
+  const capacity = proxy ? 7 : 8;
+  /* The proxy consumes one of the payload bytes for its command. Existing
+     packValue returns eight bytes, so only zero padding may be discarded. */
+  if (bytes.slice(capacity).some(value => value !== 0))
+    throw new RangeError('Configuration payload exceeds report capacity');
+  const report = new Uint8Array(configReportLength);
+  report.set([0xaa, 0x55, proxy ? packetType.proxyPacketMsg : type]);
   if (proxy)
-    report = new Uint8Array([0xaa, 0x55, packetType.proxyPacketMsg, type, ...new Array(7).fill(0), type]);
-
-  if (payload) {
-    report.set([...payload], dataOffset);
-    report[report.length - 1] = calcChecksum(report);
-  }
+    report[3] = type;
+  report.set(bytes.slice(0, capacity), dataOffset);
+  report[report.length - 1] = calcChecksum(report);
   return report;
 }
 
@@ -1945,10 +1953,12 @@ async function readHandler() {
 }
 
 async function handleInputReport(event) {
-  var data = new Uint8Array(event.data.buffer);
-  var key = data[3];
-
-  updateElement(key, event);
+  const data = new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength);
+  if (event.reportId !== mgmtReportId || data.length !== configReportLength
+      || data[0] !== 0xaa || data[1] !== 0x55 || data[2] !== packetType.getValMsg
+      || data[data.length - 1] !== calcChecksum(data))
+    return;
+  updateElement(data[3], event);
 }
 
 async function rebootHandler() {

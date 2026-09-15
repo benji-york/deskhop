@@ -13,6 +13,7 @@
 #include "console.h"
 #include "hid_report.h"
 #include "diagnostic_history.h"
+#include "config_packet.h"
 
 _Static_assert(MAX_DEVICES <= CFG_TUH_DEVICE_MAX,
                "MAX_DEVICES must not exceed CFG_TUH_DEVICE_MAX");
@@ -53,16 +54,24 @@ void tud_hid_set_report_cb(uint8_t instance,
             return;
 
         /* We insist on a fixed size packet. No overflows. */
-        if (bufsize != RAW_PACKET_LENGTH)
+        if (report_type != HID_REPORT_TYPE_OUTPUT || bufsize != CONFIG_PACKET_LENGTH)
             return;
 
-        uart_packet_t *packet = (uart_packet_t *) (buffer + START_LENGTH);
+        uart_packet_t packet;
+        if (!read_config_packet(buffer, bufsize, &packet)) {
+            diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, buffer[2]);
+            return;
+        }
 
         /* Only a certain packet types are accepted */
-        if (!validate_packet(packet))
+        if (!validate_packet(&packet))
             return;
 
-        process_packet(packet, &global_state);
+        /* The dispatcher accepts normalized packets only. The USB report's
+           integrity was checked before constructing this internal checksum. */
+        packet.checksum = calc_packet_checksum(&packet);
+        process_packet(&packet, &global_state);
+        return;
     }
 
     /* Only other set report we care about is LED state change, and that's exactly 1 byte long */

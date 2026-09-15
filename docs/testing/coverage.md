@@ -74,6 +74,12 @@ interleavings. See the [candidate record](verification-v101.md).
 
 ## Layers and independent oracles
 
+The unflashed [UART integrity draft](uart-integrity-draft.md) adds independent
+CRC32 wire fixtures, whole-frame bit corruption, stream resynchronization,
+mixed-protocol rejection and command-dispatch regression evidence. Historical
+claims of accepting legacy UART frames below describe earlier versions; the
+current draft accepts only protected UART v1, including for legacy payload shapes.
+
 The v0.99 diagnostic additions are exercised at separate boundaries: pure
 history/peer protocol units use independent CRC and wire oracles; the paired
 suite runs real bridges, SDK queues and UART dispatch; the real TinyUSB device
@@ -202,13 +208,14 @@ trace rather than an arbitrary input script. The finite model produces shortest
 counterexample paths and validates replay automatically. See each runner's help
 for current shrinking/minimization support; do not infer it from a saved log.
 
-The storage mutation suite executes eleven deliberately broken production variants
+The storage mutation suite executes twenty-one deliberately broken production variants
 and requires runtime detection, not compile failure. The model detects five
 separate specification mutations. These demonstrate sensitivity to representative
 bugs such as premature finalization, queue consumption on failure, invalid CRC
 acceptance, missing flash exclusion and a SET_VAL writer bypassing the config
-snapshot lock. The paired suite defines fifteen production mutations, including
-seven selection mutations and mouse peer-mask/echo/detach checks. Each runner
+snapshot lock. The paired suite defines seventeen production mutations, including
+seven selection mutations, mouse peer-mask/echo/detach checks, and two UART
+integrity/resynchronization regressions. Each runner
 reports its actual runtime results; these inventories are not completed-run
 claims or a universal mutation score. The intentional lost-delivery apparatus
 case checks replay/minimization independently of an unfixed production bug;

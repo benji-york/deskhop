@@ -51,7 +51,9 @@ class Simulation:
         self.seed=seed; self.quantum=quantum; self.background=background; self.core_order=core_order
         self.rng=random.Random(seed); self.now=0; self.serial=itertools.count()
         self.events=[]; self.trace=[]; self.steps=[]; self.active=[]; self.error=None
-        self.link=[{'delay':0,'drop':0,'xor':0,'truncate':0,'duplicate':False} for _ in range(2)]
+        self.link=[{'delay':0,'drop':0,'xor':0,'xor_at':3,'bit_flips':[],
+                    'truncate':0,'duplicate':False,'delete_byte':None,
+                    'duplicate_byte':None,'delay_byte':None} for _ in range(2)]
         self.pause_until={}; self.callbacks=[]; self.nodes=[]; self.task_ids=[]; self.schedule_count=0
         self.checkpoint_actions=[]
         self.tmp=tempfile.TemporaryDirectory(prefix='deskhop-sim-')
@@ -84,6 +86,7 @@ class Simulation:
                 'sim_verify_assess':([C.c_uint16,C.c_uint32],None),
                 'sim_verify_mutate':([C.c_uint32,C.c_uint8],None),
                 'sim_verify_update_state':([C.c_uint],None),
+                'queue_packet_try':([C.c_void_p,C.c_int,C.c_int],C.c_bool),
             }
             for name,(args,ret) in signatures.items():
                 f=getattr(lib,name); f.argtypes=args; f.restype=ret
@@ -91,6 +94,9 @@ class Simulation:
             self.callbacks.append(cb); self.nodes.append(lib); lib.sim_init(role,cb)
             self.task_ids.append({lib.sim_task_name(index).decode('ascii'): index
                                   for index in range(lib.sim_task_count())})
+        # The original source tree remains runnable as a differential oracle.
+        # This reports the loaded image ABI; it never changes receiver behavior.
+        self.uart_protocol = int(hasattr(self.nodes[0], 'read_raw_packet'))
         if background:
             for node in range(2):
                 for core in range(2): self._schedule(0,node,core,'core',[core])
@@ -132,13 +138,38 @@ class Simulation:
             if fault['drop']:
                 fault['drop']-=1; self.trace.append(dict(item,kind='fault_drop')); return
             if fault['xor']:
-                payload[3]^=fault['xor']; fault['xor']=0
+                index=fault['xor_at']; mask=fault['xor']
+                assert isinstance(index,int) and 0<=index<len(payload), 'xor_at outside frame'
+                assert isinstance(mask,int) and 1<=mask<=255, 'xor mask must fit one byte'
+                payload[index]^=mask; fault['xor']=0
+                self.trace.append(dict(item,kind='fault_xor',a=index,b=mask,data=payload.hex()))
+            if fault['bit_flips']:
+                for index,bit in fault['bit_flips']:
+                    assert isinstance(index,int) and 0<=index<len(payload), 'bit_flips byte outside frame'
+                    assert isinstance(bit,int) and 0<=bit<8, 'bit_flips bit outside byte'
+                    payload[index]^=1<<bit
+                self.trace.append(dict(item,kind='fault_bits',data=payload.hex()))
+                fault['bit_flips']=[]
+            if fault['delete_byte'] is not None:
+                index=fault['delete_byte']; assert 0<=index<len(payload), 'delete_byte outside frame'
+                del payload[index]; fault['delete_byte']=None
+                self.trace.append(dict(item,kind='fault_delete_byte',a=index,data=payload.hex()))
+            if fault['duplicate_byte'] is not None:
+                index=fault['duplicate_byte']; assert 0<=index<len(payload), 'duplicate_byte outside frame'
+                payload.insert(index,payload[index]); fault['duplicate_byte']=None
+                self.trace.append(dict(item,kind='fault_duplicate_byte',a=index,data=payload.hex()))
             if fault['truncate']:
                 payload=payload[:fault['truncate']]; fault['truncate']=0
+                self.trace.append(dict(item,kind='fault_truncate',data=payload.hex()))
+            delayed=fault['delay_byte']; fault['delay_byte']=None
+            if delayed is not None:
+                assert 0<=delayed['index']<len(payload) and delayed['us']>=0, 'invalid delay_byte'
+                self.trace.append(dict(item,kind='fault_delay_byte',a=delayed['index'],b=delayed['us'],data=payload.hex()))
             start=self.now+fault['delay']
             for idx,byte in enumerate(payload):
                 # Integer ceiling of 8N1 wire serialization. DMA RX is independent.
                 when=start+((idx+1)*10*1000000+3686399)//3686400
+                if delayed is not None and idx==delayed['index']:when+=delayed['us']
                 self._schedule(when,1-node,2,'rx',[byte])
             if fault['duplicate']:
                 for idx,byte in enumerate(payload): self._schedule(start+b+3+idx*3,1-node,2,'rx',[byte])
@@ -206,7 +237,14 @@ class Simulation:
             getattr(lib,'sim_'+op)(*args[:-1],data,len(raw))
         elif op=='set':lib.sim_set(FIELDS[args[0]],args[1],args[2])
         elif op=='task':lib.sim_task(self.task_id(node,args[0]))
-        elif op=='fault':self.link[node].update(args[0])
+        elif op=='fault':
+            assert set(args[0])<=set(self.link[node]), 'unknown UART fault key'
+            self.link[node].update(args[0])
+        elif op=='packet':
+            kind,hexdata,*expected=args
+            raw=bytes.fromhex(hexdata); data=C.create_string_buffer(raw)
+            accepted=bool(lib.queue_packet_try(data,kind,len(raw)))
+            if expected:assert accepted==bool(expected[0]), f'UART queue acceptance: {accepted} != {expected[0]}'
         elif op=='pause': self.pause_until[(node,args[0])]=self.now+args[1]
         elif op=='checkpoint':self.checkpoint_actions.append(tuple(args))
         elif op=='raw':
@@ -243,6 +281,9 @@ class Simulation:
             node,reason,disable_mask,count=args
             ok=sum(x['kind']=='reset' and x['node']==node
                    and x['a']==reason and x['b']==disable_mask for x in self.trace)==count
+        elif predicate=='event_count':
+            node,kind,count=args
+            ok=sum(x['kind']==kind and x['node']==node for x in self.trace)==count
         elif predicate=='diagnostic_pacing':
             node, interval=args
             attempts=[x['at'] for x in self.trace

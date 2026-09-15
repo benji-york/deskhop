@@ -70,6 +70,7 @@ void restore_leds(device_t *);
 void blink_led(device_t *);
 void send_value(uint8_t, uint8_t);
 bool validate_packet(uart_packet_t *);
+uint32_t calc_packet_checksum(const uart_packet_t *);
 void process_packet(uart_packet_t *, device_t *);
 uint64_t time_us_64(void);
 void tight_loop_contents(void);

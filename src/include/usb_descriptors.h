@@ -12,6 +12,8 @@
 #ifndef USB_DESCRIPTORS_H_
 #define USB_DESCRIPTORS_H_
 
+#include "packet.h"
+
 // Interface 0
 #define REPORT_ID_KEYBOARD 1
 #define REPORT_ID_MOUSE    2
@@ -142,7 +144,7 @@
     __VA_ARGS__ \
     HID_LOGICAL_MIN ( 0x80                                )  ,\
     HID_LOGICAL_MAX ( 0x7f                                )  ,\
-    HID_REPORT_COUNT( 12                                  )  ,\
+    HID_REPORT_COUNT( CONFIG_PACKET_LENGTH                )  ,\
     HID_REPORT_SIZE ( 8                                   )  ,\
     HID_USAGE       ( 0x10                                )  ,\
     HID_INPUT        ( HID_DATA | HID_ARRAY | HID_ABSOLUTE ) ,\

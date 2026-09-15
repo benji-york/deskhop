@@ -3,7 +3,7 @@ import struct
 import zlib
 
 from fixtures import attach, keyboard, mouse
-from test_transport import frame, out_mouse
+from test_transport import frame, decode_frame, out_mouse
 
 
 def request(s, node, token):
@@ -32,7 +32,7 @@ def result(s, node, token, outcome=0):
 def diagnostic_frames(s, source, kind):
     return [(event['at'], bytes.fromhex(event['data'])) for event in s.trace
             if event['kind'] == 'uart_tx' and event['node'] == source
-            and bytes.fromhex(event['data'])[2] == kind]
+            and decode_frame(bytes.fromhex(event['data']))[0] == kind]
 
 
 def scenario_peer_status_roundtrip(s):
@@ -61,10 +61,11 @@ def scenario_peer_status_roundtrip(s):
         # snapshot. The transport checksum alone cannot certify all 26 chunks.
         data = bytearray(78)
         for _, raw in responses:
-            assert raw[:3] == b'\xaa\x55\x25'
-            assert int.from_bytes(raw[3:7], 'little') == token
-            index = raw[7]
-            data[index * 3:index * 3 + 3] = raw[8:11]
+            kind, payload = decode_frame(raw)
+            assert kind == 37
+            assert int.from_bytes(payload[:4], 'little') == token
+            index = payload[4]
+            data[index * 3:index * 3 + 3] = payload[5:8]
         assert data[0:2] == bytes([2, 1 - node])
         assert struct.unpack_from('<HH', data, 2) == (0, 97)
         assert data[6:14] == bytes((1 - node) * 16 + i for i in range(8))

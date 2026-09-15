@@ -245,6 +245,7 @@ void pico_get_unique_board_id_string(char *buffer, unsigned length) { snprintf(b
 void restore_leds(device_t *state) { ++led_restores; }
 void send_value(uint8_t value, enum packet_type_e type) { CHECK(type == KBD_SET_REPORT_MSG); last_led = value; ++led_peer_messages; }
 bool validate_packet(uart_packet_t *packet) { return false; }
+uint32_t calc_packet_checksum(const uart_packet_t *packet) { return 0; }
 void process_packet(uart_packet_t *packet, device_t *state) { CHECK(false); }
 void tud_suspend_cb(bool remote_wakeup_en) { ++suspend_callbacks; }
 void tud_resume_cb(void) { ++resume_callbacks; }

@@ -8,6 +8,21 @@ README.
 
 Snapshot: 2026-09-15
 
+## Unflashed UART command integrity draft
+
+The second ordered bug-fix draft branches from keyboard draft
+`b8992dc16370bbb1ce00a238463ec6e8207d0883` on `codex/uart-command-integrity`.
+See the [transport/migration note](docs/testing/uart-integrity-draft.md).
+UART now protects version, length, type and payload with CRC32 and resynchronizes
+after malformed frames. There is no legacy UART fallback. Initial rollout must
+deliberately program both boards independently; subsequent compatible releases
+retain protected automatic peer updates. The Web Config page uses a separate
+12-byte CRC8 format. This draft preserves the keyboard state envelope and keeps
+firmware 0.101/configuration 10: **UNFLASHABLE as a release** until the stack's
+explicit version/migration plan. The deployed v0.101 installation below is unchanged.
+Validation passed: fast 38/38, deep 46/46, ARM 2/2, 12 UART integrity scenarios,
+72 inherited keyboard cases, and the additional queue/remount scheduling checks.
+
 ## Unflashed keyboard reliability draft
 
 The first bug-fix-stack draft starts at `af100bc` on

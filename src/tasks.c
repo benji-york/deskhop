@@ -391,12 +391,17 @@ void packet_receiver_task(device_t *state) {
         = (uint32_t)DMA_RX_BUFFER_SIZE - dma_channel_hw_addr(state->dma_rx_channel)->transfer_count;
     uint32_t delta = get_ptr_delta(current_pointer, state);
 
-    /* If we don't have enough characters for a packet, skip loop and return immediately */
-    while (delta >= RAW_PACKET_LENGTH) {
+    /* Bounded by the captured DMA ring occupancy; one valid dispatch per pass.
+       Failed candidates advance ONE byte, preserving the next delimiter after
+       corruption/truncation. No byte pattern negotiates a weaker protocol. */
+    while (delta) {
         if (is_start_of_packet(state)) {
-            fetch_packet(state);
-            process_packet(&state->in_packet, state);
-            return;
+            if (delta < RAW_PACKET_LENGTH)
+                return;
+            if (fetch_packet(state)) {
+                process_packet(&state->in_packet, state);
+                return;
+            }
         }
 
         /* No packet found, advance to next position and decrement delta */

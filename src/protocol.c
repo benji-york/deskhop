@@ -9,6 +9,7 @@
  * See the file LICENSE for the full license text.
  */
 #include "main.h"
+#include "config_packet.h"
 
 const field_map_t api_field_map[] = {
 /* Index, Rdonly, Type, Len, Offset in struct */
@@ -105,9 +106,9 @@ void _queue_packet(uint8_t *payload, device_t *state, uint8_t type, uint8_t len,
 }
 
 void queue_cfg_packet(uart_packet_t *packet, device_t *state) {
-    uint8_t raw_packet[RAW_PACKET_LENGTH];
-    write_raw_packet(raw_packet, packet);
-    _queue_packet(raw_packet, state, 0, RAW_PACKET_LENGTH, REPORT_ID_VENDOR, ITF_NUM_HID_VENDOR);
+    uint8_t raw_packet[CONFIG_PACKET_LENGTH];
+    write_config_packet(raw_packet, packet);
+    _queue_packet(raw_packet, state, 0, CONFIG_PACKET_LENGTH, REPORT_ID_VENDOR, ITF_NUM_HID_VENDOR);
 }
 
 void queue_cc_packet(uint8_t *payload, device_t *state) {

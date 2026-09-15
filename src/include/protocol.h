@@ -11,6 +11,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
 
 enum packet_type_e {
     KEYBOARD_REPORT_MSG  = 1,

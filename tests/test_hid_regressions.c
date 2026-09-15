@@ -73,6 +73,7 @@ void queue_packet(uint8_t *data, uint8_t type, uint8_t length) {
     assert(!"test unexpectedly routed input to the remote output");
 }
 bool validate_packet(uart_packet_t *packet) { (void)packet; return false; }
+uint32_t calc_packet_checksum(const uart_packet_t *packet) { (void)packet; return 0; }
 void process_packet(uart_packet_t *packet, device_t *state) { (void)packet; (void)state; }
 uint64_t time_us_64(void) { return 1000000; }
 void tight_loop_contents(void) { assert(!"unexpected blocking queue"); }

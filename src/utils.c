@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "critical_try.h"
+#include "diagnostic_history.h"
 
 _Static_assert(sizeof(config_t) <= FLASH_PAGE_SIZE,
                "config_t has grown beyond the configuration flash page");
@@ -58,19 +59,37 @@ void config_unlock(void) {
  * ==============  Checksum Functions  ============== *
  * ================================================== */
 
-uint8_t calc_checksum(const uint8_t *data, int length) {
-    uint8_t checksum = 0;
-
-    for (int i = 0; i < length; i++) {
-        checksum ^= data[i];
-    }
-
-    return checksum;
+uint32_t calc_packet_checksum(const uart_packet_t *packet) {
+    uint8_t body[11] = {UART_FRAME_VERSION, PACKET_DATA_LENGTH, packet->type};
+    memcpy(body + 3, packet->data, PACKET_DATA_LENGTH);
+    return calc_crc32(body, sizeof(body));
 }
 
 bool verify_checksum(const uart_packet_t *packet) {
-    uint8_t checksum = calc_checksum(packet->data, PACKET_DATA_LENGTH);
-    return checksum == packet->checksum;
+    return calc_packet_checksum(packet) == packet->checksum;
+}
+
+bool read_raw_packet(const uint8_t *raw, uart_packet_t *packet) {
+    uint8_t body[UART_FRAME_BODY_LENGTH];
+    if (raw[0] != UART_FRAME_START || raw[RAW_PACKET_LENGTH - 1] != UART_FRAME_END)
+        return false;
+    for (unsigned i = 0; i < sizeof(body); ++i) {
+        uint8_t hi = raw[1 + 2 * i], lo = raw[2 + 2 * i];
+        if ((hi & 0xf0) != 0x40 || (lo & 0xf0) != 0x40)
+            return false;
+        body[i] = ((hi & 0xf) << 4) | (lo & 0xf);
+    }
+    if (body[0] != UART_FRAME_VERSION || body[1] != PACKET_DATA_LENGTH)
+        return false;
+    uint32_t crc = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        crc |= (uint32_t)body[11 + i] << (8 * i);
+    if (calc_crc32(body, 11) != crc)
+        return false;
+    packet->type = body[2];
+    memcpy(packet->data, body + 3, PACKET_DATA_LENGTH);
+    packet->checksum = crc;
+    return true;
 }
 
 uint32_t crc32_iter(uint32_t crc, const uint8_t byte) {
@@ -402,7 +421,7 @@ void reboot(void) {
 }
 
 bool is_start_of_packet(device_t *state) {
-    return (uart_rxbuf[state->dma_ptr] == START1 && uart_rxbuf[NEXT_RING_IDX(state->dma_ptr)] == START2);
+    return uart_rxbuf[state->dma_ptr] == UART_FRAME_START;
 }
 
 uint32_t get_ptr_delta(uint32_t current_pointer, device_t *state) {
@@ -419,16 +438,19 @@ uint32_t get_ptr_delta(uint32_t current_pointer, device_t *state) {
     return delta;
 }
 
-void fetch_packet(device_t *state) {
-    uint8_t *dst = (uint8_t *)&state->in_packet;
-
-    for (int i = 0; i < RAW_PACKET_LENGTH; i++) {
-        /* Skip the header preamble */
-        if (i >= START_LENGTH)
-            dst[i - START_LENGTH] = uart_rxbuf[state->dma_ptr];
-
-        state->dma_ptr = NEXT_RING_IDX(state->dma_ptr);
+bool fetch_packet(device_t *state) {
+    uint8_t raw[RAW_PACKET_LENGTH];
+    uint32_t cursor = state->dma_ptr;
+    for (unsigned i = 0; i < sizeof(raw); ++i) {
+        raw[i] = uart_rxbuf[cursor];
+        cursor = NEXT_RING_IDX(cursor);
     }
+    if (!read_raw_packet(raw, &state->in_packet)) {
+        diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, 0);
+        return false;
+    }
+    state->dma_ptr = cursor;
+    return true;
 }
 
 /* Validating any input is mandatory. Only packets of these type are allowed
@@ -442,7 +464,6 @@ bool validate_packet(uart_packet_t *packet) {
         WIPE_CONFIG_MSG,
         SAVE_CONFIG_MSG,
         REBOOT_MSG,
-        PROXY_PACKET_MSG,
     };
     uint8_t packet_type = packet->type;
 

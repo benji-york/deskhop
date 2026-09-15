@@ -63,6 +63,10 @@ ownership from each firmware's tables, including older baseline builds.
 
 ## Unflashed keyboard draft
 
+The successor [UART integrity draft](uart-integrity-draft.md) protects all command
+types and framing, separates WebHID encoding, and requires a deliberate initial
+both-board migration. It remains unflashed at firmware 0.101/configuration 10.
+
 The [keyboard reliability draft](keyboard-reliability-draft.md) adds ordinary
 release recovery under USB/UART saturation and packet loss, bounded peer leases,
 focus/session replay rejection, source aggregation and synthetic lock release.

@@ -9,7 +9,7 @@ import struct
 import zlib
 
 from fixtures import KEYBOARD, attach, keyboard
-from test_transport import frame
+from test_transport import frame, decode_frame
 from test_selection import selection_frame
 
 SHIFT, CTRL = 0x02, 0x01
@@ -420,11 +420,11 @@ def inject_snapshot(s, target, packets):
 
 
 def request_nonce(s, target):
-    requests = [bytes.fromhex(event['data']) for event in s.trace
+    requests = [decode_frame(bytes.fromhex(event['data'])) for event in s.trace
                 if event['kind'] == 'uart_tx' and event['node'] == target
-                and bytes.fromhex(event['data'])[2] in (42, 48)]
+                and decode_frame(bytes.fromhex(event['data']))[0] in (42, 48)]
     assert requests, 'owner emitted no keyboard-state challenge'
-    return int.from_bytes(requests[-1][3:11], 'little')
+    return int.from_bytes(requests[-1][1], 'little')
 
 
 def isolated_protocol(s, target):
@@ -589,20 +589,22 @@ def scenario_keyboard_screenlock_release_wire_loss(s):
         for _ in range(20):
             before = len(s.trace)
             s.do(source, 'task', 'process_uart_tx_task')
-            sent = [bytes.fromhex(event['data']) for event in s.trace[before:]
+            sent = [decode_frame(bytes.fromhex(event['data'])) for event in s.trace[before:]
                     if event['kind'] == 'uart_tx' and event['node'] == source]
-            if sent and sent[-1][2] == 1 and sent[-1][3:11] == bytes.fromhex(keyboard(0x09, 0x14)):
+            if sent and sent[-1] == (1, bytes.fromhex(keyboard(0x09, 0x14))):
                 saw_down = True
                 break
             s.advance(50)
         assert saw_down, 'no production remote screenlock down was sent'
         s.do(source, 'fault', {'drop': 1})
-        s.advance(50)
+        # 32 wire bytes at 3,686,400 baud take 87 us in the 8N1 model.
+        # Let that actual DMA transfer finish before asking TX for its all-up.
+        s.advance(100)
         before = len(s.trace)
         s.do(source, 'task', 'process_uart_tx_task')
-        dropped = [bytes.fromhex(event['data']) for event in s.trace[before:]
+        dropped = [decode_frame(bytes.fromhex(event['data'])) for event in s.trace[before:]
                    if event['kind'] == 'fault_drop' and event['node'] == source]
-        assert len(dropped) == 1 and dropped[0][2] == 1 and dropped[0][3:11] == bytes(8)
+        assert dropped == [(1, bytes(8))]
         s.advance(80000)
         for node in (0, 1):
             released(s, node)

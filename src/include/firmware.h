@@ -51,7 +51,8 @@
   *  UART Packet Fetching
   *  Functions to handle incoming UART packets, especially for firmware updates.
   *==============================================================================*/
- void     fetch_packet(device_t *);
+ bool     fetch_packet(device_t *);
+ bool     read_raw_packet(const uint8_t *, uart_packet_t *);
  uint32_t get_ptr_delta(uint32_t, device_t *);
  bool     is_start_of_packet(device_t *);
  bool     request_byte(device_t *, uint32_t);

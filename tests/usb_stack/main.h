@@ -22,6 +22,7 @@ extern device_t global_state;
 void restore_leds(device_t *);
 void send_value(uint8_t, enum packet_type_e);
 bool validate_packet(uart_packet_t *);
+uint32_t calc_packet_checksum(const uart_packet_t *);
 void process_packet(uart_packet_t *, device_t *);
 void publish_local_modifiers(device_t *);
 void blink_led(device_t *);

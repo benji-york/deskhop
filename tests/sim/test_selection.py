@@ -8,7 +8,7 @@ outstanding selection generations.
 import argparse
 import pathlib
 from fixtures import attach, keyboard
-from test_transport import frame
+from test_transport import frame, decode_frame, legacy_frame
 
 
 def selection_frame(output, counter, origin, *, joined=True, joining=False, pending=False, kind=32):
@@ -203,10 +203,11 @@ def scenario_selection_queue_retry(s):
 
 
 def check_legacy_receiver(library, legacy_library):
-    """Feed a real newly emitted selection to the previous production receiver.
+    """Assert the deliberate transport boundary against a real old receiver.
 
-    The legacy image is supplied by the baseline-build runner. ID32 must be
-    ignored, and byte zero of the extended ID3 must retain its old meaning.
+    Preserve the historical ID3-extension/unknown-ID32 oracle using an explicit
+    old envelope. New traffic must be ignored by the old parser; new firmware
+    must reject old traffic before and after accepting protected traffic.
     """
     from simulator import Simulation
     with Simulation(library=library) as sim:
@@ -215,15 +216,30 @@ def check_legacy_receiver(library, legacy_library):
         sim.advance(5000)
         emitted = [event['data'] for event in sim.trace
                    if event['kind'] == 'uart_tx' and event['node'] == 0
-                   and bytes.fromhex(event['data'])[2] == 3]
+                   and decode_frame(bytes.fromhex(event['data']))[0] == 3]
         wire = emitted[-1]
+        kind, payload = decode_frame(bytes.fromhex(wire))
+        old_wire = legacy_frame(kind, payload)
     with Simulation(library=legacy_library) as legacy:
         attach(legacy)
         inject(legacy, 1, wire)
+        legacy.expect(1, 'output', 0)
+        # The original payload-level compatibility still holds when explicitly
+        # carried by its historical framing; it is no longer sent by new code.
+        inject(legacy, 1, old_wire)
         legacy.expect(1, 'output', 1)
-        inject(legacy, 1, selection_frame(0, 100, 0))
+        _, sync_payload = decode_frame(bytes.fromhex(selection_frame(0, 100, 0)))
+        inject(legacy, 1, legacy_frame(32, sync_payload))
         legacy.expect(1, 'output', 1)
-    print('PASS actual legacy receiver accepts ID3 extension and ignores ID32')
+    with Simulation(library=library) as current:
+        attach(current)
+        inject(current, 1, old_wire)
+        current.expect(1, 'output', 0)
+        inject(current, 1, wire)
+        current.expect(1, 'output', 1)
+        inject(current, 1, legacy_frame(3, b'\x00'))
+        current.expect(1, 'output', 1)
+    print('PASS deliberate mixed-version framing rejection; historical ID3 extension/ID32 oracle retained')
 
 
 SCENARIOS = {name.removeprefix('scenario_'): value for name, value in list(globals().items())

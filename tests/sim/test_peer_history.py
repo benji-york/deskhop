@@ -3,7 +3,7 @@ import struct
 import zlib
 
 from fixtures import attach, keyboard, mouse
-from test_transport import frame, out_mouse
+from test_transport import frame, decode_frame, out_mouse
 from test_peer_status import request as status_request, result as status_result
 
 
@@ -66,15 +66,16 @@ def check_wire(s, client, token, limit):
         if event['kind'] != 'uart_tx':
             continue
         raw = bytes.fromhex(event['data'])
-        if int.from_bytes(raw[3:7], 'little') != token:
+        kind, payload = decode_frame(raw)
+        if int.from_bytes(payload[:4], 'little') != token:
             continue
-        if event['node'] == client and raw[2] == 38:
+        if event['node'] == client and kind == 38:
             requests.append(raw)
-        if event['node'] == 1 - client and raw[2] == 39:
-            index = int.from_bytes(raw[7:9], 'little')
+        if event['node'] == 1 - client and kind == 39:
+            index = int.from_bytes(payload[4:6], 'little')
             assert index not in indices and index < expected_size // 2
             indices.add(index)
-            data[2 * index:2 * index + 2] = raw[9:11]
+            data[2 * index:2 * index + 2] = payload[6:8]
     assert requests == [bytes.fromhex(frame(38, struct.pack('<IBB2x', token, 2, limit)))]
     assert indices == set(range(expected_size // 2))
     assert data[:4] == bytes([2, 1 - client, limit, 24])

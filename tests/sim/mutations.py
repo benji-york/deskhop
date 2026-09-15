@@ -32,6 +32,14 @@ MUTATIONS=[
   'timed_system_wide_keepawake','direct_valid[0]'),
  ('zoom-no-quiet-period','zoom_tracker.c','now + ZOOM_ASSIST_QUIET_TIME_US',
   'now','zoom_scroll_debt_and_quiet_exit','zoom'),
+ ('repair-untrusted-uart-crc','utils.c',
+  'if (calc_crc32(body, 11) != crc)\n        return false;',
+  'crc = calc_crc32(body, 11);',
+  'uart_type_integrity','system_timeout[0] on 0'),
+ ('consume-rejected-uart-frame','utils.c',
+  'if (!read_raw_packet(raw, &state->in_packet)) {',
+  'if (!read_raw_packet(raw, &state->in_packet)) {\n        state->dma_ptr = cursor;',
+  'uart_faults','x[0] on 0'),
 ]
 MUTATIONS.extend(SOURCE_MUTATIONS)
 def main():

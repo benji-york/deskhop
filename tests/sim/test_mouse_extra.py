@@ -1,7 +1,7 @@
 """Independent mixed-source, output handoff and wire-negotiation regressions."""
 from fixtures import attach, keyboard, mouse, MOUSE
 from test_behaviors import pump
-from test_transport import frame, out_mouse
+from test_transport import frame, config_frame, out_mouse
 
 
 def scenario_mouse_output_switch_held(s):
@@ -135,7 +135,7 @@ def scenario_mouse_synthetic_desktop_preserves_sources(s):
     # Enable an extra macOS desktop on A through the real configuration API.
     for node in (0, 1):
         s.do(node, 'set', 'config_mode', 0, 1)
-        s.do(node, 'vendor', frame(21, b'\x0b' + (2).to_bytes(4, 'little')))
+        s.do(node, 'vendor', config_frame(21, b'\x0b' + (2).to_bytes(4, 'little')))
         s.do(node, 'set', 'config_mode', 0, 0)
     s.do(0, 'report', 1, 1, mouse(buttons=1))
     s.advance(5000)

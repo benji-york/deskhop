@@ -1,6 +1,7 @@
 """Observable, independently encoded pointer/transport regression oracles."""
 import struct
 from fixtures import attach, keyboard, mouse, MOUSE
+from test_uart_integrity import wire_frame as frame, wire_decode as decode_frame, legacy_frame
 
 def out_mouse(buttons,x,y,wheel=0,pan=0,mode=0):
     return struct.pack('<BhhbbB',buttons,x,y,wheel,pan,mode).hex()
@@ -41,17 +42,18 @@ def scenario_pointer_sync(s):
 
 def scenario_uart_faults(s):
     attach(s)
-    # One corrupted payload must not move the pointer; next intact frame recovers.
+    # One corrupted wire byte must not move the pointer; next intact frame recovers.
     s.do(1,'fault',{'xor':1});s.do(1,'report',1,0,mouse(x=10));s.advance(5000)
     s.expect(0,'x',16000)
     s.do(1,'report',1,0,mouse(x=5));s.advance(5000)
     s.expect(0,'x',16015)
-    # Short traffic is held until a full packet exists, then malformed preambles
-    # are skipped and the next complete packet re-synchronizes.
+    # Truncated frames cannot consume a following protected start delimiter.
+    # The historical library retains its original weaker parser in differential
+    # tests; both outcomes are asserted explicitly.
     s.do(1,'fault',{'truncate':5});s.do(1,'report',1,0,mouse(x=2));s.advance(5000)
     s.expect(0,'x',16015)
     s.do(1,'report',1,0,mouse(x=3));s.advance(5000)
-    # A frame directly after a truncated frame can be consumed in its tail.
+    s.expect(0,'x',16020 if s.uart_protocol else 16015)
     s.do(1,'report',1,0,mouse(x=4));s.advance(5000)
     s.expect(0,'x',16024)
     # Delayed UART remains invisible until its first entire frame arrives.
@@ -143,16 +145,20 @@ def scenario_generated(s,steps=100):
         s.expect_report(active,2,out_mouse(0,x,y))
         for n in (0,1):s.expect(n,'x',x);s.expect(n,'y',y)
 
-def frame(kind,data=b''):
-    # Independent protocol oracle; no calls to production write_raw_packet.
-    data=bytes(data).ljust(8,b'\0');assert len(data)==8
-    checksum=0
-    for byte in data:checksum^=byte
-    return (b'\xaa\x55'+bytes([kind])+data+bytes([checksum])).hex()
+def config_frame(kind, data=b''):
+    # Independent WebHID report oracle, deliberately separate from UART framing.
+    data = bytes(data).ljust(8, b'\0')
+    assert len(data) == 8
+    raw = b'\xaa\x55' + bytes([kind]) + data
+    value = int.from_bytes(raw, 'big') << 8
+    for bit in range(len(raw) * 8 + 7, 7, -1):
+        if value & (1 << bit):
+            value ^= 0x107 << (bit - 8)
+    return (raw + bytes([value])).hex()
 
 def scenario_vendor_config(s):
     attach(s)
-    request=frame(21,b'\x53'+(123).to_bytes(4,'little')) # SET timeout API field83
+    request=config_frame(21,b'\x53'+(123).to_bytes(4,'little')) # SET timeout API field83
     before=s.get(0,'system_timeout')
     s.do(0,'vendor',request);s.expect(0,'system_timeout',before)
     s.do(0,'set','config_mode',0,1)
@@ -160,19 +166,19 @@ def scenario_vendor_config(s):
     bad=request[:-2]+f'{int(request[-2:],16)^1:02x}'
     s.do(0,'vendor',bad);s.expect(0,'system_timeout',before)
     s.do(0,'vendor',request);s.expect(0,'system_timeout',123)
-    s.do(0,'vendor',frame(20,b'\x53'));s.advance(3000)
-    s.expect_report(0,6,frame(20,b'\x53'+(123).to_bytes(4,'little')))
+    s.do(0,'vendor',config_frame(20,b'\x53'));s.advance(3000)
+    s.expect_report(0,6,config_frame(20,b'\x53'+(123).to_bytes(4,'little')))
     # Read-only active output and unsupported API IDs cannot be written.
-    s.do(0,'vendor',frame(21,b'\x00\x01'));s.expect(0,'output',0)
-    count=len(s.reports(0,6));s.do(0,'vendor',frame(20,b'\xff'));s.advance(2000)
+    s.do(0,'vendor',config_frame(21,b'\x00\x01'));s.expect(0,'output',0)
+    count=len(s.reports(0,6));s.do(0,'vendor',config_frame(20,b'\xff'));s.advance(2000)
     s.check('usb_count',0,6,count)
     # Config endpoint may not inject input-routing packet types.
-    s.do(0,'vendor',frame(3,b'\x01'));s.expect(0,'output',0)
-    s.do(0,'endpoint',2,1,0);s.do(0,'vendor',frame(20,b'\x53'));s.advance(3000)
+    s.do(0,'vendor',config_frame(3,b'\x01'));s.expect(0,'output',0)
+    s.do(0,'endpoint',2,1,0);s.do(0,'vendor',config_frame(20,b'\x53'));s.advance(3000)
     s.expect(0,'hid_queue',1)
     s.do(0,'endpoint',2,0,0);s.advance(3000);s.expect(0,'hid_queue',0)
     # GET_ALL walks production API map, returning every mapped field once.
-    count=len(s.reports(0,6));s.do(0,'vendor',frame(22));s.advance(100000)
+    count=len(s.reports(0,6));s.do(0,'vendor',config_frame(22));s.advance(100000)
     s.check('usb_count',0,6,count+44)
 
 

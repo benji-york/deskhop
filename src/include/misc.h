@@ -17,7 +17,8 @@
  *  Checksum Functions
  *==============================================================================*/
 
-uint8_t  calc_checksum(const uint8_t *, int);
+uint32_t calc_packet_checksum(const uart_packet_t *);
+uint32_t calc_crc32(const uint8_t *, size_t);
 uint32_t crc32_iter(uint32_t, const uint8_t);
 bool     verify_checksum(const uart_packet_t *);
 
