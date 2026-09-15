@@ -80,7 +80,8 @@ void tud_hid_set_report_cb(uint8_t instance,
             && packet.data[0] == FIRMWARE_UPGRADE_MSG;
         if (local_bootloader || peer_bootloader) {
             firmware_update_lock();
-            if (!global_state.fw.upgrade_in_progress && !global_state.fw.image_dirty) {
+            if (!global_state.fw.upgrade_in_progress && !global_state.fw.image_dirty
+                && !global_state.maintenance_reserved) {
                 if (peer_bootloader)
                     global_state.config_bootloader_peer_pending = true;
                 else
@@ -148,7 +149,10 @@ void tud_cdc_rx_cb(uint8_t itf) {
     tud_cdc_n_read(itf, buf, count);
 
     if (count >= 5 && memcmp(buf, "flash", 5) == 0) {
-        reset_usb_boot(0, 0);
+        firmware_update_lock();
+        if (!global_state.maintenance_reserved)
+            reset_usb_boot(0, 0);
+        firmware_update_unlock();
     }
 }
 #endif

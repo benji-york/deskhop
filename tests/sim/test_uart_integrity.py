@@ -155,16 +155,34 @@ def scenario_uart_single_bits(s):
 
 def scenario_uart_encoder_oracle(s):
     s.do(0, 'fault', {'drop': 100000})
+    encoder = s.nodes[0].write_raw_packet
+    encoder.argtypes = [C.c_void_p, C.c_void_p]
+    encoder.restype = None
     # All type values representable by the sending API, all payload byte
     # values, and arbitrary delimiter/preamble bytes inside decoded payloads.
     for kind in range(1, 256):
         data = bytes((kind + offset) % 256 for offset in range(8))
+        before = sum(e['kind'] == 'uart_tx' and e['node'] == 0 for e in s.trace)
         s.do(0, 'packet', kind, data.hex(), True)
         s.do(0, 'task', TX)
-        event = next(e for e in reversed(s.trace) if e['kind'] == 'uart_tx')
-        assert event['data'] == wire_frame(kind, data)
-        assert wire_decode(event['data']) == (kind, data)
-        assert b'\xaa\x55' not in bytes.fromhex(event['data'])
+        if kind in (49, 50):
+            # Maintenance transactions own their dequeue authorization. A raw
+            # queued request/ACK has no live token and must never reach DMA.
+            s.check('event_count', 0, 'uart_tx', before)
+            s.expect(0, 'uart_queue', 0)
+            # Keep full 1..255 encoder coverage independently of that policy,
+            # using the real packed type1/payload8/CRC32 encoder directly.
+            packet = C.create_string_buffer(bytes([kind]) + data + bytes(4), 13)
+            encoded = C.create_string_buffer(32)
+            encoder(encoded, packet)
+            raw = encoded.raw
+        else:
+            s.check('event_count', 0, 'uart_tx', before + 1)
+            event = next(e for e in reversed(s.trace) if e['kind'] == 'uart_tx')
+            raw = bytes.fromhex(event['data'])
+        assert raw.hex() == wire_frame(kind, data)
+        assert wire_decode(raw) == (kind, data)
+        assert b'\xaa\x55' not in raw
         s.advance(100)
     # Source bounds reject oversized payloads and non-byte types before memcpy.
     for kind, payload in ((0, b''), (-1, b''), (256, b''), (26, bytes(9))):

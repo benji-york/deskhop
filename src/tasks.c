@@ -222,7 +222,7 @@ void heartbeat_output_task(device_t *state) {
 
     /* Config-mode timeout and BOOTSEL probing touch flash state. Heartbeats do
        not, and must continue during a pull so a stalled peer can recover. */
-    if (!state->fw.upgrade_in_progress && state->config_mode_active) {
+    if (!state->fw.upgrade_in_progress && !state->maintenance_reserved && state->config_mode_active) {
         /* Leave config mode if timeout expired and user didn't click exit */
         if (time_us_64() > state->config_mode_timer)
             reboot();
@@ -233,7 +233,7 @@ void heartbeat_output_task(device_t *state) {
 
 #ifdef DH_DEBUG
     /* Holding the button invokes bootsel firmware upgrade */
-    if (!state->fw.upgrade_in_progress && is_bootsel_pressed())
+    if (!state->fw.upgrade_in_progress && !state->maintenance_reserved && is_bootsel_pressed())
         reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
 #endif
 

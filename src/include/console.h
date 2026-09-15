@@ -1,4 +1,5 @@
-/* Read-only USB console. All entry points belong to core 0. */
+/* USB diagnostics and explicit bootloader maintenance. All entry points belong
+ * to core 0. Firmware uploads remain external to the console. */
 #pragma once
 
 #include <stdint.h>

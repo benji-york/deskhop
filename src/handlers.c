@@ -35,7 +35,7 @@ static bool request_graceful_reboot(device_t *state, bool notify_peer) {
     while (true) {
         firmware_update_lock();
 
-        if (state->fw.upgrade_in_progress || state->fw.image_dirty) {
+        if (state->fw.upgrade_in_progress || state->fw.image_dirty || state->maintenance_reserved) {
             firmware_update_unlock();
             return false;
         }
@@ -102,12 +102,24 @@ void screen_border_hotkey_handler(device_t *state, hid_keyboard_report_t *report
 /* Routine maintenance uses PICOBOOT only: bit 0 disables the ROM USB disk.
    Physical BOOTSEL still provides the usual UF2 recovery drive. */
 void fw_upgrade_hotkey_handler_A(device_t *state, hid_keyboard_report_t *report) {
+    firmware_update_lock();
+    if (state->maintenance_reserved) {
+        firmware_update_unlock();
+        return;
+    }
     reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
+    firmware_update_unlock();
 };
 
 /* This key combo puts board B in firmware upgrade mode */
 void fw_upgrade_hotkey_handler_B(device_t *state, hid_keyboard_report_t *report) {
+    firmware_update_lock();
+    if (state->maintenance_reserved) {
+        firmware_update_unlock();
+        return;
+    }
     send_value(ENABLE, FIRMWARE_UPGRADE_MSG);
+    firmware_update_unlock();
 };
 
 /* This key combo prevents mouse from switching outputs */
@@ -201,14 +213,20 @@ void disable_screensaver_hotkey_handler(device_t *state, hid_keyboard_report_t *
 
 /* Put the device into a special configuration mode */
 void config_enable_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    firmware_update_lock();
+    if (state->maintenance_reserved) {
+        firmware_update_unlock();
+        return;
+    }
     /* If config mode is already active, skip this and reboot to return to normal mode */
     if (!state->config_mode_active) {
         watchdog_hw->scratch[5] = MAGIC_WORD_1;
         watchdog_hw->scratch[6] = MAGIC_WORD_2;
     }
 
-    keyboard_focus_changed(state);
     state->reboot_requested = true;
+    firmware_update_unlock();
+    keyboard_focus_changed(state);
 };
 
 
@@ -395,7 +413,13 @@ void handle_output_select_sync_msg(uart_packet_t *packet, device_t *state) {
 
 /* Apply the same disk-free maintenance mode to the peer request. */
 void handle_fw_upgrade_msg(uart_packet_t *packet, device_t *state) {
+    firmware_update_lock();
+    if (state->maintenance_reserved) {
+        firmware_update_unlock();
+        return;
+    }
     reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
+    firmware_update_unlock();
 }
 
 /* Comply with request to turn mouse zoom mode on/off  */
@@ -537,7 +561,7 @@ void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
     firmware_update_lock();
 
     /* Never expose a slot while this board is replacing or repairing it. */
-    if (state->reboot_requested || state->fw.upgrade_in_progress) {
+    if (state->reboot_requested || state->fw.upgrade_in_progress || state->maintenance_reserved) {
         firmware_update_unlock();
         return;
     }
@@ -558,6 +582,8 @@ void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
         }
     }
 
+    state->maintenance_source_seen = true;
+    state->maintenance_source_last_us = time_us_64();
     firmware_update_unlock();
 
     /* Add requested data to bytes 4-7 in the packet and return it with a different type */
@@ -633,7 +659,7 @@ static void begin_firmware_pull(device_t *state,
 
 /* Process a request to read a firmware package from flash */
 static void handle_heartbeat_msg_locked(uart_packet_t *packet, device_t *state) {
-    if (state->reboot_requested)
+    if (state->reboot_requested || state->maintenance_reserved)
         return;
 
     uint16_t other_running_version = packet->data16[0];

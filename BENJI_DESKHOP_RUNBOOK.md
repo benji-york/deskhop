@@ -8,7 +8,51 @@ README.
 
 Snapshot: 2026-09-15
 
-## Deployed v0.103: Bootloader-button fix (input acceptance pending)
+## Accepted v0.104: serial bootloader entry (physical command check pending)
+
+`codex/serial-bootloader` adds `bootloader A` and `bootloader B` to the production
+USB serial console. These commands select the **physical Pico role**, not the
+focused Mac or the console's local/remote position. No keyboard gesture is needed
+once this firmware is running. Both boards now execute v0.104. A was flashed after
+the user pressed Layer 3 A; full external readback matched and saved settings were
+unchanged. B automatically updated from v0.103 without a power cycle or cable
+move. Fresh full-slot scans on both boards match `befb208b`, with both cores
+advancing. Benji confirmed "Everything is working fine" after the requested
+typing, trackball-button and switching checks. Actual serial-command bootloader
+entry remains separately untested; no `bootloader` command was sent during this
+deployment.
+
+The command only enters disk-free USB ROM/PICOBOOT (`reset_usb_boot` interface
+disable mask `1`). It does not transfer firmware. Picotool must upload through
+the selected Pico's computer-facing USB cable on that cable's Mac. In particular,
+`bootloader B` from A's console does not make B flashable through A's UART.
+The usual path is to enter A, flash/verify/reboot A, then observe and verify B's
+automatic update. The initial v0.103-to-v0.104 update used the existing keyboard
+bootloader entry method; v0.103 does not understand the new console command or
+its new remote request. There is no fallback to the legacy immediate-reset packet.
+
+Local entry waits for actual USB completion of the reply and UART drain. Remote
+entry uses a dedicated, correlated request/ACK; `peer_admitted_not_boot_proof`
+means acceptance, not observed ROM enumeration. An absent, old, or silent peer
+can produce `unconfirmed`. A timeout or terminal close cannot retract a request
+already transmitted, so inspect the target before retrying. The command rejects
+active/dirty updates, existing reservations/reboots, and recently served firmware
+word requests (a conservative three-second source-side holdoff). The holdoff is
+not proof that an offline or long-paused peer has a clean image. Reservations
+exclude new firmware-update claims while the bounded maintenance operation waits.
+
+See [serial maintenance details](docs/diagnostics.md#serial-maintenance-v0104-deployed-physical-command-acceptance-pending)
+for response meanings, timing, cancellation, compatibility, and coverage boundaries.
+The [v0.104 deployment record](docs/testing/serial-bootloader-v104.md) records tests,
+artifact identity, readback/propagation evidence and pending hardware acceptance.
+The flashed source was an uncommitted snapshot on `codex/serial-bootloader`, based
+on `216a7f8`; it is not attributed to that base commit alone. This changeset
+publishes the unchanged runtime/build sources from that snapshot. Exact files,
+including new source files, and the patch are retained with the frozen image.
+Saved configuration, UART-v1 framing, QMK, and ordinary diagnostic commands are
+unchanged; the original config-validation and broad reboot-safety work remains separate.
+
+## Previous deployment v0.103: Bootloader-button fix (input acceptance pending)
 
 `codex/bootloader-button-fix` corrects the Web Config Bootloader button's boolean
 payload and the missing firmware command allowlist entry. The firmware retains
@@ -993,8 +1037,12 @@ than invoking it directly on macOS.
 
 1. Build and test a firmware with a higher version number.
 2. Keep both DeskHop Picos powered and UART-connected.
-3. Use Layer 3 A/B for the selected Pico's PICOBOOT-only ROM bootloader. No
-   `RPI-RP2` volume should appear. Identify the physical flash UID before writing.
+3. Use Layer 3 A/B for the selected Pico's PICOBOOT-only ROM bootloader. Once
+   v0.104 has been deployed, `bootloader A` or `bootloader B` on its serial console
+   is the keyboard-free alternative; keep the terminal open and reading the reply.
+   A remote target must also support the new command. No `RPI-RP2` volume should
+   appear. Identify the physical flash UID before writing; remote ACK acceptance
+   alone does not establish ROM entry. Upload on the Mac wired to the target Pico.
 4. Use official picotool to back up the firmware/settings, load and verify the
    frozen candidate, read back the firmware/settings, and reboot normally.
 5. Leave both sides powered for several one-second heartbeat cycles. The older
@@ -1120,6 +1168,8 @@ After QMK flashing, test:
 | Caps behavior persists after DeskHop is unplugged | Stuck state is in macOS/Karabiner, not either Pico | Restart Karabiner; retain F24 switching and current all-up protection. |
 | Config Save seems ineffective | Settings were not saved/exited, a peer missed a changed SET, or a firmware update was in progress | Read the connected Pico. To force retransmission, save a temporary value and then the desired value before Exit; alternatively wipe/reconfigure. Runtime SETs may apply during an update, but flash persistence is intentionally refused. |
 | Coordinated reboot resets only one Pico | Peer unpowered, UART broken/full on obsolete firmware, or update guard refused the peer | Ensure both powered/current and no update active; test UART via dual LED blink on peripheral reconnect, then retry. |
+| v0.104 `bootloader A/B` says `unconfirmed` | Peer is absent, old, busy/stalled, or its ACK did not arrive | Do not assume nothing happened. Inspect the selected Pico's USB/console state before retrying; an already-transmitted request cannot be recalled. |
+| v0.104 `bootloader A/B` says `update_active` after propagation | This board is updating/dirty, or recently served firmware words to its peer | Let propagation and verification finish. Recent source service causes a three-second holdoff; expiration alone does not establish peer health. |
 
 When a USB peripheral enumerates, the local Pico blinks and asks the peer to
 blink. Seeing the two LEDs blink in succession is a useful power/USB/UART smoke
@@ -1234,6 +1284,7 @@ Retro Mechanical Keyboard remain a candidate for that future fix.
 | Keep-awake policy | `src/tasks.c`, `src/screensaver_policy.c`, `src/include/screensaver_policy.h` |
 | LED state/focus | `src/led.c`, `src/usb.c` |
 | UART protocol | `src/uart.c`, `src/include/protocol.h`, `src/include/packet.h` |
+| Serial bootloader maintenance | `src/console.c`, `src/maintenance.c`, `src/include/maintenance.h` |
 | Peer update/recovery | `src/fw_update.c`, `src/tasks.c`, `src/handlers.c`, `src/ramdisk.c`, `src/utils.c` |
 | Config/defaults/API | `src/include/structs.h`, `src/include/config.h`, `src/include/user_config.h`, `src/defaults.c`, `src/protocol.c` |
 | Native regression tests | `tests/test_zoom_tracker.c`, `tests/test_fw_update.c`, `tests/test_screensaver_policy.c`, `tests/test_reboot_hotkey.c`, `tests/test_config_migration.c`, `tests/test_webconfig_autostart.js`, `tests/test_hid_regressions.c` |

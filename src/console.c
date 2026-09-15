@@ -8,6 +8,7 @@
 #include "diagnostic_peer_history.h"
 #include "diagnostic_runtime.h"
 #include "diagnostic_verify.h"
+#include "maintenance.h"
 #include "tusb.h"
 
 #if DH_CONSOLE && CFG_TUD_CDC
@@ -19,10 +20,12 @@
 #define CONSOLE_RX_BUDGET 32u
 #define CONSOLE_TX_BUDGET 64u
 #define CONSOLE_LINE_SIZE 64u
-#define CONSOLE_TX_SIZE 1024u
+#define CONSOLE_TX_SIZE 1280u
 #define CONSOLE_PEER_TIMEOUT_US UINT64_C(600000)
 #define CONSOLE_HISTORY_TIMEOUT_US UINT64_C(3500000)
 #define CONSOLE_VERIFY_TIMEOUT_US UINT64_C(3500000)
+#define CONSOLE_BOOTLOADER_TIMEOUT_US UINT64_C(2000000)
+#define CONSOLE_BOOTLOADER_PEER_TIMEOUT_US UINT64_C(4000000)
 
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
@@ -46,6 +49,9 @@ static struct {
     uint64_t query_started_us;
     peer_status_result_t peer_result;
     bool verify_active, verify_ready[2], verify_emitted[2];
+    bool bootloader_active, bootloader_reply, bootloader_fence, bootloader_drained;
+    uint8_t bootloader_target;
+    uint64_t now_us, bootloader_started_us;
     uint16_t verify_version;
     uint32_t verify_crc;
     verify_result_t verify_results[2];
@@ -63,6 +69,10 @@ static void release_history_peer(void) {
 }
 
 void console_disconnect(void) {
+    if (console.bootloader_active)
+        maintenance_cancel(console.query_token, console.now_us);
+    console.bootloader_active = console.bootloader_reply = false;
+    console.bootloader_fence = console.bootloader_drained = false;
     console.connected = false;
     console.previous_cr = false;
     console.line_error = LINE_OK;
@@ -645,6 +655,73 @@ static void emit_verify_tick(uint64_t now_us) {
     append(prompt);
 }
 
+static void finish_bootloader(const char *outcome, const char *reason) {
+    console.bootloader_active = console.bootloader_reply = false;
+    console.bootloader_fence = console.bootloader_drained = false;
+    appendf("BEGIN bootloader\r\nboard=%c result=%s reason=%s\r\nEND bootloader\r\n",
+            console.bootloader_target == 0 ? 'A' : 'B', outcome, reason);
+    append(prompt);
+}
+
+static void begin_bootloader(uint8_t target, uint64_t now_us) {
+    console.bootloader_target = target;
+    if (++console.query_token == 0)
+        ++console.query_token;
+    maintenance_start_t result = maintenance_request(target, console.query_token, now_us);
+    if (result != MAINTENANCE_STARTED) {
+        const char *reason = result == MAINTENANCE_UPDATE_ACTIVE ? "update_active"
+                           : result == MAINTENANCE_REBOOT_PENDING ? "reboot_pending"
+                           : result == MAINTENANCE_BAD_ARGUMENT ? "bad_argument" : "busy";
+        finish_bootloader("rejected", reason);
+        return;
+    }
+    console.bootloader_active = true;
+    console.bootloader_reply = console.bootloader_fence = console.bootloader_drained = false;
+    console.bootloader_started_us = now_us;
+}
+
+static void poll_bootloader(uint64_t now_us) {
+    maintenance_result_t result;
+    /* Consume stale results too: a closed terminal cannot inherit authority
+     * from the previous session. Core callbacks never touch console state. */
+    if (maintenance_poll(&result) && console.bootloader_active && result.token == console.query_token
+        && result.target == console.bootloader_target) {
+        switch (result.outcome) {
+        case MAINTENANCE_LOCAL_READY:
+            if (console.bootloader_reply)
+                break;
+            console.bootloader_reply = true;
+            console.bootloader_fence = console.bootloader_drained = false;
+            console.bootloader_started_us = now_us;
+            appendf("BEGIN bootloader\r\nboard=%c result=accepted scope=local\r\n"
+                    "action=enter_disk_free_usb_rom_after_reply\r\nEND bootloader\r",
+                    console.board);
+            break;
+        case MAINTENANCE_REMOTE_ACCEPTED:
+            finish_bootloader("accepted", "peer_admitted_not_boot_proof");
+            break;
+        case MAINTENANCE_REMOTE_BUSY: finish_bootloader("rejected", "peer_busy"); break;
+        case MAINTENANCE_REMOTE_UPDATE_ACTIVE: finish_bootloader("rejected", "peer_update_active"); break;
+        case MAINTENANCE_REMOTE_REBOOT_PENDING: finish_bootloader("rejected", "peer_reboot_pending"); break;
+        case MAINTENANCE_TIMEOUT_NOT_SENT: finish_bootloader("not_sent", "queue_timeout"); break;
+        case MAINTENANCE_TIMEOUT_UNCONFIRMED: finish_bootloader("unconfirmed", "peer_timeout_or_unsupported"); break;
+        default: finish_bootloader("cancelled", "maintenance_aborted"); break;
+        }
+    }
+    uint64_t timeout = console.bootloader_reply ? CONSOLE_BOOTLOADER_TIMEOUT_US
+                                               : CONSOLE_BOOTLOADER_PEER_TIMEOUT_US;
+    if (console.bootloader_active && now_us - console.bootloader_started_us >= timeout) {
+        bool local_reply = console.bootloader_reply;
+        maintenance_cancel(console.query_token, now_us);
+        /* Already submitted USB bytes cannot be recalled. Discard all other
+         * bytes and revoke authorization before reporting the cancellation. */
+        console.tx_used = console.tx_sent = 0;
+        tud_cdc_write_clear();
+        finish_bootloader(local_reply ? "cancelled" : "unconfirmed",
+                          local_reply ? "usb_reply_timeout" : "console_timeout");
+    }
+}
+
 static void command(uint64_t now_us) {
     console.line[console.line_used] = '\0';
     if (console.line_error == LINE_TOO_LONG) {
@@ -653,14 +730,17 @@ static void command(uint64_t now_us) {
         append("ERROR command must contain printable ASCII characters\r\n");
     } else if (strcmp(console.line, "help") == 0) {
         append("BEGIN help\r\n"
-               "DeskHop console - all commands are read-only.\r\n"
+               "DeskHop console - diagnostics and disruptive maintenance.\r\n"
                "\r\n"
                "  help                  Show help.\r\n"
                "  status                Show build, core and update state.\r\n"
                "  history [count]       Show recent events (default 16; 1..64 per board).\r\n"
                "  verify <build> <crc32> Check both firmware images.\r\n"
+               "  bootloader A|B        DISRUPTIVE: selected board enters disk-free USB ROM.\r\n"
                "\r\n"
-               "Commands query both boards; missing peers have a bounded timeout.\r\n"
+               "Diagnostics are read-only and query both boards with bounded peer timeouts.\r\n"
+               "Bootloader requires physical A or B; no default/both. Upload with picotool\r\n"
+               "on the target's USB-connected computer; peer acceptance is not boot proof.\r\n"
                "Core counts mark diagnostic task checkpoints.\r\n"
                "Peer confirmation is historical/version-only; progress compares status queries.\r\n"
                "History/observations are in RAM until reboot; event ages align approximately.\r\n"
@@ -706,12 +786,20 @@ static void command(uint64_t now_us) {
             begin_verify(version, crc, now_us);
         else
             append("ERROR usage: verify <major.minor> <8 hex CRC32 digits>\r\n");
+    } else if (strcmp(console.line, "bootloader") == 0 || strncmp(console.line, "bootloader ", 11) == 0) {
+        if (strcmp(console.line, "bootloader A") == 0 || strcmp(console.line, "bootloader B") == 0) {
+            begin_bootloader((uint8_t)(console.line[11] - 'A'), now_us);
+            console.line_used = 0;
+            console.line_error = LINE_OK;
+            return; /* The asynchronous response (or rejection) owns its prompt. */
+        }
+        append("ERROR usage: bootloader A|B (physical board; exactly one target)\r\n");
     } else if (console.line_used != 0) {
         append("ERROR unknown command; type help\r\n");
     }
     console.line_used = 0;
     console.line_error = LINE_OK;
-    if (!console.peer_waiting && !console.history_active && !console.verify_active)
+    if (!console.peer_waiting && !console.history_active && !console.verify_active && !console.bootloader_active)
         append(prompt);
 }
 
@@ -721,8 +809,10 @@ static void transmit(void) {
     unsigned count = remaining < available ? remaining : available;
     if (count > CONSOLE_TX_BUDGET)
         count = CONSOLE_TX_BUDGET;
-    if (count)
+    if (count) {
+        console.bootloader_drained = false;
         console.tx_sent += tud_cdc_write(console.tx + console.tx_sent, count);
+    }
     /* Flush only asks TinyUSB to submit what fits; it never waits for a host. */
     tud_cdc_write_flush();
     if (console.tx_sent == console.tx_used)
@@ -730,11 +820,13 @@ static void transmit(void) {
 }
 
 void console_task(uint64_t now_us) {
+    console.now_us = now_us;
     if (!tud_cdc_connected()) {
         if (console.connected)
             console_disconnect();
         poll_history_peer();
         poll_verify(now_us);
+        poll_bootloader(now_us);
         return;
     }
     if (!console.connected) {
@@ -754,12 +846,30 @@ void console_task(uint64_t now_us) {
 
     poll_history_peer();
     poll_verify(now_us);
+    poll_bootloader(now_us);
     /* Capture continues even while USB output is stalled. */
     capture_history_tick(now_us);
 
     transmit();
     if (console.tx_used)
         return;
+
+    if (console.bootloader_active) {
+        if (console.bootloader_reply && console.bootloader_drained) {
+            console.bootloader_drained = false;
+            if (!console.bootloader_fence) {
+                /* A final one-byte transfer is necessarily short. Waiting for
+                 * its completion also covers TinyUSB's preceding full-packet
+                 * ZLP, which may be submitted after the earlier callback. */
+                console.bootloader_fence = true;
+                append("\n");
+            } else {
+                maintenance_console_reply_complete(console.query_token, now_us);
+                console.bootloader_reply = false;
+            }
+        }
+        return;
+    }
 
     if (console.verify_active) {
         emit_verify_tick(now_us);
@@ -836,5 +946,13 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
     (void)rts;
     if (itf == 0 && !dtr)
         console_disconnect();
+}
+
+void tud_cdc_tx_complete_cb(uint8_t itf) {
+    /* This callback is actual host IN-transfer completion, not a FIFO flush.
+     * It only marks evidence; the next core-0 task may authorize maintenance. */
+    if (itf == 0 && console.bootloader_active && console.bootloader_reply
+        && console.tx_used == 0 && tud_cdc_write_available() == CFG_TUD_CDC_TX_BUFSIZE)
+        console.bootloader_drained = true;
 }
 #endif

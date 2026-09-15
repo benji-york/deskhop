@@ -167,6 +167,11 @@ typedef struct {
        Keep bootloader sequencing separate from watchdog-driven reboots. */
     bool config_bootloader_peer_pending;
     bool config_bootloader_local_pending;
+    /* Protected by firmware_update_lock; console maintenance reserves a clean
+       image while it waits for USB/UART completion, without arming watchdog. */
+    bool maintenance_reserved;
+    bool maintenance_source_seen;
+    uint64_t maintenance_source_last_us;
     uint64_t config_mode_timer;      // Counts how long are we to remain in config mode
 
     uint8_t page_buffer[FLASH_PAGE_SIZE]; // For firmware-over-serial upgrades

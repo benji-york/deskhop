@@ -10,6 +10,7 @@ import sys
 import tempfile
 from build import ROOT, build
 from selection_mutations import SOURCE_MUTATIONS
+from maintenance_mutations import SOURCE_MUTATIONS as MAINTENANCE_MUTATIONS
 MUTATIONS=[
  ('ignore-peer-mouse-buttons','mouse.c',
   'return state->local_mouse_buttons | state->peer_mouse_buttons;',
@@ -42,6 +43,7 @@ MUTATIONS=[
   'uart_faults','x[0] on 0'),
 ]
 MUTATIONS.extend(SOURCE_MUTATIONS)
+MUTATIONS.extend(MAINTENANCE_MUTATIONS)
 def main():
     with tempfile.TemporaryDirectory(prefix='deskhop-sim-mutants-') as tmp:
         base=pathlib.Path(tmp)

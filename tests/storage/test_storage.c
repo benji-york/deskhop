@@ -640,6 +640,23 @@ static void host_peer_config_serializations(void) {
     CHECK(!programs && !erases && !watchdog_kicks && !global_state.fw.upgrade_in_progress);
     CHECK(!diagnostic_runtime_snapshot().update_seen);
     CHECK(!diagnostic_history_window(HISTORY_CAPACITY).count);
+
+    fresh("maintenance_reservation_rejects_update_work_until_release");
+    crc = make_image(image, 193, 0x73);
+    global_state.maintenance_reserved = true;
+    host_block(12, image);
+    heartbeat(193, crc, true);
+    upgrade_tick();
+    CHECK(!programs && !erases && !watchdog_kicks && !resets);
+    CHECK(!global_state.reboot_requested && !global_state.fw.upgrade_in_progress);
+    CHECK(!global_state.fw.image_dirty && !global_state.uf2_blocks_received_count);
+    CHECK(!diagnostic_runtime_snapshot().update_seen);
+    CHECK(!diagnostic_history_window(HISTORY_CAPACITY).count);
+    global_state.maintenance_reserved = false;
+    host_block(12, image);
+    CHECK(programs == 1 && erases == 1 && global_state.uf2_blocks_received_count == 1);
+    CHECK(global_state.fw.upgrade_in_progress && global_state.fw.image_dirty);
+    CHECK(global_state.fw.source == FW_UPDATE_SOURCE_DROP);
 }
 
 static void source_reads_and_metadata(void) {

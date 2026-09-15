@@ -7,6 +7,7 @@
 #include "diagnostic_peer_history.h"
 #include "diagnostic_runtime.h"
 #include "diagnostic_verify.h"
+#include "maintenance.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -27,6 +28,56 @@ static size_t host_count;
 static char cdc_bytes[32768];
 static size_t cdc_count;
 static uint64_t cdc_submitted_bytes, console_now_us;
+/* Console/USB contract double. Real maintenance admission, UART transactions,
+ * updater guards and ROM entry are covered by the paired production simulator. */
+static maintenance_start_t maintenance_start = MAINTENANCE_STARTED;
+static bool maintenance_auto = true, maintenance_pending, maintenance_ready;
+static uint8_t maintenance_role, maintenance_target;
+static uint32_t maintenance_token;
+static unsigned maintenance_requests, maintenance_completions, maintenance_cancels, maintenance_polls;
+static maintenance_result_t maintenance_result;
+static void maintenance_publish(uint32_t token, uint8_t target, maintenance_outcome_t outcome) {
+    CHECK(!maintenance_ready);
+    maintenance_result = (maintenance_result_t){.token = token, .target = target, .outcome = outcome};
+    maintenance_ready = true;
+}
+maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t now_us) {
+    ++maintenance_requests;
+    CHECK(target < 2 && token != 0);
+    if (maintenance_start != MAINTENANCE_STARTED)
+        return maintenance_start;
+    CHECK(!maintenance_pending);
+    maintenance_pending = true;
+    maintenance_target = target;
+    maintenance_token = token;
+    if (maintenance_auto)
+        maintenance_publish(token, target, target == maintenance_role
+                            ? MAINTENANCE_LOCAL_READY : MAINTENANCE_REMOTE_ACCEPTED);
+    return MAINTENANCE_STARTED;
+}
+bool maintenance_poll(maintenance_result_t *result) {
+    ++maintenance_polls;
+    if (!maintenance_ready)
+        return false;
+    *result = maintenance_result;
+    maintenance_ready = false;
+    if (result->token == maintenance_token && result->target == maintenance_target
+        && result->outcome != MAINTENANCE_LOCAL_READY)
+        maintenance_pending = false;
+    return true;
+}
+void maintenance_console_reply_complete(uint32_t token, uint64_t now_us) {
+    CHECK(maintenance_pending && maintenance_target == maintenance_role && token == maintenance_token);
+    CHECK(strstr(cdc_bytes, "END bootloader\r\n") != NULL);
+    ++maintenance_completions;
+    maintenance_pending = false;
+}
+void maintenance_cancel(uint32_t token, uint64_t now_us) {
+    ++maintenance_cancels;
+    CHECK(token == maintenance_token);
+    maintenance_pending = false;
+    maintenance_ready = false;
+}
 static bool no_ep0_out_payload;
 static const diagnostic_runtime_snapshot_t default_runtime = {
     .core_ticks = {123, 456}, .core_age_ms = {0, 1}, .core_valid = 3,
@@ -286,7 +337,6 @@ void tud_msc_scsi_complete_cb(uint8_t lun, const uint8_t command[16]) {}
 bool tud_msc_start_stop_cb(uint8_t lun, uint8_t condition, bool start, bool eject) { return true; }
 void tud_cdc_rx_cb(uint8_t itf) {}
 void tud_cdc_rx_wanted_cb(uint8_t itf, char wanted) {}
-void tud_cdc_tx_complete_cb(uint8_t itf) {}
 void tud_cdc_line_coding_cb(uint8_t itf, const cdc_line_coding_t *coding) {}
 void tud_cdc_send_break_cb(uint8_t itf, uint16_t duration) {}
 
@@ -476,10 +526,12 @@ static void console_tick(void) {
     unsigned reads_before = history_reads;
     unsigned history_polls_before = history_peer_polls;
     unsigned verify_polls_before = verify_polls;
+    unsigned maintenance_polls_before = maintenance_polls;
     console_task(console_now_us);
     CHECK(history_reads - reads_before <= 1);
     CHECK(history_peer_polls - history_polls_before <= 1);
     CHECK(verify_polls - verify_polls_before <= 1);
+    CHECK(maintenance_polls - maintenance_polls_before <= 1);
     if (connected) {
         uint32_t rx_after = tud_cdc_available();
         CHECK(rx_after <= rx_before && rx_before - rx_after <= 32);
@@ -578,6 +630,10 @@ static void cdc_command_stream(void) {
     cdc_send("lp\r\n");
     CHECK(occurrences("deskhop> ") == 1);
     CHECK(strstr(cdc_bytes, "help") && strstr(cdc_bytes, "status"));
+    CHECK(strstr(cdc_bytes, "Diagnostics are read-only") != NULL);
+    CHECK(strstr(cdc_bytes, "all commands are read-only") == NULL);
+    CHECK(strstr(cdc_bytes, "bootloader A|B") != NULL);
+    CHECK(strstr(cdc_bytes, "DISRUPTIVE") != NULL);
     CHECK(strstr(cdc_bytes, "both boards") != NULL);
     CHECK(strstr(cdc_bytes, "history [count]") != NULL);
     CHECK(strstr(cdc_bytes, "event ages align approximately") != NULL);
@@ -1723,6 +1779,204 @@ static void cdc_bus_reset_discards_partial(void) {
     cdc_status_fields();
 }
 
+static void bootloader_console_reset(uint8_t role) {
+    console_disconnect();
+    maintenance_pending = maintenance_ready = false;
+    maintenance_start = MAINTENANCE_STARTED;
+    maintenance_auto = true;
+    maintenance_role = role;
+    console_init(role, "0123456789abcdef", UINT64_C(0x1122334455667788) + role,
+                 UINT32_C(0x89abcdef));
+    console_now_us += UINT64_C(5000000);
+    console_drain();
+    cdc_capture_clear();
+}
+
+static void cdc_bootloader_parser(void) {
+    bootloader_console_reset(OUTPUT_A);
+    unsigned before = maintenance_requests;
+    const char *invalid[] = {
+        "bootloader\n", "bootloader \n", "bootloader a\n", "bootloader b\n",
+        "bootloader C\n", "bootloader both\n", "bootloader A B\n",
+        "bootloader A \n", "bootloader  A\n", " bootloader A\n",
+        "bootloader\tA\n", "bootloader A\t\n", "bootloader A extra\n",
+    };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        cdc_capture_clear();
+        cdc_send(invalid[i]);
+        CHECK(occurrences("ERROR") == 1 && occurrences("BEGIN bootloader") == 0);
+    }
+    char oversized[96];
+    memset(oversized, 'x', sizeof(oversized));
+    memcpy(oversized, "bootloader A", 12);
+    oversized[sizeof(oversized) - 1] = '\n';
+    cdc_capture_clear();
+    cdc_send_bytes(oversized, sizeof(oversized));
+    CHECK(occurrences("ERROR line too long") == 1);
+    const char nul[] = "bootloader A\0ignored\n";
+    cdc_capture_clear();
+    cdc_send_bytes(nul, sizeof(nul) - 1);
+    CHECK(occurrences("ERROR command must contain printable ASCII") == 1);
+    CHECK(maintenance_requests == before);
+    cdc_capture_clear();
+    cdc_send("help\n");
+    CHECK(occurrences("END help") == 1 && occurrences("deskhop> ") == 1);
+}
+
+static void bootloader_send_held(uint8_t target) {
+    const char *command = target == OUTPUT_A ? "bootloader A\n" : "bootloader B\n";
+    complete_short_out(0x06, command, (unsigned)strlen(command));
+    for (unsigned tick = 0; tick < 32; ++tick)
+        console_tick();
+    CHECK(endpoint(0x86)->pending);
+}
+
+static void cdc_bootloader_completion(void) {
+    for (uint8_t role = OUTPUT_A; role <= OUTPUT_B; ++role) {
+        bootloader_console_reset(role);
+        global_state.active_output = role ^ 1; /* Focus is not a target selector. */
+        unsigned before = maintenance_completions;
+        bootloader_send_held(role);
+        CHECK(maintenance_target == role && maintenance_completions == before);
+        uint8_t keys[6] = {HID_KEY_J};
+        CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+        host_count = 0;
+        complete(0x81, NULL, 0);
+        CHECK(host_count == 9 && host_bytes[3] == HID_KEY_J);
+        CHECK(endpoint(0x86)->pending && maintenance_completions == before);
+        /* The real CDC endpoint, not merely the software FIFO, holds the reply.
+         * Drive everything except its deliberate final one-byte newline. */
+        unsigned tick;
+        bool saw_zlp = false;
+        for (tick = 0; tick < 256; ++tick) {
+            console_tick();
+            CHECK(maintenance_completions == before);
+            if (!endpoint(0x86)->pending)
+                continue;
+            if (endpoint(0x86)->length == 1 && endpoint(0x86)->buffer[0] == '\n')
+                break;
+            if (endpoint(0x86)->length == 0) {
+                saw_zlp = true;
+                /* Queue the fence behind an in-flight ZLP: its completion
+                 * must not be mistaken for completion of the queued newline. */
+                console_tick();
+                CHECK(tud_cdc_write_available() == CFG_TUD_CDC_TX_BUFSIZE - 1);
+                CHECK(maintenance_completions == before);
+            }
+            complete(0x86, NULL, 0);
+        }
+        CHECK(tick < 256);
+        CHECK(saw_zlp); /* The 128-byte body exercises TinyUSB's real ZLP path. */
+        CHECK(tud_cdc_write_available() == CFG_TUD_CDC_TX_BUFSIZE);
+        CHECK(strstr(cdc_bytes, "END bootloader\r") != NULL);
+        CHECK(strstr(cdc_bytes, "END bootloader\r\n") == NULL);
+        for (unsigned i = 0; i < 32; ++i) console_tick();
+        CHECK(maintenance_completions == before);
+        complete(0x86, NULL, 0);
+        CHECK(maintenance_completions == before); /* Callback cannot enter ROM. */
+        console_tick();
+        CHECK(maintenance_completions == before + 1);
+        CHECK(!endpoint(0x86)->pending);
+        CHECK(strstr(cdc_bytes, "result=accepted scope=local\r\n") != NULL);
+        for (unsigned i = 0; i < 3; ++i) console_tick();
+        CHECK(maintenance_completions == before + 1);
+    }
+    global_state.active_output = OUTPUT_A;
+    bootloader_console_reset(OUTPUT_A);
+}
+
+static void cdc_bootloader_remote_and_rejections(void) {
+    for (uint8_t role = OUTPUT_A; role <= OUTPUT_B; ++role) {
+        bootloader_console_reset(role);
+        uint8_t target = role ^ 1;
+        unsigned before = maintenance_completions;
+        cdc_send(target == OUTPUT_A ? "bootloader A\n" : "bootloader B\n");
+        CHECK(maintenance_target == target && maintenance_completions == before);
+        CHECK(strstr(cdc_bytes, "result=accepted reason=peer_admitted_not_boot_proof") != NULL);
+        CHECK(occurrences("END bootloader") == 1 && occurrences("deskhop> ") == 1);
+    }
+    bootloader_console_reset(OUTPUT_A);
+    const maintenance_start_t starts[] = {MAINTENANCE_BUSY, MAINTENANCE_UPDATE_ACTIVE,
+                                         MAINTENANCE_REBOOT_PENDING, MAINTENANCE_BAD_ARGUMENT};
+    const char *reasons[] = {"busy", "update_active", "reboot_pending", "bad_argument"};
+    for (unsigned i = 0; i < sizeof(starts) / sizeof(starts[0]); ++i) {
+        maintenance_start = starts[i];
+        cdc_capture_clear();
+        cdc_send("bootloader A\n");
+        char expected[80];
+        snprintf(expected, sizeof(expected), "result=rejected reason=%s\r\n", reasons[i]);
+        CHECK(strstr(cdc_bytes, expected) != NULL);
+        CHECK(occurrences("END bootloader") == 1 && occurrences("deskhop> ") == 1);
+    }
+    maintenance_start = MAINTENANCE_STARTED;
+    maintenance_auto = false;
+    const maintenance_outcome_t outcomes[] = {MAINTENANCE_REMOTE_BUSY, MAINTENANCE_REMOTE_UPDATE_ACTIVE,
+        MAINTENANCE_REMOTE_REBOOT_PENDING, MAINTENANCE_TIMEOUT_NOT_SENT,
+        MAINTENANCE_TIMEOUT_UNCONFIRMED, MAINTENANCE_ABORTED};
+    const char *rows[] = {"result=rejected reason=peer_busy", "result=rejected reason=peer_update_active",
+        "result=rejected reason=peer_reboot_pending", "result=not_sent reason=queue_timeout",
+        "result=unconfirmed reason=peer_timeout_or_unsupported", "result=cancelled reason=maintenance_aborted"};
+    for (unsigned i = 0; i < sizeof(outcomes) / sizeof(outcomes[0]); ++i) {
+        cdc_capture_clear();
+        cdc_send("bootloader B\n");
+        CHECK(occurrences("BEGIN bootloader") == 0);
+        maintenance_publish(maintenance_token, OUTPUT_B, outcomes[i]);
+        console_drain();
+        CHECK(strstr(cdc_bytes, rows[i]) != NULL);
+        CHECK(occurrences("END bootloader") == 1 && occurrences("deskhop> ") == 1);
+    }
+    /* A stale token or wrong physical target cannot authorize the current command. */
+    cdc_capture_clear();
+    cdc_send("bootloader B\n");
+    maintenance_publish(maintenance_token + 1, OUTPUT_B, MAINTENANCE_REMOTE_ACCEPTED);
+    console_drain();
+    maintenance_publish(maintenance_token, OUTPUT_A, MAINTENANCE_LOCAL_READY);
+    console_drain();
+    CHECK(occurrences("BEGIN bootloader") == 0);
+    console_now_us += UINT64_C(4000000);
+    console_drain();
+    CHECK(strstr(cdc_bytes, "result=unconfirmed reason=console_timeout") != NULL);
+    bootloader_console_reset(OUTPUT_A);
+}
+
+static void cdc_bootloader_cancel(void) {
+    bootloader_console_reset(OUTPUT_A);
+    unsigned completions = maintenance_completions;
+    unsigned cancels = maintenance_cancels;
+    bootloader_send_held(OUTPUT_A);
+    console_now_us += UINT64_C(2000000);
+    console_tick();
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    console_drain();
+    CHECK(maintenance_completions == completions);
+    CHECK(strstr(cdc_bytes, "result=cancelled reason=usb_reply_timeout") != NULL);
+
+    bootloader_console_reset(OUTPUT_A);
+    cancels = maintenance_cancels;
+    bootloader_send_held(OUTPUT_A);
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    console_drain(); /* Late actual IN completion cannot resurrect authority. */
+    CHECK(maintenance_completions == completions);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    console_drain();
+    cdc_capture_clear();
+    cdc_send("status\n");
+    cdc_status_fields();
+
+    bootloader_console_reset(OUTPUT_A);
+    cancels = maintenance_cancels;
+    bootloader_send_held(OUTPUT_A);
+    enumerate(false); /* Bus reset without an intervening console task. */
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    console_drain();
+    CHECK(maintenance_completions == completions);
+    cdc_capture_clear();
+    cdc_send("status\n");
+    cdc_status_fields();
+}
+
 static void msc_bulk_command(uint8_t opcode, uint32_t bytes, unsigned expected_payload) {
     msc_cbw_t cbw = {.signature = MSC_CBW_SIGNATURE, .tag = 0x10203040,
                      .total_bytes = bytes, .dir = 0x80, .cmd_len = 10};
@@ -1802,6 +2056,14 @@ int main(void) {
     cdc_close_discards_unsent_response();
     scenario = "CDC fast bus reset";
     cdc_bus_reset_discards_partial();
+    scenario = "CDC bootloader strict grammar and truthful help";
+    cdc_bootloader_parser();
+    scenario = "CDC bootloader physical targets and actual final IN completion";
+    cdc_bootloader_completion();
+    scenario = "CDC bootloader peer admission, rejection and unknown outcomes";
+    cdc_bootloader_remote_and_rejections();
+    scenario = "CDC bootloader timeout, DTR drop and reset cancellation";
+    cdc_bootloader_cancel();
     scenario = "CDC close and reopen";
     cdc_disconnect_discards_partial();
     scenario = "suspend and unplug";
@@ -1826,7 +2088,7 @@ int main(void) {
     CHECK(control(0, TUSB_REQ_SET_CONFIGURATION, 0, 0, 0, NULL));
     no_ep0_out_payload = false;
     CHECK(!tud_mounted() && !endpoint(0x81)->opened);
-    puts("TinyUSB virtual-DCD tests passed (normal/config CDC enumeration and real console streams, per-tick budgets, HID progress under CDC backpressure, control stages, HID LED, MSC SCSI, reconnect)");
+    puts("TinyUSB virtual-DCD tests passed (normal/config CDC enumeration and real console streams, bootloader target/grammar/actual-IN-completion/cancellation, per-tick budgets, HID progress under CDC backpressure, control stages, HID LED, MSC SCSI, reconnect)");
     return 0;
 }
 

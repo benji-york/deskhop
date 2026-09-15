@@ -84,7 +84,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
     /* A coordinated reboot reserves the running image until reset. Do not let
        a late host write dirty flash or refresh the watchdog during the grace
        period after that decision. */
-    if (global_state.reboot_requested) {
+    if (global_state.reboot_requested || global_state.maintenance_reserved) {
         firmware_update_unlock();
         return (int32_t)bufsize;
     }

@@ -3,6 +3,9 @@
 #include "main.h"
 #include <assert.h>
 #include <setjmp.h>
+#if SIM_HAS_MAINTENANCE
+#include "maintenance.h"
+#endif
 
 device_t global_state;
 uint8_t uart_rxbuf[DMA_RX_BUFFER_SIZE] __attribute__((aligned(DMA_RX_BUFFER_SIZE)));
@@ -19,6 +22,11 @@ static uint64_t now_us, busy_until[3], dma_busy_until, last_kick;
 static bool mounted, suspended, stalled[3], fail_report, led, stopped;
 static bool uart_stalled, diagnostic_request_accepted, diagnostic_poll_ready;
 static bool uart_busy_override;
+static int maintenance_start_result;
+static bool maintenance_poll_ready;
+#if SIM_HAS_MAINTENANCE
+static maintenance_result_t maintenance_result;
+#endif
 #if SIM_HAS_DIAGNOSTIC_PEER
 static peer_status_result_t diagnostic_result;
 #endif
@@ -184,6 +192,12 @@ void sim_init(uint8_t role, event_cb_t cb) {
     queue_init(&global_state.uart_tx_queue,sizeof(uart_packet_t),UART_QUEUE_LENGTH);
     queue_init(&global_state.hid_queue_out,sizeof(hid_generic_pkt_t),HID_QUEUE_LENGTH);
     firmware_sync_init(); rx_hw.transfer_count=DMA_RX_BUFFER_SIZE;
+#if SIM_HAS_MAINTENANCE
+    maintenance_start_result = 0;
+    maintenance_poll_ready = false;
+    memset(&maintenance_result, 0, sizeof(maintenance_result));
+    maintenance_init(role, role + 1);
+#endif
 #if SIM_HAS_KEYBOARD_SYNC
     keyboard_sync_init(role + 1);
 #endif
@@ -207,6 +221,9 @@ void sim_init(uint8_t role, event_cb_t cb) {
 #endif
 }
 void sim_destroy(void) {
+#if SIM_HAS_MAINTENANCE
+    maintenance_shutdown();
+#endif
 #if SIM_HAS_DIAGNOSTIC_PEER_HISTORY
     history_borrowed = NULL;
 #endif
@@ -225,6 +242,39 @@ void sim_host(int connect,int suspend) {
 void sim_endpoint(int instance,int stall,int reject) { stalled[instance]=stall; fail_report=reject; }
 void sim_uart_stall(int stall) { uart_stalled = stall; }
 void sim_uart_busy(int busy) { uart_busy_override = busy; }
+void sim_maintenance_request(uint8_t target, uint32_t token) {
+#if SIM_HAS_MAINTENANCE
+    maintenance_start_result = maintenance_request(target, token, now_us);
+#else
+    maintenance_start_result = 4;
+#endif
+    emit(18, token, maintenance_start_result, &target, sizeof(target));
+}
+void sim_maintenance_poll(void) {
+#if SIM_HAS_MAINTENANCE
+    maintenance_poll_ready = maintenance_poll(&maintenance_result);
+    if (maintenance_poll_ready)
+        emit(19, maintenance_result.token, maintenance_result.outcome,
+             &maintenance_result.target, sizeof(maintenance_result.target));
+#else
+    maintenance_poll_ready = false;
+#endif
+}
+void sim_maintenance_complete(uint32_t token) {
+#if SIM_HAS_MAINTENANCE
+    maintenance_console_reply_complete(token, now_us);
+#endif
+}
+void sim_maintenance_cancel(uint32_t token) {
+#if SIM_HAS_MAINTENANCE
+    maintenance_cancel(token, now_us);
+#endif
+}
+void sim_maintenance_session(uint64_t session) {
+#if SIM_HAS_MAINTENANCE
+    maintenance_init(global_state.board_role, session);
+#endif
+}
 /* Core 0's actual bridge API, with scalar introspection instead of relying on
  * ctypes matching either ARM or the host's structure padding. */
 void sim_diagnostic_request(uint32_t token) {
@@ -422,6 +472,18 @@ int64_t sim_get(int field,int index) {
       case 51:return s->config.screensaver_system_timeout_sec;
       case 60:return diagnostic_request_accepted;
       case 61:return diagnostic_poll_ready;
+      case 130:return maintenance_start_result;
+      case 131:return maintenance_poll_ready;
+#if SIM_HAS_MAINTENANCE
+      case 132:return maintenance_result.token;
+      case 133:return maintenance_result.target;
+      case 134:return maintenance_result.outcome;
+      case 135:return s->maintenance_reserved;
+      case 136:return s->maintenance_source_seen;
+      case 137:return s->maintenance_source_last_us;
+#else
+      case 132:case 133:case 134:case 135:case 136:case 137:return 0;
+#endif
       case 110:return verify_request_accepted;
       case 111:return verify_poll_ready;
 #if SIM_HAS_DIAGNOSTIC_VERIFY

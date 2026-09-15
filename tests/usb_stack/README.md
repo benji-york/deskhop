@@ -58,7 +58,7 @@ Verified scenarios include:
   frozen output under backpressure, and a fresh snapshot on the next command.
   New update/peer history events and opaque future events preserve their fields.
   Worst-case help with editing echo and maximum status values fit the fixed
-  1 KiB output chunk. Observation policy itself is tested in pure/paired layers.
+  1,280-byte output chunk. Observation policy itself is tested in pure/paired layers.
 - DTR close, unplug, deconfiguration, and fast reset discard partial commands and
   unsent output without accidentally rearming CDC buffers as endpoint zero.
 - Local history uses the production 64-record ring, with default/1/64 counts,
@@ -74,6 +74,20 @@ Verified scenarios include:
   the live ring wraps. Peer timeout/invalid/busy outcomes and the 3.5-second
   fallback preserve local history. Stale results and DTR cancellation release
   the borrowed peer result without affecting a later command.
+- v0.104 `bootloader A|B` uses the production strict parser and physical A/B
+  mapping even when focus is on the other Mac. Empty/lowercase/extra targets,
+  invalid bytes, embedded NULs, and oversized commands cannot initiate entry.
+- Local bootloader responses require real CDC endpoint completion, not merely an
+  empty software FIFO. The test holds the final one-byte newline transfer and
+  proves that no completion is authorized early, including the real TinyUSB
+  full-packet/ZLP path with the newline queued behind an in-flight ZLP. The
+  callback cannot enter ROM; only a subsequent console task notifies maintenance.
+  Keyboard HID reports continue while that CDC endpoint is blocked.
+- Remote maintenance results, immediate admission failures, wrong-token/target
+  replies, bounded timeouts, and DTR/bus-reset cancellation preserve correlation
+  and do not authorize local entry. Remote acceptance is explicitly labeled
+  `peer_admitted_not_boot_proof`. Late endpoint completion after cancellation
+  cannot resurrect a request; the next terminal can still query status.
 
 MSC backing-store callbacks in this prototype are deliberately modeled. Disk
 capacity and returned bytes are fixtures; this is not a TinyUSB-to-real-flash
@@ -88,6 +102,12 @@ wires, a full stalled UART queue, malformed replies, and continued HID progress.
 The history bridge here substitutes a native clock and unlocked access to the
 real ring. The paired/native-boundary suite exercises the actual capture bridge
 and event hooks with SDK lock doubles; neither proves physical lock timing.
+The maintenance API is also a contract double here: this suite proves the
+production console/USB contract, not actual updater admission, ACK transmission,
+or ROM entry. The paired simulator runs `maintenance.c` with the real firmware
+UART queues/encoder/receiver and a reset double to exercise those boundaries,
+including update reservations, late/canceled traffic, and bounded drain. Neither
+layer means a v0.104 firmware image has been flashed or accepted on real hardware.
 
 A useful stack-level finding is captured: in this TinyUSB revision, a HID
 `GET_REPORT` request with a nonzero report ID returns the ID byte even though

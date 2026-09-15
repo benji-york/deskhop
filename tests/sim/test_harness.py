@@ -12,6 +12,7 @@ from run import replay, minimize
 from test_peer_status import scenario_peer_status_roundtrip
 from test_peer_history import scenario_peer_history_roundtrip
 from test_uart_integrity import scenario_uart_fault_positions
+from test_serial_bootloader import remote as serial_bootloader_remote
 
 def check_interleaving_cli_selection():
     # Exercise argparse and dispatch, with only expensive firmware execution
@@ -36,6 +37,7 @@ def check_keyboard_startup_ownership():
     # may invalidate USB output via its locked generation but not mutate sync.
     setup = (ROOT/'src/setup.c').read_text()
     assert setup.index('keyboard_sync_init(boot_session)') < setup.index('multicore_launch_core1(core1_main)')
+    assert setup.index('maintenance_init(state->board_role, boot_session)') < setup.index('multicore_launch_core1(core1_main)')
     handlers = (ROOT/'src/handlers.c').read_text()
     announcement = handlers.split('void announce_initial_output(', 1)[1].split('\n}', 1)[0]
     assert 'keyboard_host_reset(state)' in announcement
@@ -93,6 +95,13 @@ def main():
         try:s.check('usb_bytes',0,2,-1,0,'01')
         except AssertionError as e:assert 'usb_bytes' in str(e)
         else:raise AssertionError('report-byte oracle accepted an incorrect button mask')
+    data=json.loads(path.read_text());assert replay(data)==before
+    with Simulation(seed=73, background=False) as s:
+        serial_bootloader_remote(s, 0)
+        s.save(path)
+        before=s.trace
+        assert {event['core'] for event in before
+                if event['kind'] in ('maintenance_request', 'maintenance_result', 'reset')} == {0}
     data=json.loads(path.read_text());assert replay(data)==before
     with Simulation(seed=73, background=False) as s:
         scenario_uart_fault_positions(s)

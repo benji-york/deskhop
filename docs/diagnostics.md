@@ -3,7 +3,9 @@
 The agreed approach is six small firmware releases, with a hardware check after
 each. Keep both RP2040 cores and their existing responsibilities. Diagnostics
 use fixed memory and bounded work; input paths never format text or wait for a
-terminal. Commands remain read-only.
+terminal. The diagnostic commands remain read-only. The separately authorized
+v0.104 release adds an explicitly disruptive `bootloader A|B` maintenance
+command; it is not part of the original six-slice diagnostics rollout.
 
 ## Release sequence
 
@@ -44,6 +46,103 @@ Additional events and counters follow troubleshooting needs discovered during
 these sessions. Histories are volatile across reboot. No peer/history/verification
 commands are advertised before their implementation exists.
 
+## Serial maintenance (v0.104 deployed, physical command acceptance pending)
+
+The `codex/serial-bootloader` branch implements these exact, case-sensitive
+commands in normal and configuration modes:
+
+```text
+bootloader A
+bootloader B
+```
+
+A/B are physical board roles, independent of output focus or which console is
+open. There is no implicit target or `both` variant. Extra arguments, lowercase
+targets, malformed input, and trailing spaces are rejected. **This interrupts
+normal operation of the selected board.** Both boards now run v0.104, with fresh
+full-slot scans and core progress verified, and Benji confirmed normal input and
+switching work. The deployment used the existing
+keyboard bootloader shortcut; the new serial bootloader commands were not sent
+and their physical behavior still needs separate acceptance. Deployment evidence
+is preserved in [the runbook](../BENJI_DESKHOP_RUNBOOK.md) and
+[v0.104 record](testing/serial-bootloader-v104.md).
+
+The operation enters the selected Pico's disk-free ROM USB bootloader, disabling
+the ROM mass-storage interface with mask `1` and retaining PICOBOOT. It neither
+writes flash nor uploads a file. Use picotool separately on the Mac connected to
+the target's computer-facing USB cable, identify its physical UID, and follow
+the existing firmware/settings backup, upload, readback, and normal-reboot
+procedure. A remote command does not tunnel PICOBOOT or a firmware upload across
+UART. For the ordinary update workflow, enter A, flash and verify A, reboot it,
+then observe and independently verify B's compatible automatic update.
+
+The local response is framed `BEGIN bootloader` / `END bootloader` and says
+`result=accepted scope=local` with
+`action=enter_disk_free_usb_rom_after_reply`. The terminal must remain open and
+read the response. Core 0 waits for actual CDC IN completion, including a final
+one-byte newline fence after TinyUSB's possible zero-length packet, before
+authorizing entry. It additionally waits for UART queue, DMA, and FIFO/shifter
+drain. A full software FIFO is not mistaken for host delivery; the callback
+only records completion, and a later core-0 task performs the transition.
+
+For a remote target, UART types 49/50 carry a dedicated versioned request/ACK
+inside the existing protected UART-v1 frame. The eight-byte payload encodes
+version, physical target/ACK status, a 32-bit request token, and a 16-bit
+originating boot-session tag. Core 1 only copies messages into a bounded
+eight-entry queue; core 0 owns maintenance state. Correlation rejects wrong
+tokens, roles, and session tags. This is operational correlation, not
+authentication. The target admits a safe request, queues its ACK, and waits for
+that ACK to actually pass UART dequeue and for queue/DMA/UART drain before ROM
+entry. No ACK or request retransmission is performed.
+
+Response meanings:
+
+| Result | Meaning |
+| --- | --- |
+| `accepted`, `peer_admitted_not_boot_proof` | The remote target accepted the request. It may still abort during drain; independently observe its USB ROM enumeration. |
+| `rejected`, `busy` / `update_active` / `reboot_pending` | Local admission was refused. `peer_`-prefixed reasons report a matching negative peer ACK. |
+| `not_sent`, `queue_timeout` | The request was never admitted to the local UART queue. |
+| `unconfirmed`, `peer_timeout_or_unsupported` | No timely matching reply; target state is unknown, including an older peer that ignores the command. |
+| `cancelled` | A local operation, or a remote operation not yet admitted to UART, was abandoned. A stalled local USB reply uses `usb_reply_timeout`. |
+
+Admission to the UART queue and servicing an incoming queued request are bounded
+to 250 ms. Once admitted, the initiator waits at most three seconds for the peer
+ACK. The accepting target allows one second for ACK wire drain. Local maintenance
+has a three-second overall deadline; the console cancels a stalled local reply
+after two seconds and has a four-second fallback for remote completion. No
+maintenance wait arms the watchdog or spins on a full queue. USB backpressure
+can delay when an outcome is visible to the terminal. Ctrl-C edits/cancels an
+unsubmitted command line; it is not an in-flight transaction cancellation command.
+
+DTR close/unmount cancels local authorization and discards pending console state.
+Canceled or expired maintenance packets are discarded at UART dequeue so a full
+queue cannot release them long after cancellation. A request already transmitted
+cannot be recalled: terminal close or an unconfirmed timeout is **not proof the
+target stayed running**. Inspect the target before retrying. Likewise, a remote
+ACK proves admission only, not ROM execution, upload, or firmware integrity.
+
+Both initiating and executing boards reject an active update, a dirty running
+image, an existing maintenance/config-bootloader reservation, or a pending reboot.
+Successful maintenance reserves the clean image under the updater lock, blocking
+new USB UF2 claims, UART pulls, firmware byte serving, and conflicting maintenance
+reboot paths until completion/cancellation. A board that recently served an
+accepted firmware word request refuses maintenance for three seconds. This
+source-side holdoff is conservative recent activity evidence, **not a peer-health
+proof**: a dirty peer that has been paused/offline longer can still exist.
+
+v0.103 ignores the new remote message types; there is deliberately no fallback
+to its legacy immediate-reset `FIRMWARE_UPGRADE_MSG`. The initial v0.104 deployment
+used an existing bootloader method. The UART-v1 framing and firmware-update
+protocol remain compatible for subsequent automatic propagation. No saved-config
+format, QMK mapping, resident Mac helper, or macOS permission change is required.
+
+The real TinyUSB harness tests the production parser, response framing, DTR/reset
+cancellation, endpoint completion, ZLP/newline ordering, and HID progress while
+CDC is blocked. Its maintenance API is a contract double; the paired simulator
+exercises the actual maintenance state machine, queues, protected UART, and ROM
+reset double. These are complementary hardware-free boundaries, not proof of
+physical USB/UART timing or a completed hardware rollout.
+
 ## Image assurance slice (v0.101 deployed and input checked)
 
 `verify 0.101 <eight-hex-digit-full-slot-crc>` adds one command. Its two board
@@ -58,7 +157,7 @@ readback, unchanged-settings, and Mac USB/media checks. A live 44-status capture
 observed B receiving target v0.101, reaching reboot pending, starting a new boot
 session, and advancing both core counters to `update=confirmed`.
 
-Both boards now execute v0.101. A subsequent 5.537-second serial check passed
+At that deployment, both boards executed v0.101. A subsequent 5.537-second serial check passed
 five statuses, two combined histories, and fresh PASS/FAIL/PASS image scans using
 the correct/wrong/correct full-slot CRC. The correct command is
 `verify 0.101 2db89640`; the separate boot metadata CRC is `be404f8f`.
@@ -279,11 +378,13 @@ console/FIFO. Bytes already submitted to USB may still arrive at the host.
 
 One core 0 task runs after input/UART tasks, at most once per millisecond. Each
 invocation reads at most 32 bytes, completes at most one command, and writes at
-most 64 bytes to TinyUSB. A fixed 1 KiB response buffer applies backpressure when
+most 64 bytes to TinyUSB. A fixed 1,280-byte response buffer applies backpressure when
 the host stops reading. There is no USB wait loop or recursive `tud_task()` call.
 Debug printf output is suppressed while the console owns CDC. The legacy debug
 bootloader command requires `DH_DEBUG=ON`, `DH_CONSOLE=OFF`, and
-`DH_DEBUG_CDC_FLASH=ON`; it is absent from the production console.
+`DH_DEBUG_CDC_FLASH=ON`; it remains absent from the production console. The
+v0.104 `bootloader A|B` command above is a separate guarded maintenance path,
+not an alias for that debug-only reset.
 
 ## Hardware acceptance for the first slice
 

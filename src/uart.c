@@ -14,6 +14,7 @@
 #include "diagnostic_peer_history.h"
 #include "diagnostic_history.h"
 #include "diagnostic_verify.h"
+#include "maintenance.h"
 
 /* ================================================== *
  * ===============  Sending Packets  ================ *
@@ -79,6 +80,10 @@ static bool process_config_bootloader_request(device_t *state) {
         return false;
 
     firmware_update_lock();
+    if (state->maintenance_reserved) {
+        firmware_update_unlock();
+        return false;
+    }
     if (state->fw.upgrade_in_progress || state->fw.image_dirty) {
         state->config_bootloader_peer_pending = false;
         state->config_bootloader_local_pending = false;
@@ -113,6 +118,9 @@ void process_uart_tx_task(device_t *state) {
     _Static_assert(RAW_PACKET_LENGTH <= DMA_TX_BUFFER_SIZE, "UART frame exceeds DMA buffer");
     uart_packet_t packet = {0};
 
+    if (maintenance_task(time_us_64()))
+        return;
+
     if (process_config_bootloader_request(state))
         return;
 
@@ -120,6 +128,9 @@ void process_uart_tx_task(device_t *state) {
         return;
 
     if (!queue_try_remove(&state->uart_tx_queue, &packet))
+        return;
+
+    if (!maintenance_packet_allowed(packet.type, packet.data, time_us_64()))
         return;
 
     write_raw_packet(uart_txbuf, &packet);
@@ -133,6 +144,11 @@ void process_uart_tx_task(device_t *state) {
 static void handle_verify_request(uart_packet_t *packet, device_t *state) {
     (void)state;
     diagnostic_verify_receive(false, packet->data, time_us_64());
+}
+
+static void handle_maintenance(uart_packet_t *packet, device_t *state) {
+    (void)state;
+    maintenance_receive(packet->type, packet->data, time_us_64());
 }
 
 static void handle_verify_response(uart_packet_t *packet, device_t *state) {
@@ -213,6 +229,8 @@ const uart_handler_t uart_handler[] = {
     {.type = DIAGNOSTIC_VERIFY_REQUEST_MSG, .handler = handle_verify_request},
     {.type = DIAGNOSTIC_VERIFY_RESPONSE_MSG, .handler = handle_verify_response},
     {.type = FIRMWARE_UPGRADE_MSG, .handler = handle_fw_upgrade_msg},
+    {.type = MAINTENANCE_BOOTLOADER_REQUEST_MSG, .handler = handle_maintenance},
+    {.type = MAINTENANCE_BOOTLOADER_ACK_MSG, .handler = handle_maintenance},
 
     {.type = HEARTBEAT_MSG, .handler = handle_heartbeat_msg},
     {.type = PROXY_PACKET_MSG, .handler = handle_proxy_msg},

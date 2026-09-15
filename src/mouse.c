@@ -226,7 +226,12 @@ bool queue_mouse_report_critical(mouse_report_t *report, device_t *state) {
         if (queue_try_add(&state->mouse_queue, report))
             return true;
         if (time_us_64() - started >= MOUSE_CRITICAL_QUEUE_TIMEOUT_US) {
-            state->reboot_requested = true;
+            /* Do not race a serial maintenance transaction's bounded drain.
+             * Ordinary queue-timeout behavior is unchanged outside it. */
+            firmware_update_lock();
+            if (!state->maintenance_reserved)
+                state->reboot_requested = true;
+            firmware_update_unlock();
             return false;
         }
         tight_loop_contents();
