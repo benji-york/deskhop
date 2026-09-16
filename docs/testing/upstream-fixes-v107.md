@@ -1,6 +1,12 @@
 # Upstream bug-fix integration for v0.107
 
-Status: implementation and hardware-free validation complete. The authorized
+Status: these changes were **deployed and accepted as part of v0.108** on
+2026-09-16. See [the v0.108 record](verification-contention-v108.md) for the
+successful guarded upgrade, both-board CRC verification and user acceptance.
+The original v0.107 candidate itself was never installed and is retained as
+historical evidence. The remainder below records its earlier attempt.
+
+Historical status: implementation and hardware-free validation complete. The authorized
 flash attempt on 2026-09-16 failed during the initial backup, before any firmware
 write. Both Picos have now recovered on v0.106 and passed a fresh full-slot CRC
 scan. The complete correct/wrong/correct verification sequence still fails on

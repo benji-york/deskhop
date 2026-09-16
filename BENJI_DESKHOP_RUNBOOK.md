@@ -8,30 +8,114 @@ README.
 
 Snapshot: 2026-09-16
 
-## Current work: verification contention repair for v0.108
+## Current accepted release: v0.108
+
+Both Picos were upgraded and verified on 2026-09-16 using the frozen v0.108
+candidate. Benji then confirmed "Everything works normally" for typing and
+modifiers, trackball and keyboard-generated right-click on both Macs, switching
+both ways, focus arrows and zoom assist, and authorized merging/pushing to main.
+This release includes the four v0.107 upstream fixes and the v0.108 diagnostic
+freshness-contention repair. Configuration format 10 and UART frame version 1
+are unchanged; QMK was not modified.
+
+Evidence: `build/updater/runs/20260916T173830Z-j3n0vqi7/`. The ordinary maintained
+updater completed in 50.815672 seconds, with stock picotool and no debugger,
+retry, power cycle or cable move. A's full 262144-byte independent readback
+matched the candidate and all 4096 settings bytes were unchanged. B's automatic
+receive/reboot was observed, then both boards passed fresh correct/wrong/correct
+CRC checks with advancing cores, stable new boot sessions and idle updates.
+Full-slot CRC is `80c1302f`; boot metadata CRC is `c60094e1`.
+
+See [the v0.108 deployment record](docs/testing/verification-contention-v108.md)
+for exact identities, timing and acceptance limits. The USB-ROM hang remains
+unresolved and is parked at Benji's request; this successful upgrade does not
+prove it fixed. Batch transfer acceleration remains unproven. Configuration
+validation and broad reboot/power-loss safety are still outstanding.
+
+The following development/deployment sections are historical. Statements there
+that v0.108 was uninstalled, or that main/devices remained at v0.106, describe
+those earlier checkpoints and do not override this current release record.
+
+## v0.108 development and pre-deployment history
 
 `codex/upgrade-reliability-v0.108` extends the uninstalled v0.107 upstream
 integration with bounded asynchronous retries of the post-scan freshness check.
 Transient lock contention must defer a result, not permanently turn it into
 `UNVERIFIED busy`; real image changes and expired deadlines still fail closed.
 The source investigation also separates this firmware bug from the earlier ROM
-USB backup timeout. No hardware access, flash, main merge or push accompanies
-this repair. Both devices and `main` remain v0.106; the old frozen v0.107 image
-is retained as historical evidence, not replaced or relabeled.
+USB backup timeout. The repair was built/tested without hardware; the later
+approved no-flash experiment is recorded below. Both stored images and `main`
+remain v0.106; the old frozen v0.107 image is retained as historical evidence,
+not replaced or relabeled. No main merge or push has occurred.
 
 Implementation commit `34ed079` passed all 57 deep-tier steps (119 updater tests)
 and the ARM build. The new frozen candidate is
 `build/releases/deskhop-v0.108-07hkmacr/manifest.json`, full-slot CRC `80c1302f`.
 This is the pending repair candidate, superseding v0.107 for future deployment.
-It has not been installed or hardware-accepted. The ROM transport is unchanged;
-one no-flash stock-tool experiment has been proposed and requires explicit
-approval for ROM entry and normal reboot before it is run.
+It has not been installed or hardware-accepted. The production ROM transport
+is unchanged. The approved one-shot no-flash experiment
+`build/updater/runs/20260916T152856Z-uid-first-c26huglr/` read A's exact v0.106
+image in 0.573 seconds without preceding `info`, then timed out during the sole
+normal-reboot command. No firmware/settings writes or retries occurred. A's
+serial port was absent afterward. Following the user's manual power cycle,
+read-only recovery `build/updater/runs/20260916T153320Z-el69g00x/` passed the
+complete correct/wrong/correct CRC sequence on both boards, plus sampled core
+progress, identities, history, idle update and media checks. Both are back on
+accepted v0.106. The original experiment remains failed; its reboot process
+stalled on a preliminary four-byte ROM identification read before sending the
+actual reboot command. This is not a validated workaround or permission to
+retry flashing, and v0.108 remains uninstalled.
+
+A subsequent approved debugger diagnostic
+`build/updater/runs/20260916T155413Z-observe-stock-_3__pscp/` stopped at picotool's
+`main+0` because the observer rejected extra shared-library breakpoint matches.
+It never resumed picotool or sent a ROM command: this was a diagnostic setup
+failure, not another hardware hang. A had already entered disk-free ROM, so the
+user power-cycled both boards. Read-only recovery
+`build/updater/runs/20260916T155907Z-392krms2/` passed the full verification
+sequence on both unchanged v0.106 images. No firmware/settings writes or ROM
+retries occurred. The corrected observer passed synthetic multi-location and
+late-entry rejection tests plus exact entry/arming on stock picotool's non-USB
+`help` path. The underlying intermittent hang remains unresolved.
+
+The separately approved corrected diagnostic
+`build/updater/runs/20260916T163257Z-observe-stock-andjfs10/` then passed its
+exact v0.106 read, normal A reboot and application health checks. Independent
+`verification/` passed the full correct/wrong/correct CRC sequence on both boards.
+No firmware/settings writes or power cycle were needed. The capture showed no
+halted endpoint or failed transfer, so it contains no failure-status reply.
+The debugger slowed the read to about 2.2 seconds versus the earlier 0.57-second
+uninstrumented read and may have masked a timing issue. This is not a hang fix
+or acceptance of v0.108. No further live test or flash was attempted.
+
+The subsequently approved failure-only diagnostic
+`build/updater/runs/20260916T165604Z-error-only-69_ewv92/` also passed the exact
+read (0.546 seconds), normal reboot and both-board application health without
+triggering an error breakpoint. Its independent verifier passed both correct
+CRCs, then A returned the known `UNVERIFIED busy` on the deliberate wrong-CRC
+query; B correctly rejected that wrong CRC. The verifier stopped before the
+final scan and remains failed. No firmware/settings writes, automatic retries
+or power cycle followed. Both still run v0.106; the pending v0.108 contention
+fix is not installed, and the USB-ROM hang remains unresolved.
+
+The next explicitly approved batch
+`build/updater/runs/20260916T171133Z-error-batch-9x5q9iao/` completed all five
+no-flash exact reads, normal A reboots and both-board health checks. Ten stock
+processes exited zero without triggering the error observer; reads took
+0.544–0.555 seconds. A's final boot is `eadf5e163654fec3`; B stayed
+`8d9032bbb7032771` throughout. The separate final verification then passed A's
+correct CRC but stopped on B's `UNVERIFIED busy`, with no retry. All five ROM
+cycles are complete, but verification and the overall batch remain failed.
+No firmware/settings writes or power cycle occurred; no extra cycle or hardware
+command followed. This is additional successful diagnostic evidence, not a
+USB-hang fix or hardware acceptance of v0.108. The five-cycle authorization is
+exhausted.
 
 See [the v0.108 repair record](docs/testing/verification-contention-v108.md)
 and [the ROM backup investigation](docs/testing/rom-backup-timeout-investigation.md)
-for validation, boundaries and the next proposed hardware experiment.
+for validation, boundaries and the no-flash experiment evidence.
 
-## Pending integration: upstream fixes for v0.107
+## Historical candidate: upstream fixes for v0.107 (released in v0.108)
 
 `codex/upstream-fixes-v0.107` is a separate candidate based on accepted `main`
 `1da1af2`, incorporating upstream through `c220d0c` selectively: #369's
@@ -71,7 +155,7 @@ BUSY as a terminal verification failure. This is distinct from the ROM backup
 timeout. No further flash or verification loop was attempted; v0.107 remains
 uninstalled. See the detailed integration record above before further writes.
 
-## Current publication: main matches accepted v0.106
+## Previous publication: accepted v0.106
 
 Benji confirmed "looks good" after the requested physical input checks and
 authorized committing, merging and pushing. `main` now includes the operationally
