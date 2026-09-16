@@ -16,6 +16,17 @@ speed does not establish batch use or acceleration. See the
 does not reflash the devices; same-version replacements and downgrades remain
 refused by the updater.
 
+The subsequent v0.107 attempt failed at the first ROM backup, before any write.
+After power cycling, both v0.106 images passed a fresh CRC scan, but the complete
+verification sequence remained unsuccessful because A intermittently reported
+post-scan `busy`. These are separate failures. The unpublished
+[v0.108 firmware repair](testing/verification-contention-v108.md) addresses the
+verification contention; the [USB timeout investigation](testing/rom-backup-timeout-investigation.md)
+identifies a failed initial exclusive-access ACK and proposes a no-flash
+experiment, not a proven transport fix. Current deployment safety gates and
+stock-picotool invocation remain unchanged. The `verify` CLI prints a diagnostic-
+only plan; it does not perform the ROM-entry/load steps used by `flash`.
+
 ## Stock-picotool invocation and hardware evidence
 
 The host workaround retained on `main` keeps the old CDC connection open through

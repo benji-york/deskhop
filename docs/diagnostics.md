@@ -145,6 +145,14 @@ physical USB/UART timing or a completed hardware rollout.
 
 ## Image assurance slice (v0.101 deployed and input checked)
 
+The unpublished v0.108 repair defers transient post-scan lock contention instead
+of permanently latching `UNVERIFIED busy`. Freshness checks remain nonblocking
+and bounded by the original three-second scan/peer and 3.5-second console
+deadlines. Image changes and active updates still invalidate the result; remote
+rows still describe their scan snapshots, not continuous verification leases.
+See [the repair record](testing/verification-contention-v108.md) for tests and
+the deployment boundary; the running devices are still on v0.106.
+
 `verify 0.101 <eight-hex-digit-full-slot-crc>` adds one command. Its two board
 results include executing identity, scan interval, coverage, fresh CRC, metadata,
 and core progress. PASS requires both image/build matches and both cores advancing

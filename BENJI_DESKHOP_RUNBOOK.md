@@ -19,6 +19,14 @@ USB backup timeout. No hardware access, flash, main merge or push accompanies
 this repair. Both devices and `main` remain v0.106; the old frozen v0.107 image
 is retained as historical evidence, not replaced or relabeled.
 
+Implementation commit `34ed079` passed all 57 deep-tier steps (119 updater tests)
+and the ARM build. The new frozen candidate is
+`build/releases/deskhop-v0.108-07hkmacr/manifest.json`, full-slot CRC `80c1302f`.
+This is the pending repair candidate, superseding v0.107 for future deployment.
+It has not been installed or hardware-accepted. The ROM transport is unchanged;
+one no-flash stock-tool experiment has been proposed and requires explicit
+approval for ROM entry and normal reboot before it is run.
+
 See [the v0.108 repair record](docs/testing/verification-contention-v108.md)
 and [the ROM backup investigation](docs/testing/rom-backup-timeout-investigation.md)
 for validation, boundaries and the next proposed hardware experiment.

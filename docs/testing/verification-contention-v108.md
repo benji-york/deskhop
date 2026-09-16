@@ -1,8 +1,8 @@
 # Verification contention repair, v0.108
 
-Status: implementation and hardware-free validation in progress. Nothing was
-flashed or rebooted during this repair. Both physical Picos remain on v0.106;
-the old, uninstalled v0.107 candidate is immutable and retained separately.
+Status: implemented in `34ed079`; all 57 deep-tier steps and the ARM build pass.
+Nothing was flashed or rebooted during this repair. Both physical Picos remain
+on v0.106; the old, uninstalled v0.107 candidate is immutable and retained separately.
 
 Branch `codex/upgrade-reliability-v0.108` is based on `a17ef5c`, so it includes
 the four upstream fixes documented in
@@ -47,10 +47,52 @@ instead of the generic flash plan that misleadingly mentioned ROM entry/load.
 
 ## Validation
 
-Focused production scanner and real TinyUSB console regressions, full test-tier
-results, ARM build and frozen artifact identity will be recorded after the
-implementation is stable. Physical input acceptance and live verification
+The new ASan/UBSan scanner harness executes the production diagnostic scanner,
+peer verifier and SDK queues with deterministic firmware-I/O responses. It
+covers transient and permanent BUSY at scanner completion, actual queue
+publication after backpressure, peer completion/cancellation/replacement,
+metadata/generation changes and active updates during deferral, exact original
+deadlines and unchanged scan timestamps.
+
+The real TinyUSB device/console suite holds row emission and final-verdict
+emission busy independently. It checks multiple transient misses before
+success, BUSY followed by a real failure, exact 3.5-second expiry with no further
+guard attempts, HID progress while waiting, and disconnect/reopen with rejection
+of the abandoned query's token. Existing production storage tests exercise both
+actual nonblocking lock helpers separately. This is layered, deterministic
+coverage, not a physical multicore/USB timing proof.
+
+Independent review found no blocker and separately reran the scanner, USB and
+storage tests. The full release validation passed **57 deep-tier steps** in
+255.6 seconds, including all **119 host updater tests**, production paired
+scenarios, fixed core-order exploration, historical mixed-version/differential
+builds and existing source mutations. ARM configure/build also passed; RAM
+usage is 231,196 bytes (88.19%). Physical input acceptance and live verification
 remain outstanding until an explicitly authorized deployment succeeds.
+
+## Frozen release
+
+Prepared with the maintained hardware-free command:
+
+```sh
+make release TEST_TIER=deep \
+  TOOLCHAIN_DIR=/opt/homebrew/opt/arm-gcc-bin@14/bin \
+  RELEASE_DIR=/Users/benji/Documents/ChatGPT/DeskHop/build/releases
+```
+
+- Manifest: `/Users/benji/Documents/ChatGPT/DeskHop/build/releases/deskhop-v0.108-07hkmacr/manifest.json`
+- Full-slot CRC32: `80c1302f`; metadata CRC32: `c60094e1`.
+- BIN SHA256: `fd95a666dfe5759f6f1f24e916551d947afdbd144f259e5a32fe4f2a8609b8be`.
+- UF2 SHA256: `8a26a77cd2b11e3fe1e7512fc8624b7f8941f4cb86f250988e89a8d7fe80e0ea`.
+- Evidence: `/private/tmp/deskhop-upstream-fixes.FmFwV1/build/updater/prepare/prepare-gsv2rwdk/`.
+
+Build/test inputs match committed source `34ed079`. The manifest records dirty
+Git state because documentation-only investigation notes were updated during
+validation; these are excluded from build fingerprints. The exact source
+snapshot and validation-bound hashes remain authoritative. UART frame version 1
+and configuration version 10 are unchanged, and the settings page is excluded.
+Use this explicit manifest for a future authorized deployment, never the old
+v0.107 candidate or the canonical checkout's earlier latest pointer.
 
 ## Separate ROM backup timeout
 

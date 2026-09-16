@@ -81,13 +81,18 @@ Both require a fresh, explicitly authorized ROM session. Neither is a proven
 fix, and neither should be followed automatically by a firmware write.
 
 1. **UID-filtered first backup.** Make `save -r 0x10000000 0x10040000
-   <unique-backup.bin> --ser <expected-flash-UID>` the first stock operation,
-   retaining any safely established physical filters. Stock picotool checks
-   the UID before saving. This removes the separate info process, its second
+   <unique-backup.bin> --ser <expected-flash-UID> --vid 11914 --pid 3
+   --address <freshly-observed-address>` the first stock operation. Do not guess
+   the bus. Stock picotool checks the UID before saving: the helper must succeed
+   and its numeric UID must equal the requested value before the save can use
+   that handle. This removes the separate info process, its second
    UID helper, and the first close/reopen transition. The constructor still
    resets and requests exclusivity after one helper, so failure remains
    possible. Require the successful exit, unique actual opened selector,
    unchanged pin, and exact expected current image before accepting the read.
+   The exact image match is additional integrity evidence, not a substitute for
+   UID matching: both physical boards can have identical firmware. Journal the
+   identity method as `UID-filtered save`, not as a printed info/UID check.
 
 2. **Single-UID filtered identity.** Replace `info -a --ser ...` with stock
    `info -b -d --vid 11914 --pid 3 --address <observed-address>` and, if safely
@@ -106,6 +111,14 @@ the planned normal application reboot after a successful exact read. On any
 failure, preserve evidence, stop, and seek recovery direction; do not retry
 save, reboot, or flash automatically. Option 2 is an alternative experiment,
 not an automatic fallback after option 1 fails.
+
+An independent source/safety review agreed that the stock UID-filtered save is
+an actual identity gate under those constraints, without needing a printed UID
+from a separate info command. It also requires an unchanged healthy media
+baseline immediately before admitting the normal reboot, whose intent must
+be journaled first. Retain CDC through that reboot and record cleanup errors.
+This is a **no-flash** experiment: stock UID identification still uploads and
+executes a small RAM helper, but it does not write firmware or saved settings.
 
 ## Safety gates retained
 
