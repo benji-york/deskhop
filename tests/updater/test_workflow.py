@@ -33,9 +33,12 @@ def image(version):
 class FakeConsole:
     def __init__(self, backend):
         self.backend = backend
+        self.cleanup_errors = []
+        backend.consoles.append(self)
 
     def __enter__(self):
         assert not self.backend.console_open
+        assert not self.backend.rom, "Do not open a CDC console while the target is in ROM"
         self.backend.console_open = True
         self.backend.calls.append(("console_open",))
         return self
@@ -43,10 +46,13 @@ class FakeConsole:
     def __exit__(self, *_args):
         self.backend.console_open = False
         self.backend.calls.append(("console_close",))
+        if self is self.backend.consoles[0]:
+            self.cleanup_errors.extend(self.backend.cleanup_errors)
 
     def command(self, command):
         b = self.backend
         assert b.console_open
+        assert not b.rom, "Do not send diagnostic commands through the retained old console"
         b.calls.append(("command", command))
         b.clock += 0.05
         build = b.candidate["build"] if b.running_candidate else "0.104"
@@ -93,6 +99,7 @@ class FakeConsole:
         b = self.backend
         assert b.console_open
         b.calls.append(("bootloader", target))
+        b.serial_bootloader_requested = True
         if b.boot_error:
             raise b.boot_error
         b.rom = True
@@ -103,6 +110,10 @@ class FakeBackend:
         self.candidate, self.local = candidate, local
         self.clock = 10.0
         self.calls = []
+        self.consoles = []
+        self.cleanup_errors = []
+        self.operation_errors = {}
+        self.serial_bootloader_requested = False
         self.console_open = self.rom = self.running_candidate = False
         self.old, self.old_crc = image(204)
         self.settings = b"settings" + b"\xff" * (4096 - 8)
@@ -145,8 +156,11 @@ class FakeBackend:
 
     def save(self, label, start, end, uid):
         self.calls.append(("save", label, start, end, uid))
-        assert self.rom and not self.console_open
+        assert self.rom
+        assert self.console_open == self.serial_bootloader_requested, "Old CDC context must span ROM operations"
         assert uid == IDS[self.local]
+        if label in self.operation_errors:
+            raise self.operation_errors[label]
         if label == "firmware-before":
             return self.old
         if label == "settings-before":
@@ -160,15 +174,22 @@ class FakeBackend:
     def load(self, path, uid):
         self.calls.append(("load", path, uid))
         assert self.rom and uid == IDS[self.local]
+        assert self.console_open == self.serial_bootloader_requested, "Old CDC context must span the load"
+        if "load" in self.operation_errors:
+            raise self.operation_errors["load"]
 
     def reboot(self, uid):
         self.calls.append(("reboot", uid))
         assert self.rom and uid == IDS[self.local]
+        assert self.console_open == self.serial_bootloader_requested, "Old CDC context must span normal reboot"
+        if "reboot" in self.operation_errors:
+            raise self.operation_errors["reboot"]
         self.rom, self.running_candidate = False, True
         self.clock += 0.5
 
     def wait_port(self):
         self.calls.append(("wait_port",))
+        assert not self.console_open, "Close the old CDC context before waiting for a fresh application port"
 
 
 class WorkflowTests(unittest.TestCase):
@@ -199,6 +220,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.calls("load"), [])
         self.assertEqual(self.calls("reboot"), [])
 
+    def assert_serial_flash_lifecycle(self):
+        calls = self.backend.calls
+        opens = [index for index, call in enumerate(calls) if call[0] == "console_open"]
+        closes = [index for index, call in enumerate(calls) if call[0] == "console_close"]
+        self.assertEqual(len(opens), 2)
+        self.assertEqual(len(closes), 2)
+        enumeration = calls.index(("wait_bootloader", IDS[self.backend.local]))
+        wait_port = calls.index(("wait_port",))
+        self.assertLess(opens[0], enumeration)
+        rom_operations = [index for index, call in enumerate(calls) if call[0] in ("save", "load", "reboot")]
+        self.assertEqual(len(rom_operations), 6)
+        for index in rom_operations:
+            self.assertLess(enumeration, index)
+            self.assertLess(index, closes[0])
+        self.assertLess(closes[0], wait_port)
+        self.assertLess(wait_port, opens[1])
+        self.assertLess(opens[1], closes[1])
+        self.assertFalse(any(call[0] == "command" for call in calls[enumeration:opens[1]]))
+        for index, call in enumerate(calls):
+            if call[0] == "command" and call[1].startswith(("verify ", "history ")):
+                self.assertLess(opens[1], index)
+                self.assertLess(index, closes[1])
+        self.assertFalse(self.backend.console_open)
+
     def test_success_local_a_and_full_diagnostics(self):
         result = self.updater().run()
         self.assertEqual(result["stage"], "complete")
@@ -213,8 +258,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(result["histories"]), 2)
         commands = [call[1] for call in self.calls("command")]
         self.assertEqual(len([command for command in commands if command.startswith("verify ")]), 3)
-        enumeration = self.backend.calls.index(("wait_bootloader", IDS["A"]))
-        self.assertGreater(self.backend.calls.index(("console_close",)), enumeration)
+        self.assert_serial_flash_lifecycle()
         journal = json.loads((self.directory / "result.json").read_text())
         self.assertTrue(journal["firmware_verified"])
 
@@ -224,6 +268,89 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["target"], "B")
         self.assertEqual(self.calls("bootloader"), [("bootloader", "B")])
         self.assertEqual(self.calls("reboot"), [("reboot", IDS["B"])])
+        self.assert_serial_flash_lifecycle()
+
+    def test_already_bootloader_opens_only_fresh_application_console(self):
+        for role in ("A", "B"):
+            with self.subTest(role=role):
+                self.profile["target"] = role
+                self.backend = FakeBackend(self.candidate, local=role)
+                self.backend.rom = True
+                result = self.updater(already_bootloader=True).run()
+                self.assertTrue(result["firmware_verified"])
+                self.assertTrue(result["independent_readback"])
+                self.assertTrue(result["settings_unchanged"])
+                self.assertEqual(self.calls("bootloader"), [])
+                self.assertEqual(self.calls("wait_bootloader"), [])
+                self.assertEqual(len(self.calls("console_open")), 1)
+                self.assertEqual(len(self.calls("console_close")), 1)
+                self.assertEqual(len(self.calls("load")), 1)
+                self.assertEqual(self.calls("reboot"), [("reboot", IDS[role])])
+                calls = self.backend.calls
+                self.assertLess(calls.index(("reboot", IDS[role])), calls.index(("wait_port",)))
+                self.assertLess(calls.index(("wait_port",)), calls.index(("console_open",)))
+                self.assertFalse(self.backend.console_open)
+
+    def test_rom_transport_failures_close_once_and_never_continue_or_retry(self):
+        operations = ("enumeration", "firmware-before", "settings-before", "load",
+                      "firmware-after", "settings-after", "reboot")
+        expected_stages = ("bootloader_requested", "backing_up", "backing_up", "flashing",
+                           "readback", "readback", "reboot_requested")
+        for role in ("A", "B"):
+            for failed_index, (operation, stage) in enumerate(zip(operations, expected_stages)):
+                with self.subTest(role=role, operation=operation):
+                    self.profile["target"] = role
+                    self.backend = FakeBackend(self.candidate, local=role)
+                    error = DeploymentError(f"injected {operation} failure")
+                    if operation == "enumeration":
+                        self.backend.enumeration_error = error
+                    else:
+                        self.backend.operation_errors[operation] = error
+                    with self.assertRaises(DeploymentError) as caught:
+                        self.updater().run()
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(self.calls("bootloader"), [("bootloader", role)])
+                    self.assertEqual(len(self.calls("console_open")), 1)
+                    self.assertEqual(len(self.calls("console_close")), 1)
+                    self.assertFalse(self.backend.console_open)
+                    self.assertTrue(self.backend.rom)
+                    attempted = []
+                    for call in self.backend.calls:
+                        if call[0] == "wait_bootloader":
+                            attempted.append("enumeration")
+                        elif call[0] == "save":
+                            attempted.append(call[1])
+                        elif call[0] in ("load", "reboot"):
+                            attempted.append(call[0])
+                    self.assertEqual(attempted, list(operations[:failed_index + 1]))
+                    self.assertEqual(self.backend.calls[-1], ("console_close",))
+                    self.assertEqual(self.calls("wait_port"), [])
+                    journal = json.loads((self.directory / "result.json").read_text())
+                    self.assertEqual(journal["failed_stage"], stage)
+                    self.assertEqual(journal["write_started"], failed_index >= operations.index("load"))
+                    self.assertEqual(journal["reboot_requested"], operation == "reboot")
+
+    def test_old_console_cleanup_errors_are_recorded_after_success(self):
+        self.backend.cleanup_errors = ["DTR: [Errno 6] Device not configured", "termios: stale device"]
+        result = self.updater().run()
+        self.assertTrue(result["firmware_verified"])
+        self.assertEqual(result["bootloader_console_cleanup_errors"], self.backend.cleanup_errors)
+        self.assert_serial_flash_lifecycle()
+        journal = json.loads((self.directory / "result.json").read_text())
+        self.assertEqual(journal["bootloader_console_cleanup_errors"], self.backend.cleanup_errors)
+
+    def test_old_console_cleanup_errors_do_not_mask_original_failure(self):
+        self.backend.cleanup_errors = ["close: stale device"]
+        error = DeploymentError("original backup failure")
+        self.backend.operation_errors["firmware-before"] = error
+        with self.assertRaises(DeploymentError) as caught:
+            self.updater().run()
+        self.assertIs(caught.exception, error)
+        self.assert_no_write()
+        self.assertFalse(self.backend.console_open)
+        journal = json.loads((self.directory / "result.json").read_text())
+        self.assertEqual(journal["error"], "DeploymentError: original backup failure")
+        self.assertEqual(journal["bootloader_console_cleanup_errors"], self.backend.cleanup_errors)
 
     def test_unconfirmed_bootloader_never_flashes_or_retries(self):
         self.backend.boot_error = BootloaderUnconfirmed("reply truncated")
@@ -259,6 +386,7 @@ class WorkflowTests(unittest.TestCase):
                     self.updater(already_bootloader=True).run()
                 self.assert_no_write()
                 self.assertEqual(self.calls("bootloader"), [])
+                self.assertEqual(self.calls("console_open"), [])
 
     def test_short_backup_refused(self):
         self.backend.old = self.backend.old[:-1]
@@ -303,6 +431,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(result["write_started"])
         self.assertEqual(self.calls("bootloader"), [])
         self.assertEqual(self.calls("save"), [])
+        self.assertEqual(self.calls("wait_bootloader"), [])
+        self.assertEqual(self.calls("wait_port"), [])
+        self.assertEqual(len(self.calls("console_open")), 1)
+        self.assertEqual(len(self.calls("console_close")), 1)
+        self.assertFalse(self.backend.console_open)
         self.assert_no_write()
 
     def test_uid_mismatch_refused_before_bootloader(self):

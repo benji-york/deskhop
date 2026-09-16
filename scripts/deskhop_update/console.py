@@ -1,8 +1,11 @@
 """Bounded POSIX CDC transport and strict, artifact-parameterized diagnostics.
 
 Only ``bootloader`` is disruptive. It is sent once, never retried, and a local
-acceptance reply is not proof of ROM enumeration. Keep the context open (DTR
-asserted) until the caller independently observes that USB transition.
+acceptance reply is not proof of ROM enumeration. Keep the context open through
+all PICOBOOT operations and normal application reboot, matching the successful
+macOS diagnostic. This lifetime alone has not resolved the observed USB timeout.
+Close before opening the new application console. Exceptions still clean up
+without retry.
 """
 from __future__ import annotations
 
