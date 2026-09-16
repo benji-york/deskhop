@@ -97,9 +97,13 @@ class BackendTests(unittest.TestCase):
         self.backend = platform.MacBackend(self.evidence, PORT)
 
     def fake_subprocess(self, output=b"ok\n", returncode=0):
-        def run(argv, *, stdout, stderr, timeout):
+        def run(argv, *, stdout, stderr, timeout, env):
             self.assertIs(stderr, subprocess.STDOUT)
             self.assertGreater(timeout, 0)
+            if argv[0] == PICOTOOL:
+                self.assertEqual(env["LIBUSB_DEBUG"], "4")
+            else:
+                self.assertIsNone(env)
             stdout.write(output)
             return subprocess.CompletedProcess(argv, returncode)
         return run
@@ -133,9 +137,10 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(any("-u" in command for command in commands))
 
     def test_save_uses_exact_range_and_uid_and_will_not_overwrite(self):
-        def save(argv, *, stdout, stderr, timeout):
+        def save(argv, *, stdout, stderr, timeout, env):
             self.assertEqual(argv[:5], [PICOTOOL, "save", "-r", "0x101ff000", "0x10200000"])
             self.assertEqual(argv[-2:], ["--ser", UID])
+            self.assertEqual(env["LIBUSB_DEBUG"], "4")
             Path(argv[5]).write_bytes(b"\xFF" * 4096)
             return subprocess.CompletedProcess(argv, 0)
         with patch.object(platform.subprocess, "run", side_effect=save) as run:
@@ -146,7 +151,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_short_read_aborts(self):
-        def short(argv, *, stdout, stderr, timeout):
+        def short(argv, *, stdout, stderr, timeout, env):
+            self.assertEqual(env["LIBUSB_DEBUG"], "4")
             Path(argv[5]).write_bytes(b"\xFF")
             return subprocess.CompletedProcess(argv, 0)
         with patch.object(platform.subprocess, "run", side_effect=short):
@@ -162,16 +168,54 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(record["returncode"], 7)
         self.assertIn("DeploymentError", record["error"])
         self.assertIn("seconds", record)
+        self.assertEqual(record["environment_overrides"], {"LIBUSB_DEBUG": "4"})
         self.assertEqual((self.evidence / "001-reboot-application.log").read_bytes(), b"failed\n")
+
+    def test_debug_environment_is_private_to_picotool_and_debug_output_is_retained(self):
+        debug = "libusb: debug [libusb_get_device_list] enumerate USB devices\n"
+        output = (debug + IDENTITY + "libusb: debug [libusb_exit] complete\n").encode()
+        for inherited_debug in (None, "1"):
+            with self.subTest(inherited_debug=inherited_debug), patch.dict(platform.os.environ):
+                platform.os.environ["DESKHOP_TEST_SECRET"] = "synthetic-secret-not-for-journaling"
+                if inherited_debug is None:
+                    platform.os.environ.pop("LIBUSB_DEBUG", None)
+                else:
+                    platform.os.environ["LIBUSB_DEBUG"] = inherited_debug
+                parent_environment = dict(platform.os.environ)
+                with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(output)) as run:
+                    self.backend.identity(UID)
+                environment = run.call_args.kwargs["env"]
+                self.assertIsNot(environment, platform.os.environ)
+                self.assertEqual(environment, dict(parent_environment, LIBUSB_DEBUG="4"))
+                self.assertEqual(dict(platform.os.environ), parent_environment)
+                journal_text = (self.evidence / "commands.json").read_text()
+                record = json.loads(journal_text)[-1]
+                self.assertEqual(record["environment_overrides"], {"LIBUSB_DEBUG": "4"})
+                self.assertNotIn("DESKHOP_TEST_SECRET", journal_text)
+                self.assertNotIn("synthetic-secret-not-for-journaling", journal_text)
+                self.assertEqual((self.evidence / f'{len(self.backend.commands):03d}-identity.log').read_bytes(), output)
+
+    def test_non_picotool_commands_do_not_override_or_journal_environment(self):
+        with patch.dict(platform.os.environ, {"LIBUSB_DEBUG": "2"}):
+            for executable in ("ioreg", "/different/path/picotool"):
+                with self.subTest(executable=executable), \
+                        patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess()) as run:
+                    self.backend.run("other", [executable, "--fixture"])
+                self.assertIsNone(run.call_args.kwargs["env"])
+                self.assertEqual(platform.os.environ["LIBUSB_DEBUG"], "2")
+                record = json.loads((self.evidence / "commands.json").read_text())[-1]
+                self.assertNotIn("environment_overrides", record)
 
     def test_timeout_is_journaled_without_retry(self):
         with patch.object(platform.subprocess, "run", side_effect=subprocess.TimeoutExpired("picotool", 30)) as run:
             with self.assertRaises(subprocess.TimeoutExpired):
                 self.backend.load(self.evidence / "candidate.uf2", UID)
         self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["env"]["LIBUSB_DEBUG"], "4")
         record = json.loads((self.evidence / "commands.json").read_text())[0]
         self.assertIn("TimeoutExpired", record["error"])
         self.assertNotIn("returncode", record)
+        self.assertEqual(record["environment_overrides"], {"LIBUSB_DEBUG": "4"})
 
     def test_command_log_is_not_overwritten(self):
         (self.evidence / "001-identity.log").write_text("prior evidence")

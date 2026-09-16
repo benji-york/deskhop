@@ -87,13 +87,21 @@ class MacBackend:
     def run(self, name, argv, timeout=20):
         start = time.monotonic()
         entry = {'name': name, 'command': list(argv), 'started_monotonic': start}
+        env = None
+        if argv[0] == self.picotool:
+            # Stock libusb diagnostic setting; matches the successful ROM read.
+            # Scope it to picotool children, never mutate/log the parent env.
+            # Timing benefits remain a workaround hypothesis, not a guarantee.
+            env = dict(os.environ, LIBUSB_DEBUG='4')
+            entry['environment_overrides'] = {'LIBUSB_DEBUG': '4'}
         self.commands.append(entry)
         write_json(self.evidence / 'commands.json', self.commands)
         path = self.evidence / f'{len(self.commands):03d}-{name}.log'
         try:
             # Stream to a file: tool output cannot grow an in-memory capture.
             with path.open('xb') as output:
-                completed = subprocess.run(argv, stdout=output, stderr=subprocess.STDOUT, timeout=timeout)
+                completed = subprocess.run(argv, stdout=output, stderr=subprocess.STDOUT,
+                                           timeout=timeout, env=env)
             entry['returncode'] = completed.returncode
             require(completed.returncode == 0, f'{name} failed; inspect {path}. No automatic retry.')
             require(path.stat().st_size <= 4 * 1024 * 1024, f'Excessive output from {name}; inspect {path}.')

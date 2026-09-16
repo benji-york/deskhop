@@ -1,4 +1,5 @@
 """One bounded, journaled upgrade. All device I/O is injected for unit tests."""
+from contextlib import nullcontext
 import hashlib
 from pathlib import Path
 import re
@@ -149,22 +150,29 @@ class Updater:
     def run(self):
         started = self.backend.now()
         before = None
+        boot_console = None
         target = self.profile['target']
         uid = self.profile['uids'][target]
         try:
             self.stage('preflight')
             self.candidate_intact()
             baseline = self.backend.health(boot=self.already_bootloader)
-            if not self.already_bootloader:
-                with self.backend.console() as console:
-                    before = self.status(console)
+            # Match the successful macOS diagnostic's CDC lifetime: retain it
+            # through ROM operations and normal reboot, then close before a
+            # fresh application console. This alone did not resolve every ROM
+            # timeout; the underlying USB/timing issue remains under study.
+            # The already-ROM path must not open an application serial port.
+            session = nullcontext() if self.already_bootloader else self.backend.console()
+            with session as boot_console:
+                if not self.already_bootloader:
+                    before = self.status(boot_console)
                     check_status(before, self.profile)
                     require(all(b['update']['phase'] == 'idle' for b in before['boards'].values()),
                             'A firmware update/reboot is already active; do not interrupt it.')
                     if all(b['build'] == self.candidate['build'] and b['image_crc_at_boot'] == self.candidate['boot_crc']
                            for b in before['boards'].values()):
                         self.stage('already_current_verifying')
-                        self.diagnostics(console)
+                        self.diagnostics(boot_console)
                         self.backend.health(baseline=baseline)
                         self.record['already_current'] = True
                         self.stage('complete')
@@ -174,39 +182,39 @@ class Updater:
                             'Candidate must be newer than both Picos; same-version changes/downgrades cannot auto-propagate.')
                     require(encoded(before['boards'][target]['build']) >= 204,
                             'Local firmware lacks serial bootloader entry; use the existing shortcut and --already-bootloader.')
-                    validate_help(console.command('help'))
+                    validate_help(boot_console.command('help'))
                     self.stage('bootloader_requested')
-                    console.bootloader(target)  # Exactly once; DTR remains open through enumeration.
+                    boot_console.bootloader(target)  # Exactly once; retained through all ROM operations.
                     self.backend.wait_bootloader(uid, baseline)
-            else:
-                self.backend.identity(uid)
-            self.stage('backing_up')
-            old = self.backend.save('firmware-before', 0x10000000, 0x10040000, uid)
-            settings = self.backend.save('settings-before', 0x101ff000, 0x10200000, uid)
-            require(len(settings) == 4096, 'Short settings backup; no flash will be attempted.')
-            version = backup_version(old)
-            if before:
-                require(version == encoded(before['boards'][target]['build']), 'Backed-up image differs from observed executing version.')
-            require(version < self.candidate['encoded_version'], 'Candidate must be newer than the backed-up image.')
-            self.record['backup'] = {'version': version, 'firmware_sha256': hashlib.sha256(old).hexdigest(),
-                                     'settings_sha256': hashlib.sha256(settings).hexdigest()}
-            self.backend.health(boot=True, baseline=baseline)
-            self.candidate_intact()
-            self.stage('flashing')
-            self.record['write_started'] = True
-            self.journal()  # Persist before a potentially partially successful hardware command.
-            self.backend.load(self.candidate['uf2_path'], uid)
-            self.stage('readback')
-            image = self.backend.save('firmware-after', 0x10000000, 0x10040000, uid)
-            saved = self.backend.save('settings-after', 0x101ff000, 0x10200000, uid)
-            require(image == self.candidate['image'], 'Independent firmware readback differs; target left in ROM.')
-            require(saved == settings, 'Saved settings changed; target left in ROM for investigation.')
-            self.record.update(independent_readback=True, settings_unchanged=True)
-            self.backend.health(boot=True, baseline=baseline)
-            self.stage('reboot_requested')
-            self.record['reboot_requested'] = True
-            self.journal()
-            self.backend.reboot(uid)
+                else:
+                    self.backend.identity(uid)
+                self.stage('backing_up')
+                old = self.backend.save('firmware-before', 0x10000000, 0x10040000, uid)
+                settings = self.backend.save('settings-before', 0x101ff000, 0x10200000, uid)
+                require(len(settings) == 4096, 'Short settings backup; no flash will be attempted.')
+                version = backup_version(old)
+                if before:
+                    require(version == encoded(before['boards'][target]['build']), 'Backed-up image differs from observed executing version.')
+                require(version < self.candidate['encoded_version'], 'Candidate must be newer than the backed-up image.')
+                self.record['backup'] = {'version': version, 'firmware_sha256': hashlib.sha256(old).hexdigest(),
+                                         'settings_sha256': hashlib.sha256(settings).hexdigest()}
+                self.backend.health(boot=True, baseline=baseline)
+                self.candidate_intact()
+                self.stage('flashing')
+                self.record['write_started'] = True
+                self.journal()  # Persist before a potentially partially successful hardware command.
+                self.backend.load(self.candidate['uf2_path'], uid)
+                self.stage('readback')
+                image = self.backend.save('firmware-after', 0x10000000, 0x10040000, uid)
+                saved = self.backend.save('settings-after', 0x101ff000, 0x10200000, uid)
+                require(image == self.candidate['image'], 'Independent firmware readback differs; target left in ROM.')
+                require(saved == settings, 'Saved settings changed; target left in ROM for investigation.')
+                self.record.update(independent_readback=True, settings_unchanged=True)
+                self.backend.health(boot=True, baseline=baseline)
+                self.stage('reboot_requested')
+                self.record['reboot_requested'] = True
+                self.journal()
+                self.backend.reboot(uid)
             self.backend.wait_port()
             self.backend.health(baseline=baseline)
             self.stage('waiting_for_peer')
@@ -223,6 +231,11 @@ class Updater:
             self.record['stage'] = 'failed'
             raise
         finally:
+            if boot_console is not None:
+                # Cleanup ioctls can report ENXIO for the departed USB device.
+                # Console.close still closes the fd and preserves the original
+                # failure; retain those diagnostics rather than hiding them.
+                self.record['bootloader_console_cleanup_errors'] = list(boot_console.cleanup_errors)
             self.record['elapsed_seconds'] = round(self.backend.now() - started, 6)
             self.journal()
 
