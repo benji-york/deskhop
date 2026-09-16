@@ -51,7 +51,7 @@ def verify(start=2_000_000, command_crc="12345678", build="0.104", local="A"):
     return "\r\n".join(lines).encode()
 
 
-def history(at_us=2_000_000, build="0.104", local="A", count=16, gap=False):
+def history(at_us=2_000_000, build="0.104", local="A", count=16, gap=False, events=()):
     lines = [f"history {count}", "BEGIN history", "scope=both", f"requested_per_board={count}",
              "timing=approximate_snapshot_alignment", "capacity_per_board=64"]
     roles = [local, "B" if local == "A" else "A"]
@@ -59,13 +59,32 @@ def history(at_us=2_000_000, build="0.104", local="A", count=16, gap=False):
         if index:
             lines += [""]
         lines += [f"board={role}", f"boot_session={SESSIONS[role]}",
-                  f"sampled_uptime_ms={at_us // 1000}", "returned=1", "overwritten=0"]
+                  f"sampled_uptime_ms={at_us // 1000}",
+                  f"returned={1 + len(events) if role == local else 1}", "overwritten=0"]
     lines += ["peer=ok", "peer_capture_bound_us=5000", ""]
     for role in roles:
         lines += [f"GAP board={role} seq=1" if gap else
                   f"board={role} seq=1 uptime_ms=1 age_ms={at_us // 1000 - 1} event=boot build={build} output=A"]
+        if role == local:
+            lines += [f"board={role} seq={seq} uptime_ms=1 age_ms={at_us // 1000 - 1} event={event}"
+                      for seq, event in enumerate(events, start=2)]
     lines += ["END history", "deskhop> "]
     return "\r\n".join(lines).encode()
+
+
+TRANSFER_EVENTS = (
+    "transfer_source phase=caps_queued mode=none value=64",
+    "transfer_source phase=batch_begin mode=pages value=0",
+    *(f"transfer_source phase=progress mode=pages value={value}" for value in (65536, 131072, 196608, 262144)),
+    "transfer_source phase=batch_end mode=pages value=262144",
+    "transfer_timing metric=elapsed_us mode=pages value=35123456",
+    "transfer_timing metric=page_service_us mode=pages value=3141592",
+    "transfer_timing metric=page_gap_us mode=pages value=31981864",
+    "transfer_timing metric=page_max_us mode=pages value=4096",
+    "transfer_count metric=page_requests mode=pages value=1024",
+    "transfer_count metric=word_requests mode=pages value=0",
+    "transfer_count metric=page_retries mode=pages value=0",
+)
 
 
 HELP = ("help\r\nBEGIN help\r\nDeskHop console - diagnostics and disruptive maintenance.\r\n"
@@ -201,6 +220,90 @@ class ParserTests(unittest.TestCase):
         for old, new in changes:
             with self.subTest(old=old), self.assertRaises(c.ProtocolError):
                 c.validate_history(raw.replace(old, new, 1), self.identities)
+
+    def test_transfer_history_profiles_are_retained_and_role_independent(self):
+        for role in ("A", "B"):
+            with self.subTest(role=role):
+                first = c.validate_history(history(local=role, events=TRANSFER_EVENTS), self.identities)
+                second = c.validate_history(history(3_000_000, local=role, count=64, events=TRANSFER_EVENTS),
+                                            self.identities, previous=first)
+                self.assertEqual(first["boards"][role]["returned"], 15)
+                rows = [row for row in second["rows"] if row.get("event", "").startswith("transfer_")]
+                self.assertEqual(len(rows), 14)
+                self.assertTrue(all(row["board"] == role for row in rows))
+                self.assertEqual(rows[-3]["value"], 1024)
+                self.assertEqual(rows[-1]["metric"], "page_retries")
+                with self.assertRaises(c.ProtocolError):
+                    c.validate_history(history(3_000_000, local=role, count=64, events=TRANSFER_EVENTS)
+                                       .replace(b"page_requests mode=pages value=1024",
+                                                b"page_requests mode=pages value=1025"),
+                                       self.identities, previous=first)
+
+    def test_transfer_history_accepts_defined_phases_modes_and_uint32_boundaries(self):
+        cases = ["transfer_source phase=caps_queued mode=none value=4294967232"]
+        for phase, modes, values in (
+                ("batch_begin", ("pages", "mixed"), (0, 261888)),
+                ("words_begin", ("words", "mixed"), (0, 262140)),
+                ("retry", ("pages", "mixed"), (0, 261888)),
+                ("progress", ("pages", "words", "mixed"), (65536, 131072, 196608, 262144)),
+                ("batch_end", ("pages", "mixed"), (262144,)),
+                ("words_end", ("words", "mixed"), (262144,))):
+            cases += [f"transfer_source phase={phase} mode={mode} value={value}"
+                      for mode in modes for value in values]
+        for event, metrics in (("transfer_timing", ("elapsed_us", "page_service_us", "page_gap_us", "page_max_us")),
+                               ("transfer_count", ("page_requests", "word_requests", "page_retries"))):
+            cases += [f"{event} metric={metric} mode={mode} value={value}"
+                      for metric in metrics for mode in ("pages", "words", "mixed")
+                      for value in (0, c.MAX_U32)]
+        for event in cases:
+            with self.subTest(event=event):
+                parsed = c.validate_history(history(events=(event,)), self.identities)
+                self.assertEqual(parsed["rows"][1]["value"], int(event.rsplit("=", 1)[1]))
+
+    def test_transfer_history_rejects_unknown_missing_extra_and_reordered_fields(self):
+        event = "transfer_source phase=batch_begin mode=pages value=0"
+        malformed = [
+            "transfer_unknown phase=batch_begin mode=pages value=0", "transfer_source",
+            "transfer_source phase=batch_begin mode=pages", "transfer_source mode=pages phase=batch_begin value=0",
+            event + " extra=1", event + " value=0", event.replace("value=0", "value="),
+            event.replace("phase=batch_begin", "phase=unknown"), event.replace("mode=pages", "mode=unknown"),
+            event.replace("phase=", "metric="), event.replace("value=0", "value=-1"),
+            event.replace("value=0", "value=4294967296"), event.replace("value=0", "value=1.0"),
+            event.replace("value=0", "value=0x100"), event.replace("value=0", "value=unavailable"),
+            "transfer_timing metric=page_requests mode=pages value=1",
+            "transfer_count metric=elapsed_us mode=pages value=1",
+            "transfer_timing metric=elapsed_us mode=none value=1",
+            "transfer_count metric=page_requests mode=none value=1",
+            "transfer_timing metric=unknown mode=pages value=1",
+            "transfer_count metric=unknown mode=pages value=1",
+        ]
+        for text in malformed:
+            with self.subTest(event=text), self.assertRaises(c.ProtocolError):
+                c.validate_history(history(events=(text,)), self.identities)
+
+    def test_transfer_history_rejects_phase_mode_offset_and_count_contradictions(self):
+        cases = [
+            ("caps_queued", "none", 0), ("caps_queued", "none", 63),
+            ("caps_queued", "none", 4294967295), ("caps_queued", "pages", 64),
+            ("batch_begin", "words", 0), ("batch_begin", "none", 0),
+            ("batch_begin", "pages", 4), ("batch_begin", "pages", 262144),
+            ("words_begin", "pages", 0), ("words_begin", "words", 1),
+            ("words_begin", "words", 262144), ("retry", "words", 0),
+            ("retry", "pages", 4), ("retry", "pages", 262144),
+            ("progress", "none", 65536), ("progress", "pages", 0),
+            ("progress", "pages", 65540), ("progress", "pages", 327680),
+            ("batch_end", "words", 262144), ("words_end", "pages", 262144),
+            ("batch_end", "pages", 261888), ("words_end", "words", 262140),
+            ("batch_end", "pages", 262400), ("words_end", "words", 262148),
+        ]
+        for phase, mode, value in cases:
+            event = f"transfer_source phase={phase} mode={mode} value={value}"
+            with self.subTest(event=event), self.assertRaises(c.ProtocolError):
+                c.validate_history(history(events=(event,)), self.identities)
+        for event in ("transfer_timing metric=elapsed_us", "transfer_count metric=page_requests"):
+            for value in (-1, c.MAX_U32 + 1):
+                with self.subTest(event=event, value=value), self.assertRaises(c.ProtocolError):
+                    c.validate_history(history(events=(f"{event} mode=pages value={value}",)), self.identities)
 
 
 class FakeSerial:

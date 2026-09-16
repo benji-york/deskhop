@@ -7,6 +7,9 @@ void firmware_batch_init(device_t *, uint64_t boot_session);
 void firmware_batch_begin_locked(device_t *);
 bool firmware_batch_request_locked(device_t *, uint32_t address);
 bool firmware_batch_accepts_word(const device_t *);
+/* Accepted valid word request; called inside the existing source handler lock.
+ * Does not claim queue admission, receiver delivery, or flash completion. */
+void firmware_source_word_locked(device_t *, uint32_t address);
 /* Protected UART dispatch on core 1. */
 void firmware_batch_packet(uart_packet_t *, device_t *);
 /* Core 0: called only with idle DMA and empty ordinary queue. Single frame.

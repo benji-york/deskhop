@@ -414,6 +414,31 @@ static void append_history_row(const peer_history_snapshot_t *snapshot, unsigned
         appendf("peer_progress peer=%c progress=%s build=", output_name(event.a), progress_name(event.b));
         append_version(event.value);
         break;
+    case HISTORY_TRANSFER_SOURCE:
+    case HISTORY_TRANSFER_TIMING:
+    case HISTORY_TRANSFER_COUNT: {
+        static const char *const modes[] = {"none", "pages", "words", "mixed"};
+        static const char *const phases[] = {"invalid", "caps_queued", "batch_begin",
+            "words_begin", "retry", "progress", "batch_end", "words_end"};
+        static const char *const timings[] = {"invalid", "elapsed_us", "page_service_us",
+            "page_gap_us", "page_max_us"};
+        static const char *const counts[] = {"invalid", "page_requests", "word_requests", "page_retries"};
+        const char *mode = event.b < sizeof(modes) / sizeof(modes[0]) ? modes[event.b] : "invalid";
+        const char *name = "invalid";
+        if (event.type == HISTORY_TRANSFER_SOURCE) {
+            if (event.a < sizeof(phases) / sizeof(phases[0])) name = phases[event.a];
+            appendf("transfer_source phase=%s mode=%s value=%lu", name, mode, (unsigned long)event.value);
+        } else {
+            if (event.type == HISTORY_TRANSFER_TIMING && event.a < sizeof(timings) / sizeof(timings[0]))
+                name = timings[event.a];
+            if (event.type == HISTORY_TRANSFER_COUNT && event.a < sizeof(counts) / sizeof(counts[0]))
+                name = counts[event.a];
+            appendf("transfer_%s metric=%s mode=%s value=%lu",
+                    event.type == HISTORY_TRANSFER_TIMING ? "timing" : "count",
+                    name, mode, (unsigned long)event.value);
+        }
+        break;
+    }
     default:
         appendf("unknown type=%u a=%u b=%u value=%lu", (unsigned)event.type,
                 (unsigned)event.a, (unsigned)event.b, (unsigned long)event.value);

@@ -7,11 +7,21 @@ retains stock picotool's full byte verification, unchanged-settings checks, and
 one fresh full-image CRC scan on each Pico. It omits a duplicate host firmware
 readback and the diagnostic wrong-CRC/repeat-CRC scans. Opt-in `thorough` mode
 retains that previous sequence. Neither mode changes firmware or speeds up the
-UART protocol. All 134 updater tests and a normal read-only check on both
-installed Picos pass; a full normal-mode upgrade is not yet hardware-tested.
+UART protocol. The original 134 updater tests and a normal read-only check on
+both Picos passed. The subsequent v0.110 deployment passed the actual-write
+normal workflow in 47.822 seconds, followed by Benji's functional acceptance;
+the expanded host suite has 141 tests.
 See [the validation record and timing estimate](testing/normal-upgrade-verification.md).
 
-The current accepted release is [v0.109 configuration validation](testing/configuration-validation-v109.md).
+The current accepted device release is [v0.111 startup guard](testing/firmware-startup-guard-v111.md),
+developed on `codex/firmware-transfer-profiling`. Use its
+matching host parser for the new history event names; the older parser on main
+rejects them. Its normal-mode upgrade completed in 23.740171 seconds, with 1024
+page requests and no word fallback/retries; both fresh CRCs and Benji's full
+functional checklist passed. Benji subsequently authorized merging/pushing this
+hardware-accepted change set; publication does not alter the flashed artifacts.
+The previously accepted [v0.109 configuration validation](testing/configuration-validation-v109.md)
+record below is historical.
 Both physical Picos passed automatic propagation and fresh firmware verification;
 after returning from AFK, Benji confirmed "Looks good; please merge and push"
 following the requested input, switching and config-page checks. This authorizes
@@ -308,8 +318,12 @@ The normal/thorough split is a host-only change: no firmware version bump,
 firmware rebuild requirement, or device reflash is introduced by changing this
 policy. All 134 updater tests pass, and a normal read-only verification passed
 on both installed v0.109 Picos in 3.367517 seconds, without rebooting or flashing.
-No live normal-mode upgrade has been claimed. The accepted v0.109 hardware
-record used the previous, now-thorough sequence and remains unchanged.
+These original checks did not validate an actual-write normal-mode upgrade.
+The later v0.110 deployment now does: stock byte verification, unchanged settings,
+automatic propagation and both fresh CRCs passed, with functional acceptance.
+Its 47.822-second result and limitations are recorded in
+[the transfer investigation](testing/transfer-profiling.md#authorized-v0110-deployment-and-measured-outcome).
+The accepted v0.109 hardware record used the previous sequence and remains unchanged.
 
 That v0.109 run measured 0.569 seconds for the duplicate firmware readback,
 3.893 seconds for the retained stock load/verify, and 5.804 seconds for the full

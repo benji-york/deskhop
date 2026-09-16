@@ -33,6 +33,9 @@ The suite checks:
 
 - Composite and standalone device enumeration, interface counts, parsed keyboard
   and mouse presence, host mounting, and pending interrupt polls.
+- The checked-in host stack's 50 ms reset and 450 ms debounce waits occur inside
+  one task call for each root attach. This 500 ms virtual-time boundary informs
+  paired startup-starvation scenarios; it is not a physical bus-time benchmark.
 - A held Ctrl+A report through actual keyboard extraction and aggregation to a
   modeled host report queue; mouse signed X/Y extraction against the real parsed
   field offsets.

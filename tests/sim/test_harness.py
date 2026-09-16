@@ -50,7 +50,7 @@ def check_batch_flash_replay(path):
     from test_fw_batch import image, prepare
     with Simulation(seed=73, flash_erase_us=50000, flash_program_us=1000) as sim:
         prepare(sim)
-        deadline = 200000
+        deadline = sim.now + 200000
         while sum(event['kind'] == 'program' and event['node'] == 1
                   for event in sim.trace) < 2:
             assert sim.now < deadline

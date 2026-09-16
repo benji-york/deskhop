@@ -7,6 +7,7 @@ scheduler/wire model, not an RP2040 or USB benchmark and not proof of physical
 reboot. The historical compatibility checks never fetch or change a checkout.
 """
 import argparse
+import ctypes as C
 import io
 import pathlib
 import struct
@@ -23,6 +24,42 @@ CAPS_REQ, CAPS_RESP, PAGE_REQ, DATA, END = 51, 52, 53, 54, 55
 OLD_REQ, OLD_RESP = 24, 25
 TX, RX, UPGRADE = 'process_uart_tx_task', 'packet_receiver_task', 'firmware_upgrade_task'
 SIZE, PAGE, CONFIG = 262144, 256, 2 * 1024 * 1024 - 4096
+SOURCE, TIMING, COUNT = 16, 17, 18
+CAPS_QUEUED, BATCH_BEGIN, WORDS_BEGIN, RETRY, PROGRESS, BATCH_END = range(1, 7)
+
+
+class HistoryWindow(C.Structure):
+    _fields_ = [(field, C.c_uint64) for field in ('first_seq', 'end_seq', 'oldest_seq', 'overwritten')]
+    _fields_ += [('count', C.c_uint)]
+
+
+class HistoryEvent(C.Structure):
+    _fields_ = [('seq', C.c_uint64), ('time_us', C.c_uint64), ('value', C.c_uint32),
+                ('type', C.c_uint8), ('a', C.c_uint8), ('b', C.c_uint8), ('reserved', C.c_uint8)]
+
+
+def source_profile(s):
+    """Read existing production RAM history without disturbing transfer timing.
+
+    This observes the source's ring, not remote transport or a physical reboot.
+    The separate peer-history scenarios exercise the actual capture/UART path.
+    Historical mixed-version fixtures below do not call this new-feature oracle.
+    """
+    library = s.nodes[0]
+    library.diagnostic_history_window.argtypes = [C.c_uint]
+    library.diagnostic_history_window.restype = HistoryWindow
+    library.diagnostic_history_read.argtypes = [C.c_uint64, C.POINTER(HistoryEvent)]
+    library.diagnostic_history_read.restype = C.c_bool
+    window = library.diagnostic_history_window(64)
+    assert window.overwritten == 0, 'source history flooded during firmware service'
+    events = []
+    for seq in range(window.first_seq, window.end_seq):
+        event = HistoryEvent()
+        assert library.diagnostic_history_read(seq, C.byref(event))
+        assert event.seq == seq and event.reserved == 0 and event.time_us <= s.now
+        if event.type in (SOURCE, TIMING, COUNT):
+            events.append((event.type, event.a, event.b, event.value))
+    return events
 
 
 def image(version, salt):
@@ -31,7 +68,17 @@ def image(version, salt):
     return bytes(raw)
 
 
-def prepare(s, source_version=205, target_version=204):
+def prepare(s, source_version=205, target_version=204, *, steady_state=True):
+    # These scenarios test established transport, not USB startup. Advance the
+    # real scheduler before installing unequal fixture images, so production's
+    # boot advertisement grace cannot consume a 100/200-ms fault deadline.
+    # Keep the advance in the replay log; do not mutate clocks or C state.
+    # Startup-specific scenarios explicitly opt out and begin at boot time zero.
+    # Install the images immediately before a normal 1-Hz heartbeat boundary,
+    # after startup has settled. Advancing *through* the boundary first would
+    # advertise the old fixture images and add another second to these tests.
+    if steady_state and s.now < 1999999:
+        s.advance(1999999 - s.now)
     s.do(0, 'fw_prepare', source_version, 0x31)
     s.do(1, 'fw_prepare', target_version, 0x72)
     assert s.flash(0) == image(source_version, 0x31)
@@ -78,6 +125,7 @@ def assert_page_zero(s):
 
 def scenario_batch_full_image(s):
     prepare(s)
+    transfer_started = s.now
     attach(s)
     s.do(0, 'select', 1)
     until(s, lambda: bool(frames(s, 0, DATA)), background=True)
@@ -104,7 +152,23 @@ def scenario_batch_full_image(s):
     assert s.get(1, 'fw_dirty') == 0
     # This model schedules a core pass every 250 us. Bound the modeled result
     # without claiming the same duration on silicon or weakening verification.
-    assert s.now < 25000000
+    assert s.now - transfer_started < 25000000
+    profile = source_profile(s)
+    caps_tag = struct.unpack_from('<I', frames(s, 1, CAPS_REQ)[0][1])[0]
+    assert len(profile) == 14, 'ordinary source profiling must remain sparse'
+    assert profile[:7] == [(SOURCE, CAPS_QUEUED, 0, caps_tag),
+                           (SOURCE, BATCH_BEGIN, 1, 0),
+                           *((SOURCE, PROGRESS, 1, quarter * SIZE // 4) for quarter in range(1, 5)),
+                           (SOURCE, BATCH_END, 1, SIZE)]
+    assert all(kind == TIMING and mode == 1 for kind, _, mode, _ in profile[7:11])
+    assert [metric for _, metric, _, _ in profile[7:11]] == [1, 2, 3, 4]
+    elapsed, service, gaps, maximum = [value for _, _, _, value in profile[7:11]]
+    assert 0 < maximum <= service and 0 < service + gaps <= elapsed
+    assert profile[11:] == [(COUNT, 1, 1, SIZE // PAGE), (COUNT, 2, 1, 0), (COUNT, 3, 1, 0)]
+    # Losing the receiver's volatile ring does not remove source-side evidence.
+    # This fixture action is not a claim of a whole-device physical reboot.
+    s.do(1, 'history_clear')
+    assert source_profile(s) == profile
 
 
 def scenario_batch_lost_data_retry(s):
@@ -127,6 +191,10 @@ def scenario_batch_lost_data_retry(s):
     pump(s, 4)
     assert_page_zero(s)
     assert not frames(s, 1, OLD_REQ)
+    profile = source_profile(s)
+    assert [(kind, phase, mode) for kind, phase, mode, _ in profile] == [
+        (SOURCE, CAPS_QUEUED, 0), (SOURCE, BATCH_BEGIN, 1), (SOURCE, RETRY, 1)]
+    assert profile[-1][3] == 0
 
 
 def scenario_batch_crc_conflict_retry(s):
@@ -177,6 +245,11 @@ def scenario_batch_end_loss_fallback(s):
     until(s, lambda: s.get(1, 'fw_address') >= PAGE)
     pump(s, 4)
     assert_page_zero(s)
+    profile = source_profile(s)
+    assert [(kind, phase, mode) for kind, phase, mode, _ in profile] == [
+        (SOURCE, CAPS_QUEUED, 0), (SOURCE, BATCH_BEGIN, 1),
+        (SOURCE, RETRY, 1), (SOURCE, WORDS_BEGIN, 3)]
+    assert [value for _, _, _, value in profile[1:]] == [0, 0, 0]
 
 
 def scenario_batch_negotiation_fallback(s):
@@ -193,6 +266,11 @@ def scenario_batch_negotiation_fallback(s):
     pump(s, 4)
     assert_page_zero(s)
     assert not frames(s, 1, PAGE_REQ)
+    profile = source_profile(s)
+    # Queue admission is reported even though the fault dropped that reply;
+    # source telemetry must not promote it to successful negotiation/delivery.
+    assert profile == [(SOURCE, CAPS_QUEUED, 0, struct.unpack_from('<I', late)[0]),
+                       (SOURCE, WORDS_BEGIN, 2, 0)]
 
 
 def scenario_batch_wrong_page_crc(s):
@@ -306,6 +384,7 @@ def scenario_batch_flash_blackout(s):
     s.flash_erase_us = 50000
     s.flash_program_us = 1000
     prepare(s)
+    transfer_started = s.now
     until(s, lambda: bool(s.get(1, 'reboot')), timeout=30000000, background=True)
     assert s.flash(1) == image(205, 0x31)
     assert s.flash(1, CONFIG, 4096) == b'\xa5' * 4096
@@ -321,7 +400,7 @@ def scenario_batch_flash_blackout(s):
         assert struct.unpack_from('<I', payload, 4)[0] == event['a'] + PAGE
     for (request, _), event in zip(requests[1:], programs):
         assert request['at'] >= event['at'] + s.flash_program_us
-    assert s.now < 25000000
+    assert s.now - transfer_started < 25000000
 
 
 def scenario_batch_core_schedule(s):

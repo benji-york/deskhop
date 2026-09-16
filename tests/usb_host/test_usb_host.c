@@ -10,6 +10,8 @@ device_t global_state;
  * production storage-boundary schedule tests. */
 void config_snapshot(const device_t *state, config_t *snapshot) { *snapshot = state->config; }
 static uint32_t virtual_ms;
+static uint32_t enumeration_delays[16];
+static unsigned enumeration_delay_count;
 static bool connected, trackball_only, multi_keyboard;
 static unsigned controls, mounts, unmounts, resets, mouse_reports, keyboard_reports, modifier_publishes, activity_records, idle_stalls;
 static uint8_t configured_address, peripheral_led;
@@ -38,7 +40,11 @@ void hcd_int_handler(uint8_t port, bool in_isr) {}
 void hcd_int_enable(uint8_t port) {}
 void hcd_int_disable(uint8_t port) {}
 uint32_t hcd_frame_number(uint8_t port) { return virtual_ms; }
-void osal_task_delay(uint32_t ms) { virtual_ms += ms; }
+void osal_task_delay(uint32_t ms) {
+    CHECK(enumeration_delay_count < sizeof(enumeration_delays) / sizeof(enumeration_delays[0]));
+    enumeration_delays[enumeration_delay_count++] = ms;
+    virtual_ms += ms;
+}
 bool hcd_port_connect_status(uint8_t port) { return connected; }
 void hcd_port_reset(uint8_t port) { ++resets; }
 void hcd_port_reset_end(uint8_t port) {}
@@ -169,7 +175,16 @@ static void make_configuration(bool trackball) {
 static void attach(bool trackball) {
     make_configuration(trackball);
     connected = true;
+    unsigned delays_before = enumeration_delay_count;
+    uint32_t started_ms = virtual_ms;
     hcd_event_device_attach(0, true); pump();
+    /* The checked-in real host stack waits inside this single task call.
+       Pin the measured boundary used by paired startup-starvation tests;
+       OPT_OS_PICO maps the same two delays to sleep_ms on the calling core. */
+    CHECK(enumeration_delay_count == delays_before + 2);
+    CHECK(enumeration_delays[delays_before] == 50);
+    CHECK(enumeration_delays[delays_before + 1] == 450);
+    CHECK(virtual_ms - started_ms == 500);
     CHECK(configured_address == 1 && tuh_mounted(1));
     CHECK(tuh_hid_instance_count(1) == (trackball ? 1 : 2));
     CHECK(global_state.mouse_connected);
@@ -195,7 +210,7 @@ int main(void) {
     global_state.board_role = OUTPUT_A; global_state.active_output = OUTPUT_A; global_state.tud_connected = true;
     CHECK(tusb_init());
     attach(false);
-    CHECK(controls >= 8 && resets >= 1 && virtual_ms >= 50 && idle_stalls == 2);
+    CHECK(controls >= 8 && resets >= 1 && virtual_ms == 500 && idle_stalls == 2);
     CHECK(global_state.iface[0][0].num_keyboards == 1);
     uint8_t keyboard[] = {KEYBOARD_MODIFIER_LEFTCTRL,0,HID_KEY_A,0,0,0,0,0};
     unsigned before = keyboard_reports;

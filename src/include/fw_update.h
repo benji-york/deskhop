@@ -20,6 +20,10 @@
    for a request or response that was dropped from a full queue. */
 #define FW_UPDATE_RESPONSE_TIMEOUT_US 100000u
 
+/* Source-side boot grace for blocking USB enumeration. Only the firmware
+ * advertisement is deferred; this is not a general USB-readiness guarantee. */
+#define FW_UPDATE_ADVERTISE_DELAY_US 1000000u
+
 /* A retry is not progress. If no valid word arrives for this long, restart a
    pull from a live peer or enter ROM recovery if the partially-written image no
    longer has a source from which it can be repaired. */

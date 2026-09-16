@@ -157,7 +157,11 @@ void critical_section_enter_blocking(critical_section_t *cs) {
         /* Updater hooks may hold firmware, but never flash/config or each other. */
         CHECK(!lock_depth[2] && !lock_depth[3]);
         CHECK(!lock_depth[4] && !lock_depth[5]);
-        CHECK(!interrupts[current_core]);
+        /* The SDK firmware critical section masks IRQs, including try-entry.
+           Sparse source END hooks may record history under that existing lock.
+           Flash/config and reverse/nested diagnostic locks remain forbidden. */
+        CHECK(!interrupts[current_core]
+              || (lock_depth[1] == 1 && lock_owner[1] == current_core && try_owned[1]));
     }
     if (lock_depth[cs->id]) {
         /* Run the real setter up to its blocked SDK acquisition, then resume
@@ -439,13 +443,28 @@ static void expect_completed_history(diagnostic_update_source_t source,
     CHECK(snapshot.phase == phase && snapshot.source == source);
     CHECK(snapshot.target_version == target && snapshot.received_bytes == STAGING_IMAGE_SIZE);
     CHECK(snapshot.total_bytes == STAGING_IMAGE_SIZE);
-    CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == 7);
-    expect_history(0, HISTORY_UPDATE_BEGIN, source, 0, target);
+    /* This harness runs both physical roles against one history store. Keep
+       the exact receiver contract while allowing independently checked source
+       profiling records to interleave, as two real rings would not. */
+    history_window_t window = diagnostic_history_window(HISTORY_CAPACITY);
+    unsigned receiver_indices[7], receiver_count = 0;
+    CHECK(!window.overwritten);
+    for (unsigned i = 0; i < window.count; ++i) {
+        history_event_t event;
+        CHECK(diagnostic_history_read(window.first_seq + i, &event));
+        if (event.type == HISTORY_TRANSFER_SOURCE || event.type == HISTORY_TRANSFER_TIMING
+            || event.type == HISTORY_TRANSFER_COUNT)
+            continue;
+        CHECK(receiver_count < 7);
+        receiver_indices[receiver_count++] = i;
+    }
+    CHECK(receiver_count == 7);
+    expect_history(receiver_indices[0], HISTORY_UPDATE_BEGIN, source, 0, target);
     for (unsigned quarter = 1; quarter <= 4; ++quarter)
-        expect_history(quarter, HISTORY_UPDATE_PROGRESS, source, quarter * 25,
+        expect_history(receiver_indices[quarter], HISTORY_UPDATE_PROGRESS, source, quarter * 25,
                        quarter * STAGING_IMAGE_SIZE / 4);
-    expect_history(5, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_VALIDATING, source, target);
-    expect_history(6, HISTORY_UPDATE_PHASE, phase, source, target);
+    expect_history(receiver_indices[5], HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_VALIDATING, source, target);
+    expect_history(receiver_indices[6], HISTORY_UPDATE_PHASE, phase, source, target);
 }
 
 /* Drive the production burst negotiator/source/receiver/task, not just its
@@ -688,6 +707,147 @@ static void actual_batch_transfer(unsigned failure) {
         CHECK(erases == STAGING_IMAGE_SIZE / FLASH_SECTOR_SIZE);
     }
     expect_completed_history(DIAGNOSTIC_SOURCE_PEER, 193, failure != 0);
+    CHECK(source_state.batch.profile.finished);
+    CHECK(source_state.batch.profile.mode == TRANSFER_MODE_PAGES);
+    CHECK(source_state.batch.profile.page_requests == STAGING_PAGES_CNT);
+    CHECK(!source_state.batch.profile.word_requests && !source_state.batch.profile.retries);
+    /* Four milestones + negotiation/path/end + seven summary rows. The
+       receiver shares this test store but has exactly seven separate rows. */
+    CHECK(diagnostic_history_window(HISTORY_CAPACITY).count == 21);
+}
+
+static unsigned profile_events(history_type_t type, uint8_t kind, history_event_t *last) {
+    history_window_t window = diagnostic_history_window(HISTORY_CAPACITY);
+    unsigned found = 0;
+    CHECK(!window.overwritten);
+    for (uint64_t seq = window.first_seq; seq < window.end_seq; ++seq) {
+        history_event_t event;
+        CHECK(diagnostic_history_read(seq, &event));
+        if (event.type == type && event.a == kind) {
+            ++found;
+            if (last) *last = event;
+        }
+    }
+    return found;
+}
+
+static void profile_word(uint32_t address) {
+    owner(1);
+    firmware_update_lock();
+    firmware_source_word_locked(&source_state, address);
+    firmware_update_unlock();
+}
+
+static void source_profile_boundaries(void) {
+    fresh("source_profile_timing_retry_fallback_and_final_snapshot");
+    uint32_t crc = make_image(image, 193, 0xb9);
+    uart_packet_t request = batch_start(crc), packet;
+    uint64_t started = now;
+    batch_source_request(request);
+    owner(0);
+    for (unsigned word = 0; word <= FW_BATCH_WORDS; ++word) {
+        now += 10;
+        CHECK(firmware_batch_next_tx(&source_state, &packet));
+    }
+    CHECK(source_state.batch.profile.page_service_us == 650);
+    CHECK(source_state.batch.profile.page_max_us == 650);
+    now += 200;
+    request.data32[0] += FW_BATCH_WORDS;
+    batch_source_request(request); /* Same address, newer token = retry. */
+    CHECK(source_state.batch.profile.page_gap_us == 200);
+    CHECK(source_state.batch.profile.retries == 1);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_RETRY, NULL) == 1);
+    fw_source_profile_t saved = source_state.batch.profile;
+    batch_source_request(request); /* Same token is rejected, cannot count. */
+    CHECK(memcmp(&saved, &source_state.batch.profile, sizeof(saved)) == 0);
+    uart_packet_t malformed = request;
+    malformed.data32[0] += FW_BATCH_WORDS;
+    malformed.data32[1] = 3;
+    batch_source_request(malformed);
+    CHECK(memcmp(&saved, &source_state.batch.profile, sizeof(saved)) == 0);
+    now += 50;
+    profile_word(0); /* Fallback cancels profiler's unfinished page interval. */
+    CHECK(source_state.batch.profile.mode == TRANSFER_MODE_MIXED);
+    CHECK(source_state.batch.profile.page_service_us == 700);
+    CHECK(!source_state.batch.profile.page_active);
+    saved = source_state.batch.profile;
+    profile_word(3);
+    profile_word(STAGING_IMAGE_SIZE);
+    CHECK(memcmp(&saved, &source_state.batch.profile, sizeof(saved)) == 0);
+    now += 100;
+    profile_word(STAGING_IMAGE_SIZE - 4);
+    CHECK(source_state.batch.profile.finished);
+    history_event_t event;
+    CHECK(profile_events(HISTORY_TRANSFER_TIMING, TRANSFER_ELAPSED_US, &event) == 1);
+    CHECK(event.value == now - started && event.b == TRANSFER_MODE_MIXED);
+    CHECK(profile_events(HISTORY_TRANSFER_COUNT, TRANSFER_WORD_REQUESTS, &event) == 1);
+    CHECK(event.value == 2); /* Sparse requests cannot claim all words served. */
+    saved = source_state.batch.profile;
+    profile_word(STAGING_IMAGE_SIZE - 4);
+    CHECK(memcmp(&saved, &source_state.batch.profile, sizeof(saved)) == 0);
+    now += 100;
+    profile_word(0); /* Legacy restart from zero after progress is a new run. */
+    CHECK(!source_state.batch.profile.finished && source_state.batch.profile.word_requests == 1);
+    CHECK(!source_state.batch.profile.page_requests && source_state.batch.profile.started_us == now);
+
+    fresh("source_profile_final_page_retry_visible_after_summary");
+    crc = make_image(image, 193, 0xba);
+    request = batch_start(crc);
+    request.data32[1] = STAGING_IMAGE_SIZE - FLASH_PAGE_SIZE;
+    uart_packet_t packets[FW_BATCH_WORDS + 1];
+    batch_source_page(request, packets);
+    CHECK(source_state.batch.profile.finished);
+    request.data32[0] += FW_BATCH_WORDS;
+    batch_source_page(request, packets);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_RETRY, &event) == 1);
+    CHECK(event.value == STAGING_IMAGE_SIZE - FLASH_PAGE_SIZE);
+    CHECK(profile_events(HISTORY_TRANSFER_COUNT, TRANSFER_PAGE_REQUESTS, &event) == 1);
+    CHECK(event.value == 1); /* Snapshot is through first end, not final delivery. */
+    profile_word(STAGING_IMAGE_SIZE - FLASH_PAGE_SIZE);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_WORDS_BEGIN, &event) == 1);
+    CHECK(event.b == TRANSFER_MODE_MIXED);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_BATCH_END, NULL) == 1);
+
+    fresh("source_profile_source_changes_saturation_and_caps_backpressure");
+    crc = make_image(image, 193, 0xbb);
+    request = batch_start(crc);
+    source_state.batch.profile.page_service_us = UINT32_MAX - 1;
+    source_state.batch.profile.page_requests = UINT32_MAX;
+    batch_source_request(request);
+    owner(0);
+    for (unsigned word = 0; word <= FW_BATCH_WORDS; ++word) {
+        now += 10;
+        CHECK(firmware_batch_next_tx(&source_state, &packet));
+    }
+    CHECK(source_state.batch.profile.page_service_us == UINT32_MAX);
+    CHECK(source_state.batch.profile.page_requests == UINT32_MAX);
+    source_state._running_fw.checksum ^= 1;
+    CHECK(!firmware_batch_next_tx(&source_state, &packet));
+    CHECK(!source_state.batch.profile.active);
+    profile_word(0);
+    CHECK(source_state.batch.profile.mode == TRANSFER_MODE_WORDS);
+    CHECK(source_state.batch.profile.checksum == source_state._running_fw.checksum);
+    owner(1);
+    firmware_update_lock();
+    firmware_batch_begin_locked(&source_state);
+    firmware_update_unlock();
+    CHECK(!source_state.batch.profile.active);
+    uart_packet_t caps = {.type = FW_BATCH_CAPS_REQUEST_MSG};
+    CHECK(fw_batch_caps_encode_request(0x1000, 193, caps.data));
+    unsigned prior = profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_CAPS_QUEUED, NULL);
+    source_state.uart_tx_queue.capacity = 0;
+    batch_source_request(caps);
+    CHECK(!source_state.batch.profile.active);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_CAPS_QUEUED, NULL) == prior);
+    source_state.uart_tx_queue.capacity = 256;
+    batch_source_request(caps);
+    CHECK(source_state.batch.profile.active && !source_state.batch.profile.mode);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_CAPS_QUEUED, NULL) == prior + 1);
+    pop_batch_packet(&source_state.uart_tx_queue, FW_BATCH_CAPS_RESPONSE_MSG);
+    saved = source_state.batch.profile;
+    batch_source_request(caps); /* Duplicate probe response need not flood ring. */
+    CHECK(memcmp(&saved, &source_state.batch.profile, sizeof(saved)) == 0);
+    CHECK(profile_events(HISTORY_TRANSFER_SOURCE, TRANSFER_CAPS_QUEUED, NULL) == prior + 1);
 }
 
 static void batch_source_ownership(void) {
@@ -1703,6 +1863,7 @@ int main(int argc, char **argv) {
     batch_source_ownership();
     batch_receiver_ownership();
     for (unsigned failure = 0; failure < 4; ++failure) actual_batch_transfer(failure);
+    source_profile_boundaries();
     config_persistence_and_migration();
     config_set_during_save();
     config_semantic_persistence();

@@ -8,6 +8,78 @@ README.
 
 Snapshot: 2026-09-16
 
+## Current accepted device release: v0.111 firmware-advertisement startup guard
+
+Benji authorized the narrow follow-up implementation. Firmware metadata
+advertisements are now suppressed until monotonic uptime reaches one second;
+the heartbeat task continues activity, button, modifier, zoom and selection
+synchronization during that grace. There is no sleep, USB-presence requirement,
+protocol change, timeout extension or new configuration setting. Existing
+config/maintenance and in-progress UF2-drop behavior is preserved.
+
+This is a bounded mitigation for the observed direct-device startup pattern,
+not a guarantee that every USB device/hub has finished enumerating. It does not
+address later hotplug stalls. Both physical Picos now run verified v0.111, and
+Benji confirmed "Everything works normally" for the full functional checklist.
+The accepted change set was developed on `codex/firmware-transfer-profiling`.
+Benji subsequently authorized merging it into main and pushing the fork. See the
+[implementation and validation record](docs/testing/firmware-startup-guard-v111.md).
+
+All 64 deep-tier steps (including 141 updater tests) and the ARM build passed.
+The prepared candidate is `build/releases/deskhop-v0.111-yq5wa62e/manifest.json`
+in `/private/tmp/deskhop-transfer-profile.Zi4FBl`, full-slot CRC `54001839`.
+Complete modeled transfers to the exact frozen v0.110 receiver passed in both
+directions, with 1024 pages and no words/retries.
+
+The authorized hardware upgrade completed in **23.740171 seconds**, versus
+47.821911 seconds for v0.110. A served 1024 pages with zero word requests and
+zero page retries. Peer wait/settle fell from 37.759860 to 13.481009 seconds;
+source-profile elapsed fell from 36.129854 to 10.746857 seconds. These are two
+observed upgrades, not a repeated controlled benchmark or universal speed promise.
+Backups, stock `load -v` byte verification, unchanged saved settings, automatic
+B propagation/reboot, both fresh full-slot CRCs and progressing cores passed.
+Evidence: `build/updater/runs/20260916T202228Z-1oc8iom4/` in that worktree,
+including a separate `user-acceptance.json`; the original result is unchanged.
+
+## Previous accepted device release: v0.110 transfer profiling
+
+`codex/firmware-transfer-profiling` investigates the approximately 37-second
+peer-propagation phase. It adds sparse sender-side history observations that
+survive the receiving Pico's reboot; it does not change transfer policy.
+The authorized upgrade completed in 47.821911 seconds using normal verification.
+Both Picos passed fresh full-slot CRC checks and Benji confirmed "Everything
+works normally" for the full input/switching/arrows/zoom-assist checklist.
+The profiling source is included in the accepted v0.111 change set above.
+See [the timing baseline and diagnostic plan](docs/testing/transfer-profiling.md)
+and [the revised future-project priorities](docs/future-projects.md).
+
+All 61 deep-tier steps (including 141 updater tests) and the ARM build passed.
+Frozen candidate: `build/releases/deskhop-v0.110-2ifjuswm/manifest.json` in
+`/private/tmp/deskhop-transfer-profile.Zi4FBl`; full-slot CRC `56cf6a40`.
+Evidence: `build/updater/runs/20260916T194457Z-1lktwwdf/` in that worktree,
+including separate `user-acceptance.json`. Stock byte verification and unchanged
+settings passed; B propagated/rebooted without a retry or power cycle.
+Use its matching updater for the new history-event names; older host parsers
+reject them. The v0.111 publication includes this matching updater.
+
+The new events confirm A served legacy words: zero accepted page requests,
+65,537 word requests, 36.129854 seconds from capability-response queueing to the
+last word request. The 37.759860-second peer wait remains dominant. USB-host
+startup blocks core 1 for 500 ms and is a timing lead, but does not by itself
+explain the missing accepted page requests. See the investigation for the
+next targeted negotiation/startup diagnostics; no transfer fix is claimed.
+
+The initial hardware-free follow-up reproduced the source's words-only
+history using a 500 ms core-1 pause plus real mouse-report traffic. Quiet
+traffic alone did not produce that signature. A delayed-advertisement fixture
+then completed all 1,024 pages without word fallback or page retries, with
+exact image/settings checks. The new startup witness suite and real USB-host
+timing assertions are retained in the tests; that investigation did not change
+firmware policy. It recommended deferring only the firmware advertisement until
+one second after boot, preserving the heartbeat task's other state synchronization.
+This is a bounded direct-device startup mitigation, not universal USB readiness.
+The now-authorized v0.111 implementation is described above.
+
 ## Current host updater policy: normal verification by default
 
 The host-only updater simplification introduces `VERIFY_MODE=normal` (default)
@@ -28,16 +100,18 @@ Neither read-only mode enters ROM, writes settings/firmware, requests a reboot,
 or performs a ROM firmware readback. The mode does not relax failure handling:
 no automatic retry, power cycle, device reselection or recovery bypass.
 
-All 134 updater tests pass. A normal read-only verification passed on both
+The original 134 updater tests passed (141 with v0.110 history coverage).
+A normal read-only verification passed on both
 installed v0.109 Picos in 3.367517 seconds, with one fresh CRC scan each and no
-reboot or flash. A complete normal-mode upgrade has not yet been hardware-tested.
-The accepted v0.109 deployment below used the previous sequence; its historical
-evidence remains unchanged. Its timings support an estimated 3–4 seconds saved,
-not elimination of the approximately 37-second peer wait.
+reboot or flash. The v0.110 upgrade above now validates actual-write normal mode
+on hardware: 47.822 seconds versus the earlier v0.109 thorough run's 50.628.
+Readback/diagnostic phase costs fell about 3.159 seconds; the peer phase did not
+improve. This is a comparison across releases, not a controlled same-image trial.
+The accepted v0.109 deployment below retains its original sequence and evidence.
 See [the updater guide](docs/updater.md) and
 [the normal-mode verification record](docs/testing/normal-upgrade-verification.md).
 
-## Current accepted release: v0.109
+## Previous accepted release: v0.109
 
 Implemented on `codex/configuration-validation-v0.109`, based on accepted v0.108,
 in `/private/tmp/deskhop-config-validation.I4A81W`. It resumes the preserved old

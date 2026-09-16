@@ -249,12 +249,16 @@ void heartbeat_output_task(device_t *state) {
     uint32_t running_checksum = state->_running_fw.checksum;
     firmware_update_unlock();
 
-    uart_packet_t packet = {.type = HEARTBEAT_MSG};
-    packet.data16[0] = running_version;
-    packet.data16[1] = FW_UPDATE_PROTOCOL_MARKER;
-    packet.data32[1] = running_checksum;
-
-    queue_try_add(&global_state.uart_tx_queue, &packet);
+    /* Initial USB-host enumeration can block this core for 500 ms. Let it
+     * settle before inviting a peer into its short firmware-response timers.
+     * Do not sleep or defer the unrelated state synchronization below. */
+    if (time_us_64() >= FW_UPDATE_ADVERTISE_DELAY_US) {
+        uart_packet_t packet = {.type = HEARTBEAT_MSG};
+        packet.data16[0] = running_version;
+        packet.data16[1] = FW_UPDATE_PROTOCOL_MARKER;
+        packet.data32[1] = running_checksum;
+        queue_try_add(&global_state.uart_tx_queue, &packet);
+    }
     sync_activity(state);
     sync_mouse_buttons(state);
     sync_owned_zoom_assist(state);

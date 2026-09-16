@@ -417,6 +417,9 @@ def scenario_uart_update_words(s):
 
 
 def scenario_uart_update_retry(s):
+    # This manual-clock fixture tests established word retry deadlines, not the
+    # boot-only advertisement grace (covered by the startup scenarios).
+    s.advance(max(0, 1000000 - s.now))
     s.do(0, 'verify_prepare')
     s.do(0, 'task', 'heartbeat_output_task')
     pump_wire(s, 2000)

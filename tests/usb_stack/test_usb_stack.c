@@ -1389,6 +1389,48 @@ static void cdc_runtime_history_fields(void) {
     CHECK(occurrences("board=A seq=") == 7 && occurrences("END history") == 1);
 }
 
+static void cdc_transfer_history_fields(void) {
+    diagnostic_history_init();
+    console_now_us = 1000000;
+    const uint8_t phases[] = {TRANSFER_CAPS_QUEUED, TRANSFER_BATCH_BEGIN, TRANSFER_RETRY,
+        TRANSFER_WORDS_BEGIN, TRANSFER_PROGRESS, TRANSFER_BATCH_END, TRANSFER_WORDS_END};
+    const uint8_t modes[] = {TRANSFER_MODE_NONE, TRANSFER_MODE_PAGES, TRANSFER_MODE_PAGES,
+        TRANSFER_MODE_MIXED, TRANSFER_MODE_MIXED, TRANSFER_MODE_PAGES, TRANSFER_MODE_WORDS};
+    const uint32_t values[] = {0xffffffc0, 0, 256, 256, 65536, 262144, 262144};
+    for (unsigned i = 0; i < sizeof(phases); ++i)
+        diagnostic_history_record(HISTORY_TRANSFER_SOURCE, phases[i], modes[i], values[i]);
+    for (unsigned i = TRANSFER_ELAPSED_US; i <= TRANSFER_PAGE_MAX_US; ++i)
+        diagnostic_history_record(HISTORY_TRANSFER_TIMING, i, TRANSFER_MODE_MIXED, UINT32_MAX);
+    for (unsigned i = TRANSFER_PAGE_REQUESTS; i <= TRANSFER_PAGE_RETRIES; ++i)
+        diagnostic_history_record(HISTORY_TRANSFER_COUNT, i, TRANSFER_MODE_MIXED, UINT32_MAX);
+    /* New rows use the existing bounded/partial CDC formatter and ring. */
+    cdc_capture_clear();
+    cdc_send("history\n");
+    history_frame(14, 0);
+    const char *expected[] = {
+        "transfer_source phase=caps_queued mode=none value=4294967232",
+        "transfer_source phase=batch_begin mode=pages value=0",
+        "transfer_source phase=retry mode=pages value=256",
+        "transfer_source phase=words_begin mode=mixed value=256",
+        "transfer_source phase=progress mode=mixed value=65536",
+        "transfer_source phase=batch_end mode=pages value=262144",
+        "transfer_source phase=words_end mode=words value=262144",
+        "transfer_timing metric=elapsed_us mode=mixed value=4294967295",
+        "transfer_timing metric=page_service_us mode=mixed value=4294967295",
+        "transfer_timing metric=page_gap_us mode=mixed value=4294967295",
+        "transfer_timing metric=page_max_us mode=mixed value=4294967295",
+        "transfer_count metric=page_requests mode=mixed value=4294967295",
+        "transfer_count metric=word_requests mode=mixed value=4294967295",
+        "transfer_count metric=page_retries mode=mixed value=4294967295",
+    };
+    for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        char row[256];
+        snprintf(row, sizeof(row), "board=A seq=%u uptime_ms=1000 age_ms=0 event=%s\r\n", i + 1, expected[i]);
+        CHECK(strstr(cdc_bytes, row) != NULL);
+    }
+    CHECK(occurrences("board=A seq=") == 14 && occurrences("END history") == 1);
+}
+
 static void cdc_history_stalled_reader_and_hid(void) {
     history_fill(64);
     cdc_capture_clear();
@@ -2144,6 +2186,7 @@ int main(void) {
     cdc_history_event_fields();
     scenario = "CDC runtime and unknown history event fields";
     cdc_runtime_history_fields();
+    cdc_transfer_history_fields();
     scenario = "CDC history stalled reader and HID progress";
     cdc_history_stalled_reader_and_hid();
     scenario = "CDC history close discards frozen window";

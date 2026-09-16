@@ -594,6 +594,7 @@ void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
 
     state->maintenance_source_seen = true;
     state->maintenance_source_last_us = time_us_64();
+    firmware_source_word_locked(state, address);
     firmware_update_unlock();
 
     /* Add requested data to bytes 4-7 in the packet and return it with a different type */

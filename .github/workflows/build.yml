@@ -24,6 +24,9 @@ jobs:
 
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        # Startup regression tests compile the accepted pre-guard baseline.
+        fetch-depth: 0
 
     - name: Render webconfig
       shell: bash

@@ -73,6 +73,9 @@ def main():
     build(BUILD/'sim/node.so')
     native=build(BUILD/'sim/native-boundaries',executable=ROOT/'tests/sim/test_native_boundaries.c',sanitize=True)
     run('production native boundary properties',[native])
+    advertisement=build(BUILD/'sim/fw-advertisement',executable=ROOT/'tests/sim/test_fw_advertisement.c',sanitize=True)
+    for role in ('0','1'):
+        run('firmware advertisement boundary role '+role,[advertisement,role])
     config=build(BUILD/'sim/configuration',executable=ROOT/'tests/sim/test_configuration.c',sanitize=True)
     run('configuration ingestion and consumer properties',[config])
     crashes=build(BUILD/'sim/config-crashes',executable=ROOT/'tests/sim/test_config_crashes.c',sanitize=True)
@@ -80,6 +83,10 @@ def main():
     run('configuration output-identity regression',[crashes,'identity'])
     run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'],timeout=300)
     run('simulator contract checks',[sys.executable,'tests/sim/test_harness.py'])
+    run('firmware startup guard and historical starvation witnesses',
+        [sys.executable,'tests/sim/test_fw_startup.py','--library',BUILD/'sim/node.so',
+         '--seeds','1',*(['--full'] if a.tier=='deep' else []),
+         '--output',BUILD/f'fw-startup-{a.tier}.json'],timeout=180)
     if a.tier=='deep':
         run('accepted-v108 configuration crash witnesses',[sys.executable,'tests/sim/test_config_baseline.py'])
         run('upstream USB source mutations',[sys.executable,'tests/upstream_usb/run.py','--mutations'])

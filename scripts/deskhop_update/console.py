@@ -446,8 +446,41 @@ def parse_verify(raw, build: str, slot_crc: str, boot_crc: str, identities: dict
             "result": verdict, "boards": boards}
 
 
+def _parse_transfer_event(name, rest):
+    """Sparse source-side measurements, not receiver/flash acceptance evidence."""
+    selector = "phase" if name == "transfer_source" else "metric"
+    values = ordered_fields(rest, (selector, "mode", "value"))
+    value = decimal(values["value"], MAX_U32, "transfer value")
+    mode = values["mode"]
+    if name == "transfer_source":
+        phase = values["phase"]
+        modes = {"caps_queued": ("none",), "batch_begin": ("pages", "mixed"),
+                 "words_begin": ("words", "mixed"), "retry": ("pages", "mixed"),
+                 "progress": ("pages", "words", "mixed"),
+                 "batch_end": ("pages", "mixed"), "words_end": ("words", "mixed")}
+        require(phase in modes and mode in modes[phase], "invalid transfer phase/mode")
+        if phase == "caps_queued":
+            require(0 < value <= 0xffffffc0 and value % 64 == 0, "invalid transfer capability tag")
+        elif phase in ("batch_begin", "words_begin", "retry"):
+            alignment = 4 if phase == "words_begin" else 256
+            require(value < IMAGE_BYTES and value % alignment == 0, "invalid transfer offset")
+        elif phase == "progress":
+            require(value in (65536, 131072, 196608, IMAGE_BYTES), "invalid transfer milestone")
+        else:
+            require(value == IMAGE_BYTES, "invalid transfer endpoint")
+    else:
+        metrics = {"transfer_timing": ("elapsed_us", "page_service_us", "page_gap_us", "page_max_us"),
+                   "transfer_count": ("page_requests", "word_requests", "page_retries")}
+        require(mode in ("pages", "words", "mixed") and values["metric"] in metrics[name],
+                "invalid transfer metric/mode")
+    values["value"] = value
+    return {"event": name, **values}
+
+
 def _parse_event(text):
     name, _, rest = text.partition(" ")
+    if name in ("transfer_source", "transfer_timing", "transfer_count"):
+        return _parse_transfer_event(name, rest)
     schemas = {"boot": ("build", "output"), "output_local": ("old", "new"), "output_peer": ("old", "new"),
                "usb_mount": (), "usb_unmount": (),
                "hid_mount": ("device", "instance", "protocol", "keyboard", "mouse"),

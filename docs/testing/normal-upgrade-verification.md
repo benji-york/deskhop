@@ -6,16 +6,19 @@ This is a host-only simplification of the maintained Make/Python updater.
 `Updater(..., verification_mode="normal")` is the default, exposed as
 `--verification-mode normal|thorough` and Make's `VERIFY_MODE` variable.
 No firmware source, wire protocol, version, image or device settings change is
-part of this work. All 134 updater tests pass, and the default normal read-only
-verifier passed on both installed Picos. No full normal-mode upgrade or reflash
-was performed; existing successful deployment logs must not be relabeled as
-normal-mode upgrade validation.
+part of the original policy change. All 134 original updater tests passed, and
+the default normal read-only verifier passed on both Picos. That implementation
+did not perform a full upgrade; its historical evidence remains unchanged.
+The later authorized v0.110 deployment below now validates the actual-write
+normal path on hardware. The expanded host suite has 141 passing tests.
 
 Implemented on `codex/normal-upgrade-verification`, based on main `1080cd4`,
 in `/private/tmp/deskhop-normal-upgrades.oz4m7n`.
 
-The accepted physical firmware remains v0.109. Its original deployment is
-recorded in [the configuration-validation record](configuration-validation-v109.md).
+The accepted physical firmware is now v0.110; see
+[the transfer-profiling deployment](transfer-profiling.md).
+The prior v0.109 deployment remains recorded in
+[the configuration-validation record](configuration-validation-v109.md).
 
 ## Checks retained and omitted
 
@@ -129,3 +132,31 @@ passed the single fresh CRC request; `already_current=true`,
 this change is host-only. Evidence in the implementation worktree:
 `build/updater/runs/20260916T190235Z-myx15ww1/`. This is not an actual-write
 normal-mode upgrade test.
+
+## First actual-write normal-mode validation: v0.110
+
+After authorization, one maintained-updater run upgraded both Picos from v0.109
+to diagnostic v0.110. Evidence is in
+`/private/tmp/deskhop-transfer-profile.Zi4FBl/build/updater/runs/20260916T194457Z-1lktwwdf/`.
+The journal records `verification_mode=normal`, successful firmware/settings
+backups, `picotool_verified=true`, `settings_unchanged=true`,
+`independent_readback=false` and `firmware_verified=true`. The expected duplicate
+`firmware-after.bin` is absent. Exactly one `verify 0.110 56cf6a40` command
+produced fresh 262,144-byte PASS scans on both boards; identities, new boot
+sessions, progressing cores and history/media checks passed. B propagated and
+rebooted automatically. No retry, power cycle or cable move was required.
+
+Total: **47.821911 seconds**, compared with 50.627909 seconds in the prior
+v0.109 thorough run, a 2.805998-second reduction. Readback/guard and post-rollout
+diagnostic phases together fell about 3.159 seconds; peer wait/settle increased
+about 0.380 seconds to 37.759860. These are distinct releases and runs, not a
+controlled identical-image performance comparison. The dominant transfer cost
+remains: new history confirms legacy word service, not successful batch service.
+
+Benji answered "Everything works normally" for typing/modifiers, trackball and
+keyboard right-click on both Macs, switching both ways, focus arrows and zoom
+assist. Separate `user-acceptance.json` preserves that response without changing
+the automatic run's original pending input flag. The diagnostic source was
+uncommitted at that acceptance point. After accepting the subsequent v0.111
+startup-guard deployment, Benji separately authorized merging/pushing the combined
+hardware-tested change set. The original frozen v0.110 evidence is unchanged.
