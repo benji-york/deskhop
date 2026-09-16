@@ -54,6 +54,48 @@ function makeReport(type, payload, proxy=false) {
   return report;
 }
 
+/* Adapted from upstream PR #364: display seconds, retain microseconds on the
+   wire. Decimal strings and BigInt avoid both uint32 wrap and Number rounding.
+   GET carries seven value bytes, but the peer-proxy SET carries only six.
+   The stored uint64's highest byte is not observable through this API. Do not
+   change the wire protocol or silently truncate values to fit either limit. */
+function isScaledTimer(element) {
+  return element.getAttribute('data-type') === 'uint64'
+    && element.getAttribute('data-scale') === '1000000';
+}
+
+function timerMicroseconds(seconds) {
+  const parts = String(seconds).trim().match(/^(\d+)(?:\.(\d{0,6}))?$/);
+  if (!parts)
+    throw new RangeError('Enter nonnegative seconds with at most 6 decimal places.');
+  const value = BigInt(parts[1]) * 1000000n + BigInt((parts[2] || '').padEnd(6, '0'));
+  if (value > 0xffffffffffffn)
+    throw new RangeError('The maximum writable timer is 281474976.710655 seconds.');
+  return value;
+}
+
+function timerSeconds(microseconds) {
+  const fraction = (microseconds % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return (microseconds / 1000000n).toString() + (fraction ? '.' + fraction : '');
+}
+
+function validateTimerChange(element) {
+  if (!isScaledTimer(element))
+    return true;
+  /* Larger fetched values may still be retained; an unchanged Save must never
+     overwrite them with a narrowed representation. */
+  try {
+    if (element.getAttribute('fetched-value') !== getValue(element))
+      timerMicroseconds(element.value);
+    element.setCustomValidity('');
+    return true;
+  } catch (error) {
+    element.setCustomValidity(error.message);
+    element.reportValidity();
+    return false;
+  }
+}
+
 function packValue(element, key, dataType, buffer) {
   const dataOffset = 1;
   var buffer = new ArrayBuffer(8);
@@ -61,7 +103,7 @@ function packValue(element, key, dataType, buffer) {
 
   const methods = {
     "uint32": view.setUint32,
-    "uint64": view.setUint32, /* Yes, I know. :-| */
+    "uint64": view.setUint32, /* Unscaled legacy fields retain their encoding. */
     "int32": view.setInt32,
     "uint16": view.setUint16,
     "uint8": view.setUint8,
@@ -69,7 +111,13 @@ function packValue(element, key, dataType, buffer) {
     "int8": view.setInt8
   };
 
-  if (dataType in methods) {
+  if (isScaledTimer(element)) {
+    let value = timerMicroseconds(element.value);
+    for (let offset = dataOffset; offset < buffer.byteLength; offset++) {
+      view.setUint8(offset, Number(value & 0xffn));
+      value >>= 8n;
+    }
+  } else if (dataType in methods) {
     const method = methods[dataType];
     if (element.type === 'checkbox')
       view.setUint8(dataOffset, element.checked ? 1 : 0, true);
@@ -181,6 +229,15 @@ function updateElement(key, event) {
   if (!element)
     return;
 
+  if (isScaledTimer(element)) {
+    let value = 0n;
+    for (let offset = dataOffset + 6; offset >= dataOffset; offset--)
+      value = (value << 8n) | BigInt(event.data.getUint8(offset));
+    setValue(element, timerSeconds(value));
+    element.setCustomValidity('');
+    return;
+  }
+
   const methods = {
     "uint32": event.data.getUint32,
     "uint64": event.data.getUint32, /* Yes, I know. :-| */
@@ -234,6 +291,9 @@ async function enterBootloaderHandler() {
 }
 
 async function valueChangedHandler(element) {
+  if (!validateTimerChange(element))
+    return false;
+
   var key = element.getAttribute('data-key');
   var dataType = element.getAttribute('data-type');
 
@@ -252,6 +312,7 @@ async function valueChangedHandler(element) {
 
   if (screensaverModeKeys.includes(Number(key)))
     updateAutoStartJitter();
+  return true;
 }
 
 async function saveHandler() {
@@ -259,6 +320,12 @@ async function saveHandler() {
 
   if (!device || !device.opened)
     return;
+
+  /* Validate every changed timer before sending any configuration update.
+     Otherwise an invalid later field could leave a partially applied Save. */
+  for (const element of elements)
+    if (!element.hasAttribute('readonly') && !validateTimerChange(element))
+      return;
 
   for (const element of elements) {
     var origValue = element.getAttribute('fetched-value')

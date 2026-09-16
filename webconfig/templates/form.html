@@ -3,7 +3,7 @@
 {% set key = item.key %}
 
 {% macro input(item, type='text', class='api', name='name') %}
-<input class="{{ class }}" type="{{ type }}" name="{{ name }}{{ key }}" data-type="{{ item.type }}" data-key="{{ key }}"
+<input class="{{ class }}" type="{{ type }}" name="{{ name }}{{ key }}" data-type="{{ item.type }}" data-key="{{ key }}"{% if item.scale != 1 %} data-scale="{{ item.scale }}" inputmode="decimal" aria-describedby="timer-range-{{ key }}"{% endif %}
   onchange="valueChangedHandler(this)"
 {% endmacro %}
 
@@ -56,7 +56,8 @@
 
   {% else %}
       {{ label(item, class='') }}
-      {{ input(item) }}  />
+      {{ input(item) }}  />{% if item.scale != 1 %}
+      <small id="timer-range-{{ key }}">Editable range: 0–281474976.710655 seconds, up to 6 decimal places. Larger stored values are shown unchanged but cannot be written to both outputs by this page.</small>{% endif %}
 
   {% endif %}
 {% endblock %}

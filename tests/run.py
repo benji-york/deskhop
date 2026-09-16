@@ -50,6 +50,7 @@ def main():
     node=os.environ.get('NODE') or shutil.which('node') or str(pathlib.Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')
     run('WebConfig auto-start',[node,'tests/test_webconfig_autostart.js'])
     run('WebConfig Bootloader button',[node,'tests/test_webconfig_bootloader.js'])
+    run('WebConfig timer units',[node,'tests/test_webconfig_timers.js'])
     hid_flags=['-Wno-unused-parameter','-Wno-sign-compare','-Itests/hid_stubs','-Ipico-sdk/lib/tinyusb/src']
     hid_sources=['src/hid_parser.c','src/hid_report.c','src/keyboard.c','src/usb.c','src/reboot_hotkey.c',
                  'tests/history_stub.c']
@@ -62,6 +63,7 @@ def main():
     run('real storage transactions',[sys.executable,'tests/storage/run.py','--seeds','16' if a.tier=='deep' else '1'])
     run('real TinyUSB device stack',[sys.executable,'tests/usb_stack/run.py'])
     run('real TinyUSB host stack',[sys.executable,'tests/usb_host/run.py'])
+    run('upstream USB transaction and DPRAM regressions',[sys.executable,'tests/upstream_usb/run.py'])
     sys.path.insert(0,str(ROOT/'tests/sim'))
     from build import build
     build(BUILD/'sim/node.so')
@@ -70,6 +72,7 @@ def main():
     run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'],timeout=300)
     run('simulator contract checks',[sys.executable,'tests/sim/test_harness.py'])
     if a.tier=='deep':
+        run('upstream USB source mutations',[sys.executable,'tests/upstream_usb/run.py','--mutations'])
         run('bounded core order exploration',[sys.executable,'tests/sim/run.py','--scenario','backpressure','--interleavings'])
         run('peer query core order exploration',[sys.executable,'tests/sim/run.py','--scenario','peer_status_roundtrip','--interleavings'])
         run('verification core order exploration',[sys.executable,'tests/sim/run.py','--scenario','verify_concurrent','--interleavings'])

@@ -471,8 +471,8 @@ void process_system_report(uint8_t *raw_report, int length, uint8_t itf, hid_int
 }
 
 keyboard_t *get_keyboard(hid_interface_t *iface, uint8_t report_id) {
-    /* When we have just one keyboard (most cases), or don't use report ID */
-    if (iface->num_keyboards == 1 || !iface->uses_report_id)
+    /* Lookup only: report decoding must never allocate a descriptor slot. */
+    if (!iface->uses_report_id)
         return &iface->keyboards[PRIMARY_KEYBOARD];
 
     /* Go through known keyboards and match on report ID, return pointer to keyboard_t */
@@ -482,6 +482,27 @@ keyboard_t *get_keyboard(hid_interface_t *iface, uint8_t report_id) {
         }
     }
 
-    /* If nothing else is matched, return the primary keyboard. */
+    /* Consumer controls retain their primary-slot storage. Keyboard report
+       decoding separately rejects IDs that do not own this returned slot. */
     return &iface->keyboards[PRIMARY_KEYBOARD];
+}
+
+/* Descriptor parsing only. Existing slots remain writable at capacity; an
+   excess report ID must not overwrite a previously registered keyboard. */
+keyboard_t *get_or_add_keyboard(hid_interface_t *iface, uint8_t report_id) {
+    if (!iface->uses_report_id)
+        return &iface->keyboards[PRIMARY_KEYBOARD];
+
+    for (int i = 0; i < iface->num_keyboards && i < MAX_KEYBOARDS; i++) {
+        if (iface->keyboards[i].report_id == report_id)
+            return &iface->keyboards[i];
+    }
+
+    if (iface->num_keyboards >= MAX_KEYBOARDS)
+        return NULL;
+
+    keyboard_t *keyboard = &iface->keyboards[iface->num_keyboards];
+    keyboard->report_id = report_id;
+    keyboard->uses_report_id = true;
+    return keyboard;
 }

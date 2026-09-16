@@ -6,7 +6,28 @@ the coupled Sofle/QMK firmware, how to build and deploy both, and the failure
 modes already diagnosed. It is intentionally more specific than the upstream
 README.
 
-Snapshot: 2026-09-15
+Snapshot: 2026-09-16
+
+## Pending integration: upstream fixes for v0.107
+
+`codex/upstream-fixes-v0.107` is a separate candidate based on accepted `main`
+`1da1af2`, incorporating upstream through `c220d0c` selectively: #369's
+byte-safe USB DPRAM copies, #370's PIO USB transaction retries, the remaining
+#359 per-report keyboard layouts, and #364's screensaver timer units in seconds.
+The USB vendor fixes are unchanged from upstream; keyboard capacity guards and
+exact timer conversion are adapted to this fork. The custom hotkeys, keyboard
+LED indication, zoom assist, keep-awake controls, UART framing and updater are
+retained. Existing timer durations are not migrated or rewritten.
+
+This is not a new hardware-accepted publication: `main` and both Picos remain
+on v0.106. No flash, main merge or push has been performed for this candidate.
+The integration scope, test evidence, protocol limits and required physical
+acceptance checks are recorded in
+[the v0.107 integration record](docs/testing/upstream-fixes-v107.md).
+All 55 deep-tier steps and the ARM build pass. Frozen candidate:
+`build/releases/deskhop-v0.107-607q82je/manifest.json`, full-slot CRC `6579b48f`.
+Use this explicit manifest for a subsequently authorized flash; the canonical
+checkout's earlier `latest.json` pointer is not this candidate.
 
 ## Current publication: main matches accepted v0.106
 
@@ -28,8 +49,8 @@ Earlier deployment/publication sections below are historical; their then-current
 version, acceptance and branch statements do not override this section.
 
 Still outside this integration: unfinished configuration-validation changes
-in its worktree; broader reboot/power-loss safety work; newer upstream PRs
-#369, #364 and later #359 keyboard-collection changes; and proposed batch-mode,
+in its worktree; broader reboot/power-loss safety work; the v0.107 upstream
+candidate described above; and proposed batch-mode,
 negotiation/retry/fallback diagnostics. The old upstream replay/selective
 branches are superseded alternatives, not additional fixes to merge. Seventy
 untracked ` 2` copies match historical `03d85db` blobs exactly and remain

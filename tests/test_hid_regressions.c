@@ -381,6 +381,132 @@ static void test_nkro_aggregate_threshold(void) {
     assert(iface.keyboards[0].nkro_bits == 48);
 }
 
+/* Descriptor shapes exercise the real parser and USB callback. They model a
+ * 6KRO collection beside independent 120-bit NKRO collections, not device IDs. */
+static size_t append_keyboard_collection(uint8_t *dst, uint8_t id, bool nkro,
+                                        uint8_t first_usage, bool reserved) {
+    size_t n = 0;
+    const uint8_t prefix[] = {
+        0x05, 1, 0x09, 6, 0xa1, 1, 0x85, id,
+        0x05, 7, 0x19, 0xe0, 0x29, 0xe7, 0x75, 1, 0x95, 8, 0x81, 2
+    };
+    memcpy(dst + n, prefix, sizeof(prefix)); n += sizeof(prefix);
+    if (nkro) {
+        const uint8_t bitmap[] = {
+            0x19, first_usage, 0x29, (uint8_t)(first_usage + 119),
+            0x75, 1, 0x95, 120, 0x81, 2
+        };
+        memcpy(dst + n, bitmap, sizeof(bitmap)); n += sizeof(bitmap);
+    } else {
+        if (reserved) {
+            const uint8_t padding[] = {0x75, 8, 0x95, 1, 0x81, 1};
+            memcpy(dst + n, padding, sizeof(padding)); n += sizeof(padding);
+        }
+        const uint8_t array[] = {0x19, 0, 0x29, 0x65, 0x75, 8, 0x95, 6, 0x81, 0};
+        memcpy(dst + n, array, sizeof(array)); n += sizeof(array);
+    }
+    dst[n++] = 0xc0;
+    return n;
+}
+
+static void test_independent_keyboard_collections(void) {
+    for (unsigned reverse = 0; reverse < 2; reverse++) {
+        for (unsigned reserved = 0; reserved < 2; reserved++) {
+            reset();
+            hid_interface_t *iface = &global_state.iface[0][0];
+            iface->protocol = HID_PROTOCOL_REPORT;
+            uint8_t descriptor[256];
+            size_t n = 0;
+            for (unsigned j = 0; j < 3; j++) {
+                unsigned collection = reverse ? 2 - j : j;
+                uint8_t id = collection == 0 ? 7 : 16 + collection;
+                n += append_keyboard_collection(descriptor + n, id, collection != 0,
+                                                collection == 1 ? 4 : 32, reserved);
+            }
+            parse_report_descriptor(iface, descriptor, (int)n);
+            assert(!iface->descriptor_invalid && iface->num_keyboards == 3);
+            keyboard_t *six = get_keyboard(iface, 7);
+            keyboard_t *nkro_a = get_keyboard(iface, 17);
+            keyboard_t *nkro_b = get_keyboard(iface, 18);
+            assert(six != nkro_a && six != nkro_b && nkro_a != nkro_b);
+            assert(six->uses_report_id && !six->is_nkro && six->nkro_count == 0);
+            assert(nkro_a->is_nkro && nkro_a->nkro_bits == 120);
+            assert(nkro_b->is_nkro && nkro_b->nkro[0].usage_min == 32);
+            for (unsigned i = 0; i < 6; i++)
+                assert(six->key_array[1 + reserved + i]);
+
+            keyboard_t before[MAX_KEYBOARDS];
+            memcpy(before, iface->keyboards, sizeof(before));
+            assert(get_or_add_keyboard(iface, 7) == six);
+            assert(get_or_add_keyboard(iface, 17) == nkro_a);
+            assert(iface->num_keyboards == 3);
+            assert(memcmp(before, iface->keyboards, sizeof(before)) == 0);
+
+            uint8_t boot_keys[9] = {7, 2};
+            for (unsigned i = 0; i < 6; i++) boot_keys[2 + reserved + i] = HID_KEY_A + i;
+            tuh_hid_report_received_cb(1, 0, boot_keys, 8 + reserved);
+            assert(keyboard_count == 1 && last_keyboard.modifier == 2);
+            assert(memcmp(last_keyboard.keycode, (uint8_t[]){4, 5, 6, 7, 8, 9}, 6) == 0);
+
+            uint8_t bits[17] = {17, 4};
+            bits[2] = 1; bits[3] = 2; /* usages 4 and 13, not array byte values */
+            tuh_hid_report_received_cb(1, 0, bits, sizeof(bits));
+            assert(keyboard_count == 2 && last_keyboard.modifier == 4);
+            assert(memcmp(last_keyboard.keycode, (uint8_t[]){4, 13, 0, 0, 0, 0}, 6) == 0);
+            bits[0] = 18; bits[1] = 8;
+            tuh_hid_report_received_cb(1, 0, bits, sizeof(bits));
+            assert(keyboard_count == 3 && last_keyboard.modifier == 8);
+            assert(memcmp(last_keyboard.keycode, (uint8_t[]){32, 41, 0, 0, 0, 0}, 6) == 0);
+            tuh_hid_report_received_cb(1, 0, boot_keys, 8 + reserved);
+            assert(keyboard_count == 4 && last_keyboard.keycode[0] == HID_KEY_A);
+
+            unsigned activity = activity_count;
+            hid_keyboard_report_t held = last_keyboard, decoded;
+            bits[0] = 254;
+            tuh_hid_report_received_cb(1, 0, bits, sizeof(bits));
+            assert(extract_kbd_data(bits, sizeof(bits), 0, iface, &decoded) < 0);
+            assert(iface->num_keyboards == 3 && activity_count == activity && keyboard_count == 4);
+            assert(memcmp(&held, &last_keyboard, sizeof(held)) == 0);
+            assert(memcmp(before, iface->keyboards, sizeof(before)) == 0);
+        }
+    }
+}
+
+static void test_keyboard_collection_capacity(void) {
+    reset();
+    hid_interface_t *iface = &global_state.iface[0][0];
+    iface->protocol = HID_PROTOCOL_REPORT;
+    uint8_t descriptor[512];
+    size_t n = 0;
+    const uint8_t padding_only[] = {
+        0x05, 1, 0x09, 6, 0xa1, 1, 0x85, 99, 0x05, 7,
+        0x75, 8, 0x95, 8, 0x81, 1, 0xc0
+    };
+    memcpy(descriptor, padding_only, sizeof(padding_only)); n += sizeof(padding_only);
+    for (unsigned i = 0; i < MAX_KEYBOARDS; i++)
+        n += append_keyboard_collection(descriptor + n, i + 1, false, 0, true);
+    n += append_keyboard_collection(descriptor + n, 100, true, 32, false);
+    parse_report_descriptor(iface, descriptor, (int)n);
+    assert(!iface->descriptor_invalid && iface->num_keyboards == MAX_KEYBOARDS);
+    assert(iface->report_handler[99] == REPORT_RECEIVER_NONE);
+    assert(iface->report_handler[100] == REPORT_RECEIVER_NONE);
+    for (unsigned i = 0; i < MAX_KEYBOARDS; i++) {
+        keyboard_t *kb = get_keyboard(iface, i + 1);
+        assert(kb == &iface->keyboards[i] && !kb->is_nkro && kb->modifier.size == 8);
+        for (unsigned key = 2; key < 8; key++) assert(kb->key_array[key]);
+        uint8_t report[] = {i + 1, 2, 0, HID_KEY_A + i, 0, 0, 0, 0, 0};
+        tuh_hid_report_received_cb(1, 0, report, sizeof(report));
+        assert(keyboard_count == i + 1 && last_keyboard.keycode[0] == HID_KEY_A + i);
+    }
+    keyboard_t before[MAX_KEYBOARDS];
+    memcpy(before, iface->keyboards, sizeof(before));
+    assert(get_or_add_keyboard(iface, 100) == NULL);
+    uint8_t excess[17] = {100, 2, 1};
+    tuh_hid_report_received_cb(1, 0, excess, sizeof(excess));
+    assert(keyboard_count == MAX_KEYBOARDS && activity_count == MAX_KEYBOARDS);
+    assert(memcmp(before, iface->keyboards, sizeof(before)) == 0);
+}
+
 static void test_rejected_descriptor_cannot_fallback_to_keys(void) {
     reset();
     host_protocol = HID_ITF_PROTOCOL_KEYBOARD;
@@ -406,6 +532,8 @@ static void test_rejected_descriptor_cannot_fallback_to_keys(void) {
 }
 
 int main(void) {
+    test_independent_keyboard_collections();
+    test_keyboard_collection_capacity();
     test_rejected_descriptor_cannot_fallback_to_keys();
     test_carry_last_usage();
     test_empty_and_oversized_usage_lists();

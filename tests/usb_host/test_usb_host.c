@@ -7,7 +7,7 @@
 
 device_t global_state;
 static uint32_t virtual_ms;
-static bool connected, trackball_only;
+static bool connected, trackball_only, multi_keyboard;
 static unsigned controls, mounts, unmounts, resets, mouse_reports, keyboard_reports, modifier_publishes, activity_records, idle_stalls;
 static uint8_t configured_address, peripheral_led;
 static hid_keyboard_report_t last_keyboard;
@@ -15,6 +15,14 @@ static tusb_control_request_t setup;
 static uint8_t setup_address;
 static uint8_t configuration[59];
 static unsigned configuration_size;
+static const uint8_t multi_keyboard_descriptor[] = {
+    0x05,1,0x09,6,0xa1,1,0x85,7,
+    0x05,7,0x19,0xe0,0x29,0xe7,0x75,1,0x95,8,0x81,2,
+    0x75,8,0x95,1,0x81,1,0x19,0,0x29,0x65,0x95,6,0x81,0,0xc0,
+    0x05,1,0x09,6,0xa1,1,0x85,17,
+    0x05,7,0x19,0xe0,0x29,0xe7,0x75,1,0x95,8,0x81,2,
+    0x19,4,0x29,123,0x75,1,0x95,120,0x81,2,0xc0
+};
 static struct { bool pending; uint8_t address; uint8_t *buffer; unsigned length; } incoming[16];
 static const tusb_desc_device_t device_descriptor = {
     .bLength = 18, .bDescriptorType = TUSB_DESC_DEVICE, .bcdUSB = 0x0200,
@@ -65,8 +73,13 @@ bool hcd_edpt_xfer(uint8_t port, uint8_t address, uint8_t ep, uint8_t *buffer, u
         case TUSB_DESC_DEVICE: source = (const uint8_t *)&device_descriptor; available = sizeof(device_descriptor); break;
         case TUSB_DESC_CONFIGURATION: source = configuration; available = configuration_size; break;
         case HID_DESC_TYPE_REPORT:
-            source = trackball_only || setup.wIndex == 1 ? fixture_mouse : fixture_keyboard;
-            available = trackball_only || setup.wIndex == 1 ? sizeof(fixture_mouse) : sizeof(fixture_keyboard);
+            if (trackball_only || setup.wIndex == 1) {
+                source = fixture_mouse; available = sizeof(fixture_mouse);
+            } else if (multi_keyboard) {
+                source = multi_keyboard_descriptor; available = sizeof(multi_keyboard_descriptor);
+            } else {
+                source = fixture_keyboard; available = sizeof(fixture_keyboard);
+            }
             break;
         default: CHECK(false);
         }
@@ -140,11 +153,12 @@ static void make_configuration(bool trackball) {
     memcpy(configuration, header, sizeof(header));
     for (unsigned instance = 0; instance < (trackball ? 1u : 2u); ++instance) {
         bool mouse = trackball || instance == 1;
-        unsigned report_len = mouse ? sizeof(fixture_mouse) : sizeof(fixture_keyboard);
+        unsigned report_len = mouse ? sizeof(fixture_mouse)
+            : multi_keyboard ? sizeof(multi_keyboard_descriptor) : sizeof(fixture_keyboard);
         uint8_t descriptors[] = {
             9,4,(uint8_t)instance,0,1,3,1,(uint8_t)(mouse ? 2 : 1),0,
             9,0x21,0x11,1,0,1,0x22,(uint8_t)report_len,0,
-            7,5,(uint8_t)(0x81 + instance),3,(uint8_t)(mouse ? 5 : 8),0,1,
+            7,5,(uint8_t)(0x81 + instance),3,(uint8_t)(mouse ? 5 : multi_keyboard ? 32 : 8),0,1,
         };
         memcpy(configuration + 9 + instance * 25, descriptors, sizeof(descriptors));
     }
@@ -204,6 +218,31 @@ int main(void) {
     CHECK(mouse_reports == 2);
     detach();
     CHECK(mounts == 2 && unmounts == 2);
-    puts("TinyUSB virtual-HCD tests passed (composite keyboard/mouse and trackball enumeration, actual parser/keyboard, polling/rearm, LED OUT, detach all-up)");
+    global_state.board_role = OUTPUT_A; global_state.active_output = OUTPUT_A;
+    multi_keyboard = true;
+    /* Production setup selects report protocol unless force-boot is enabled. */
+    tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
+    attach(false);
+    CHECK(global_state.iface[0][0].protocol == HID_PROTOCOL_REPORT);
+    CHECK(global_state.iface[0][0].num_keyboards == 2);
+    before = keyboard_reports;
+    const uint8_t six_keys[] = {7,2,0,HID_KEY_A,HID_KEY_B,HID_KEY_C,0,0,0};
+    deliver(1, six_keys, sizeof(six_keys), XFER_RESULT_SUCCESS);
+    CHECK(keyboard_reports == before + 1 && last_keyboard.modifier == 2);
+    CHECK(memcmp(last_keyboard.keycode, (uint8_t[]){4,5,6,0,0,0}, 6) == 0);
+    uint8_t nkro_keys[17] = {17,4,1,2};
+    deliver(1, nkro_keys, sizeof(nkro_keys), XFER_RESULT_SUCCESS);
+    CHECK(keyboard_reports == before + 2 && last_keyboard.modifier == 4);
+    CHECK(memcmp(last_keyboard.keycode, (uint8_t[]){4,13,0,0,0,0}, 6) == 0);
+    unsigned active_before = activity_records;
+    nkro_keys[0] = 254;
+    deliver(1, nkro_keys, sizeof(nkro_keys), XFER_RESULT_SUCCESS);
+    CHECK(keyboard_reports == before + 2 && activity_records == active_before);
+    deliver(1, six_keys, sizeof(six_keys), XFER_RESULT_SUCCESS);
+    CHECK(last_keyboard.keycode[0] == HID_KEY_A);
+    detach();
+    CHECK(last_keyboard.modifier == 0 && last_keyboard.keycode[0] == 0);
+    CHECK(mounts == 3 && unmounts == 3);
+    puts("TinyUSB virtual-HCD tests passed (composite keyboard/mouse, mixed 6KRO/NKRO collections, trackball, polling/rearm, LED OUT, detach all-up)");
     return 0;
 }

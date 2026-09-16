@@ -64,14 +64,14 @@ void handle_system_control_values(report_val_t *src, report_val_t *dst, hid_inte
 /* After processing the descriptor, assign the values so we can later use them to interpret reports */
 void handle_keyboard_descriptor_values(report_val_t *src, report_val_t *dst, hid_interface_t *iface) {
     const int LEFT_CTRL = 0xE0;
-    keyboard_t *keyboard = get_keyboard(iface, src->report_id);
 
     /* Constants are normally used for padding, so skip'em */
     if (src->item_type == CONSTANT)
         return;
 
-    /* Prevent overwriting more memory than we have */
-    if (iface->num_keyboards >= MAX_KEYBOARDS)
+    /* Each report ID gets its own layout, including mixed 6KRO/NKRO interfaces. */
+    keyboard_t *keyboard = get_or_add_keyboard(iface, src->report_id);
+    if (!keyboard)
         return;
 
     /* Detect and handle modifier keys. <= if modifier is less + constant padding? */
@@ -87,35 +87,9 @@ void handle_keyboard_descriptor_values(report_val_t *src, report_val_t *dst, hid
         keyboard->key_array[src->offset_idx] = (src->data_type == ARRAY);
     }
 
-    /* Handle NKRO, normally size = 1, count = 240 or so, but they are swapped.
-       The bitmap may be split across several usage ranges (Wooting keyboards use four,
-       with padding in between to keep each one byte-aligned), so collect every block
-       instead of keeping only the last one we saw. MAX_NKRO_BLOCKS is 4 and the Wooting
-       declares exactly 4, so there is no headroom: a keyboard splitting its bitmap five
-       ways still loses the last section, silently.
-
-       A block is a run of keyboard usages laid out one per bit, which is what the
-       extraction below needs of it. The modifier is the one small run that also maps one
-       usage per bit, and it is handled above, so leave it out here. Requiring a non-empty
-       range keeps out items that never carried a Usage Minimum/Maximum, where both ends
-       are still zero.
-
-       The one-per-bit test is deliberately exact. Relaxing it to >= would admit the
-       Keychron Ultra-Link (19 00 2A 98 00 with 95 98: 153 usages over 152 bits), whose
-       bitmap is dropped here today - but that keyboard puts a 6KRO collection on report
-       ID 7 and its NKRO one on 0x11, and get_keyboard() collapses both onto a single
-       keyboard_t, because it answers with keyboards[PRIMARY_KEYBOARD] whenever
-       num_keyboards is 1 and num_keyboards can never reach 2 (is_found is only ever set
-       on slot 0). Recording the bitmap therefore sets is_nkro on the entry that also
-       carries report 7's key array, and every 6KRO report on that interface decodes as
-       bitmap bits instead - trading a keyboard that half works for one that does not.
-       Fix the collapse first; relaxing this without it is a regression.
-
-       Whether this keyboard *is* NKRO is then decided on the total width rather than per
-       block. Deciding per block would flag any keyboard carrying a stray keyboard-page
-       bit field - which routes it through _extract_kbd_nkro and leaves its ordinary key
-       array unread - while a per-block threshold big enough to avoid that would drop the
-       8-bit Wooting range and the keys in it. The sum separates the two cleanly. */
+    /* Record one-usage-per-bit NKRO blocks, excluding modifiers. A keyboard's
+       aggregate bitmap width distinguishes NKRO from a stray narrow field.
+       The exact usage-count rule and MAX_NKRO_BLOCKS limit remain unchanged. */
     bool maps_usage_per_bit = src->usage_max > src->usage_min
                               && (src->usage_max - src->usage_min + 1) == (int32_t)src->size;
 
@@ -171,14 +145,6 @@ static uint8_t *get_system_id(hid_interface_t *iface) {
     return &iface->system.report_id;
 }
 
-static uint8_t *get_next_keyboard_id(hid_interface_t *iface) {
-    if (iface->num_keyboards < MAX_KEYBOARDS)
-        return &iface->keyboards[iface->num_keyboards].report_id;
-
-    /* In case we are out of bounds, return the last keyboard's ID */
-    return &iface->keyboards[MAX_KEYBOARDS - 1].report_id;
-}
-
 const process_report_f report_receivers[] = {
     [REPORT_RECEIVER_NONE]     = NULL,
     [REPORT_RECEIVER_MOUSE]    = process_mouse_report,
@@ -231,8 +197,7 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
         {.usage_page   = HID_USAGE_PAGE_KEYBOARD,
          .global_usage = HID_USAGE_DESKTOP_KEYBOARD,
          .handler      = handle_keyboard_descriptor_values,
-         .receiver_id  = REPORT_RECEIVER_KEYBOARD,
-         .get_id       = get_next_keyboard_id},
+         .receiver_id  = REPORT_RECEIVER_KEYBOARD},
 
         {.usage_page   = HID_USAGE_PAGE_CONSUMER,
          .global_usage = HID_USAGE_CONSUMER_CONTROL,
@@ -259,10 +224,18 @@ void extract_data(hid_interface_t *iface, report_val_t *val) {
         bool usage_pages_match   = (val->usage_page == hay->usage_page) || (hay->usage_page == 0);
 
         if (global_usages_match && usages_match && usage_pages_match) {
-            *(hay->get_id(iface)) = val->report_id;
+            /* Keyboard allocation needs the report ID and happens in its handler. */
+            if (hay->get_id)
+                *(hay->get_id(iface)) = val->report_id;
 
             hay->handler(val, hay->dst, iface);
 
+            if (hay->receiver_id == REPORT_RECEIVER_KEYBOARD) {
+                keyboard_t *keyboard = get_keyboard(iface, val->report_id);
+                if (!keyboard->is_found
+                    || (iface->uses_report_id && keyboard->report_id != val->report_id))
+                    continue;  /* Padding-only or over-capacity collections cannot route keys. */
+            }
             iface->report_handler[val->report_id] = hay->receiver_id;
         }
     }
@@ -381,6 +354,10 @@ int32_t extract_kbd_data(
     /* If we're in boot protocol mode, then it's easy to decide. */
     if (iface->protocol == HID_PROTOCOL_BOOT)
         return _extract_kbd_boot(raw_report, len, report);
+
+    if (iface->uses_report_id
+        && (!keyboard->is_found || keyboard->report_id != raw_report[0]))
+        return -1;
 
     /* NKRO is a special case. If extraction fails (descriptor parsed as NKRO but the
        actual report layout doesn't match — e.g. wireless dongles that advertise an NKRO
