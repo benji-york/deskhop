@@ -7,6 +7,14 @@ speed up the UART protocol, or remove any image checks. Firmware already checks
 the received/programmed image; the host also retains independent readback and
 fresh checks on both Picos.
 
+Firmware v0.105 separately adds [negotiated page bursts](testing/batched-transfer-v105.md)
+to reduce peer-transfer round trips. No new host option is needed: the firmware
+negotiates them and falls back to legacy words for an older peer. Installing
+v0.105 onto the prior v0.104 pair propagated at legacy speed; later
+upgrades can use batches when both executing boards already support them.
+Both Picos now run verified v0.105. Its simulated batch speedup remains distinct
+from physical timing: this initial installation did not exercise the batch path.
+
 ## Commands
 
 Run these from the repository root:
@@ -82,13 +90,15 @@ are not silently repaired. Review the evidence instead of blindly retrying.
    evidence. Stage private per-run image copies and recheck them before writing.
    Check Mac media clients and both running Pico identities/core freshness.
 2. Send the local `bootloader A` or `bootloader B` command exactly once, retaining
-   DTR/the serial connection through its complete response and ROM enumeration.
+   the serial context through its complete response, ROM enumeration, every
+   backup/load/readback operation and the normal application reboot.
    Confirm the selected flash UID and **disk-free PICOBOOT only**.
 3. Back up the full 256 KiB firmware slot and all 4,096 saved-settings bytes.
    Validate the old image and version, then load the UF2 with picotool verification.
 4. Independently read the complete firmware slot and saved settings. Require an
    exact image match and byte-for-byte unchanged settings. Only then request a
-   normal application reboot.
+   normal application reboot. Close the old serial context before waiting for
+   the application port and opening a fresh diagnostic session.
 5. Watch peer propagation with bounded status polling, checking identities,
    executing versions/boot CRCs, new boot sessions and both-core progress.
 6. Check help, two progressing statuses, history, and three fresh full-slot
@@ -107,6 +117,24 @@ ROM must expose exactly one active PICOBOOT vendor interface, with no storage
 interface. This protects the Mac from the previously observed ROM-storage panic.
 There is no `picotool reboot -u`, mounted-volume copy, fallback port selection,
 automatic retry, power cycle, or safety-check bypass.
+
+Keeping the old CDC descriptor alive matches a successful held-open diagnostic,
+but a later patched attempt still failed: it is not a proven timeout fix. No further
+CDC commands are sent after bootloader entry. Context-manager cleanup runs on
+success and every exception, before any fresh application console opens. The
+already-ROM path opens no initial CDC session. Best-effort cleanup errors for
+the departed device are retained as `bootloader_console_cleanup_errors` in the
+result journal; they do not turn a failed read/load into permission to continue.
+
+The Mac backend now sets `LIBUSB_DEBUG=4` only in stock picotool subprocesses.
+This uses libusb's supported diagnostic setting, not a custom picotool build
+or transport. Parent environment and unrelated commands are unchanged. The
+existing per-command log retains combined stdout/stderr, with the usual
+timeout and 4 MiB post-command output check. `commands.json` records only
+`environment_overrides: {"LIBUSB_DEBUG": "4"}`, never the ambient environment.
+The controlled validation and a real upgrade using this setting passed the
+ROM operations. Final both-board checks passed in a separate read-only run
+after an initial busy verdict. Do not infer a proven timing mechanism.
 
 ## Evidence, timeouts and failures
 
@@ -168,8 +196,86 @@ the runbook's first-live-run record for evidence. Serial bootloader entry,
 upload, reboot and propagation through this new host workflow still need physical
 acceptance. The deployed v0.104 firmware remains untouched.
 
+An authorized v0.105 attempt later that day successfully exercised the serial
+acceptance reply, disk-free ROM enumeration and exact-A identity check, but its
+first backup read failed with RP2040 `unknown error` before any flash write.
+A separately journaled normal reboot of the unchanged image also timed out;
+A's serial port remained absent. See the runbook's latest-state section and
+`build/updater/runs/20260915T212614Z-_c8duiu_/` for the stopped run and restoration
+evidence. Manual power cycling and fresh health checks are required; the tool's
+actual upload/propagation path remains physically unvalidated. No backup or
+verification check was bypassed to continue the upgrade.
+
+After Benji manually power-cycled DeskHop, read-only verification run
+`build/updater/runs/20260915T220007Z-qzl7nu4h/` passed both-board v0.104
+identity/core/history checks and the full correct/wrong/correct CRC sequence.
+Both images still match `befb208b`; recovery is firmware-verified, without any
+flash retry. The serial-ROM failure still needs investigation before another
+upgrade attempt.
+
+A subsequent explicitly authorized retry with the same frozen candidate
+reproduced the first-backup failure, again before any write:
+`build/updater/runs/20260915T220516Z-amquptwe/`. No further software reboot or
+flash attempt followed. A again requires a manual power cycle; recovery from
+the earlier attempt must not be mistaken for recovery from this second one.
+
+Benji then completed that second power cycle. Read-only run
+`build/updater/runs/20260915T220738Z-ft35ai_x/` passed all both-board v0.104
+identity/core/history and CRC checks in 5.434 seconds. Current firmware health
+was verified again without another flash during that recovery check.
+
+A subsequent authorized no-flash test retained the old CDC descriptor through
+the same ROM identity/full-slot backup sequence and normal application reboot:
+`build/updater/runs/cdc-hold-open-once-20260915/`. The backup passed in 0.565
+seconds and matched all 262,144 v0.104 bytes. Reboot succeeded, then both-board
+verification passed in 5.494 seconds. This supports changing the maintained
+updater's descriptor lifetime; it is not yet a production fix or a successful
+v0.105 deployment. Debug logging was enabled during the successful save, so
+one trial does not isolate the exact mechanism. No flash write was issued.
+The proposed change must preserve all existing safety gates, bounded commands,
+single-attempt semantics and cleanup on every exit path.
+
+The lifetime change was then implemented and passed 103 host updater tests,
+including A/B success/failure cleanup and no-retry assertions. Its authorized
+unattended attempt `build/updater/runs/20260915T223711Z-v03u3cwe/` nevertheless
+failed at the same first backup in 10.103 seconds, exit 157, despite retaining
+CDC. No write or reboot followed, and A's normal serial port was absent. Manual
+power cycling plus fresh v0.104 verification was required. The prior successful
+diagnostic enabled libusb debug logging during save; possible timing effects
+are still unproven. Do not treat CDC retention alone as a working remediation,
+or the 103 simulated contracts as proof of physical ROM/USB behavior.
+
+After another power cycle, both-board v0.104 verification passed. Benji chose
+the supported stock-tool environment setting instead of owning a custom
+picotool. All 105 updater tests passed (`build/updater/stock-debug-tests.log`),
+covering environment isolation, journal privacy, debug output parsing and the
+existing failure/timeout/no-retry contracts.
+
+No-flash run `build/updater/runs/stock-debug-once-20260916/` then passed in 8.974
+seconds using the maintained backend. In one ROM visit, two complete firmware
+reads matched the accepted v0.104 image byte-for-byte (0.568 and 0.552 seconds),
+and both 4,096-byte settings reads matched. Normal application reboot succeeded
+in 0.021 seconds, with CDC retained until then; fresh both-board verification
+passed in 5.606 seconds. There was no load/erase/firmware write or retry.
+Debug was enabled for all picotool children, including identity and reboot.
+This validated the combined no-write workflow, not the cause or the then-unexercised
+load/upgrade path. v0.105 was still uninstalled at this stage.
+
+The subsequent authorized deployment,
+`build/updater/runs/20260916T003027Z-v6d93apw/`, successfully performed backup,
+stock-tool load/verify, exact full-slot readback, unchanged settings, normal A
+reboot and automatic B propagation/reboot. B's prior v0.104 receiver used legacy
+transfer; peer wait/settle took 37.659 seconds. The final check conservatively
+stopped on A `UNVERIFIED busy` (B PASS), not a checksum mismatch. The original
+run remains recorded as failed at `verifying_both` after 46.903 seconds.
+Separate read-only verification
+`build/updater/runs/20260916T003133Z-r795gjiq/` passed all both-board checks in
+5.901 seconds, with no repeated flash or reboot. Both Picos now run v0.105,
+CRC `e4843d6a`, boot CRC `6bffee14`; user input acceptance remains pending.
+
 The improvement is eliminating manual pauses between already-tested steps and
 reusing unchanged prepared images. Previous retained evidence shows roughly
-36 seconds for peer propagation; this tool does not reduce that UART transfer
-time. New per-phase timings will quantify the end-to-end improvement after a
-separately authorized hardware run.
+36 seconds for peer propagation; the host tool alone does not reduce that UART
+transfer time. The separate v0.105 batch protocol targets that component.
+The successful initial deployment's timings above include the older receiver;
+a future separately authorized upgrade can measure new/new batch performance.

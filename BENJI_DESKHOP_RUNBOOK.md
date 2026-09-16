@@ -8,7 +8,333 @@ README.
 
 Snapshot: 2026-09-15
 
-## Repository-owned updater (host implementation; hardware acceptance pending)
+## Latest hardware state: v0.105 deployed to both Picos and separately verified
+
+Benji authorized the upgrade using stock picotool with child-only
+`LIBUSB_DEBUG=4`. Fresh host validation passed all 105 updater tests. The frozen
+candidate `build/releases/deskhop-v0.105-__6cn3kp/manifest.json` was revalidated;
+firmware/build inputs match its deep-tested snapshot exactly. Only the three
+host updater modules and two host test files differ from that archive. No
+custom picotool, new firmware build, or safety-check bypass was used.
+
+Flash evidence: `build/updater/runs/20260916T003027Z-v6d93apw/`. A's full-slot
+backup and settings backup passed, stock picotool load/verify succeeded in
+3.889 seconds, all 262,144 firmware bytes independently matched the candidate,
+and all 4,096 saved-settings bytes were unchanged. A rebooted normally. B
+automatically received all bytes, reached `reboot_pending`, rebooted into
+v0.105 and showed progressing cores, without cable movement or power cycling.
+The host's peer-wait/settle phase took 37.659 seconds; this was the expected
+legacy v0.104 receiver path, not a physical measurement of new/new batch speed.
+
+The flash run conservatively stopped during final diagnostics because A's
+first scan returned `UNVERIFIED busy`; B returned PASS. Its failure record is
+preserved, not relabeled successful. A separate **read-only** verification run,
+`build/updater/runs/20260916T003133Z-r795gjiq/`, then passed in 5.901 seconds:
+both exact UIDs/builds, full-slot CRC `e4843d6a`, metadata/boot CRC `6bffee14`,
+correct/wrong/correct scans returning PASS/FAIL/PASS on both boards, stable
+image generations and boot sessions, advancing cores, histories and Mac media.
+No additional flash or reboot was requested. Current boot sessions are A
+`1959d12ac276c3ae`, B `dbf0ebfa7b2023cf`.
+
+Both Picos are now firmware-verified on v0.105. Physical typing, trackball,
+keyboard-generated right-click and bidirectional switching acceptance remain
+for Benji. The stock-tool debug invocation worked for this deployment; the
+underlying prior USB timeout mechanism is not proven. The completed work is
+published on `main`; `codex/batched-firmware-transfer` preserves the development
+tip. Firmware batching is committed as `0245392`, and the tested host workflow
+as `07fa0b4`. Do not resume the declined custom-picotool proposal.
+
+The completed branches form a linear dependency chain: hardware-free testing,
+keyboard-state recovery, UART integrity and the v0.102 release, the Bootloader
+button fix, serial bootloader commands, the reusable updater, then v0.105 batch
+transfers and the stock-tool host workaround. `main` includes this chain by
+fast-forward, without replaying or duplicating its commits.
+
+Work deliberately left separate:
+
+- `codex/configuration-validation` has uncommitted work in its own worktree and
+  no unique completed commit; broad reboot-safety work is also unfinished.
+- The selective/replay upstream integration branches are superseded comparison
+  alternatives, not outstanding fixes.
+- Newly fetched upstream `bff4d0c` adds keyboard-collection, USB DPRAM and config
+  UI changes beyond the integrated `ce8abb6`. Reconcile and validate these in a
+  separate release rather than changing the hardware-verified v0.105 source.
+
+The following recovery/attempt sections are chronological evidence. Their
+then-current health and deployment observations are superseded by the latest
+verified hardware state above; they are not instructions to repeat an old run.
+
+### Stock-picotool no-flash validation preceding deployment
+
+Benji rejected maintaining custom picotool code and approved driving the stock
+tool differently. The existing Mac backend now injects `LIBUSB_DEBUG=4` only
+into picotool child environments, logs that one override (not ambient values),
+and retains stdout/stderr in its normal bounded-command evidence files. No
+custom binary, library, persistent transport helper, package or driver was
+introduced. All 105 updater tests passed; see
+`build/updater/stock-debug-tests.log`.
+
+One authorized no-flash validation completed successfully:
+`build/updater/runs/stock-debug-once-20260916/`, via the one-shot evidence helper
+`build/updater/validate_stock_debug_once.py`. It used the maintained backend and
+the production preflight sequence (one status, then help), with no added pause.
+Both 262,144-byte firmware reads matched the accepted v0.104 image exactly,
+CRC `befb208b` (0.568 and 0.552 seconds); both 4,096-byte settings reads had SHA256
+`aa816af793193a7ce487d391b49bf45d514dde09bd77d28255eb782e82a85464`.
+One normal reboot succeeded in 0.021 seconds; the obsolete CDC descriptor was
+held until then and closed before fresh diagnostics. Both-board verification
+passed in 5.606 seconds; total experiment 8.974 seconds. No firmware/settings
+write, load, erase or retry was issued. Both Picos were healthy on v0.104 at this
+stage; physical input acceptance remained separate.
+
+This is a successful validation of the stock-tool no-write workflow, not proof
+that logging fixes every timeout or an accepted firmware upgrade. Debug was
+enabled for identity/save/reboot as a combined change. A real v0.105 load and
+peer propagation with this invocation were still untested at this stage; the
+deployment recorded above subsequently passed independent verification. The
+frozen v0.105 candidate was unchanged. Do not resume the custom
+picotool/pacing proposal below without a new user decision.
+
+### Recovery preceding the stock-tool validation
+
+Benji completed another power cycle after the patched attempt below. Read-only
+verification `build/updater/runs/20260916T000419Z-cv3rgdbb/` passed in 5.446
+seconds: both exact identities, v0.104/boot CRC `4f648cd9`, advancing cores,
+history and fresh correct/wrong/correct full-slot scans. Both images still match
+CRC `befb208b`. Boot sessions are A `c7ced18ff6f25b72` and B `997372ae080c1dd3`.
+No reboot or firmware write was requested. This supersedes the recovery-needed
+state below; physical input acceptance remains separate.
+
+Read-only upstream research found no exact matching published fix. A candidate
+considered, then declined by Benji in favor of stock-tool configuration, was
+host-side PICOBOOT command pacing after completed ACKs,
+with opcode/token and underlying USB error logging. The successful debug-enabled
+read suggests timing sensitivity within picotool, not a confirmed cause. The
+official ROM resumes the command endpoint from its ACK-completion callback;
+its status flag becomes not-busy earlier, so status polling is not an ACK
+substitute. See [official ROM command handling](https://github.com/raspberrypi/pico-bootrom-rp2040/blob/master/bootrom/usb_boot_device.c).
+It was not implemented or accepted. No further bootloader command or flash was
+issued during that read-only investigation; the later stock-tool validation is
+recorded above.
+
+### Prior patched updater attempt: failed before writing
+
+Benji approved the CDC-lifetime patch and an unattended flash when ready.
+`make test-updater` passed all 103 host tests; the new A/B lifecycle and
+seven-stage failure matrix verify connection retention, cleanup, no retries,
+already-ROM/current paths and error preservation. Log:
+`build/updater/cdc-lifetime-tests.log`. An independent review found no safety
+blocker. The frozen v0.105 candidate and its complete firmware/build inputs
+still match the earlier 52-step deep validation; only the two host updater
+files and host regression test file differ from that archive. The old deep run
+does not claim to validate the new host code.
+
+The authorized patched attempt, `build/updater/runs/20260915T223711Z-v03u3cwe/`,
+again reached exact-A disk-free ROM and passed the identity check. Despite the
+old CDC context remaining open, its first full-slot backup failed after
+10.103 seconds with RP2040 `unknown error`, exit 157. The entire run lasted
+10.768 seconds, stopped at `backing_up`, and records `write_started=false` and
+`reboot_requested=false`. No firmware/settings write, load, propagation or
+software restoration was attempted. A's expected serial port is absent;
+another manual power cycle and fresh v0.104 verification are needed when Benji
+returns. Do not confuse the preceding successful recovery with current health.
+
+**CDC retention alone is not a sufficient fix.** The successful diagnostic also
+enabled `LIBUSB_DEBUG=4` for save and used an extra status/pause before bootloader
+entry. Transport timing/logging remains an unproven lead, not a reason to
+blindly retry or enable a supposed workaround. No further device commands were
+issued after this failure. The host patch is retained as an unaccepted change,
+not described as a resolved flashing bug. Both flash images remain v0.104; A's
+normal execution is currently unverified/offline. v0.105 remains uninstalled.
+
+### Previous held-open serial test (succeeded with USB debug logging)
+
+Benji authorized one controlled no-flash bootloader read. The one-shot helper
+`build/updater/diagnose_cdc_hold_open.py` retained the old CDC descriptor through
+the same identity check and full-slot save used by the failed updater. Evidence:
+`build/updater/runs/cdc-hold-open-once-20260915/`. The 262,144-byte read succeeded
+in 0.565 seconds and matched the frozen v0.104 image byte-for-byte, CRC
+`befb208b`. With CDC still open, one normal application reboot succeeded in
+0.021 seconds. After closing the old descriptor, fresh both-board verification
+passed in 5.494 seconds. Total experiment time: 8.521 seconds. No firmware or
+settings write was made, and no command was retried. Physical input acceptance
+remains separate; both firmware images are verified healthy on v0.104.
+
+This supports the CDC-cleanup timing hypothesis, but one successful trial is
+not proof of its precise mechanism. `LIBUSB_DEBUG=4` was enabled during the save
+to capture transport evidence, so diagnostic timing is another caveat. Cleanup
+after application reboot reported `Device not configured` for DTR drop,
+terminal restore and exclusive-release ioctls against the obsolete descriptor;
+closing it completed and fresh diagnostics worked. Benji then approved patching
+the maintained updater and an unattended upgrade retry after regression tests.
+The implementation now retains the initial CDC context through all ROM
+operations and normal reboot, closes before reopening diagnostics, and records
+cleanup errors. The already-ROM path remains serial-free until application
+reboot. The subsequent attempt above shows that this change alone is insufficient.
+
+### Verified recovery before the controlled test
+
+Benji completed the second manual power cycle. Read-only verification run
+`build/updater/runs/20260915T220738Z-ft35ai_x/` passed in 5.434 seconds. Both
+Picos execute v0.104, both full-slot CRCs remain `befb208b`, metadata CRCs remain
+`4f648cd9`, and correct/wrong/correct scans returned PASS/FAIL/PASS on both
+boards. All four cores progressed; history and unchanged active/nonbusy media
+checks passed. New boot sessions: A `c99a295510504aef`, B `bd4c9372ee70a87e`.
+No reboot or flash was issued during this recovery check. Physical input
+acceptance remains separate. The controlled test above followed this recovery.
+
+### Second flash attempt: repeat backup failure
+
+After the successful recovery check below, Benji explicitly requested another
+flash attempt without further confirmation. The same frozen v0.105 candidate
+was retried once. Run `build/updater/runs/20260915T220516Z-amquptwe/` again
+confirmed healthy v0.104 identities, accepted one serial `bootloader A`, and
+verified exact-A disk-free ROM with unchanged Mac media. Its first full-slot
+backup read again returned RP2040 `unknown error` (exit 157, about 10.10 seconds).
+The run stopped at `backing_up`, with `write_started=false` and no application
+reboot requested. No firmware/settings write, load, propagation or bypass
+occurred. No additional software restoration was tried: that operation had
+already timed out after the first identical failure.
+
+A did not return to its expected serial port after this second attempt; the
+manual power cycle and verification above subsequently restored it. v0.105
+remains uninstalled. Investigate the repeatable ROM backup/USB handoff failure
+before another flash attempt.
+
+### Verified recovery between the two attempts
+
+Benji manually power-cycled both sides after the failure below. A subsequent
+read-only `make verify` using the frozen v0.104 manifest passed in 5.564 seconds:
+both physical identities matched, both executing builds are v0.104, all four
+cores progressed, and full-slot correct/wrong/correct CRC scans produced
+PASS/FAIL/PASS on both boards with measured CRC `befb208b`. Boot metadata CRC
+remains `4f648cd9`. Both Picos have new boot sessions: A `c3a0049509bcbb8f`,
+B `874fb96114d69bf9`. History and unchanged active/nonbusy Mac media checks
+passed. No firmware write or reboot command was issued during verification.
+Evidence: `build/updater/runs/20260915T220007Z-qzl7nu4h/result.json`.
+Firmware recovery is verified; physical typing/buttons/switching acceptance
+is still for Benji to confirm. This recovery preceded the retry recorded above.
+
+### Stopped v0.105 attempt and failed software restoration
+
+Benji authorized an unattended flash of the frozen v0.105 candidate. The new
+host workflow correctly checked both v0.104 identities/core progress and sent
+one `bootloader A` command. The complete acceptance reply arrived; physical A
+(`E6654854574C3E30`) enumerated as disk-free ROM, and picotool identified its
+existing DeskHop image. The first full-slot backup read then failed after
+10.175 seconds with RP2040 `unknown error` (exit 157). No load command or
+firmware/settings write occurred. v0.105 was **not deployed**.
+
+Evidence: `build/updater/runs/20260915T212614Z-_c8duiu_/result.json`, serial
+transcript, `commands.json`, and `009-firmware-before.log`. This was the same
+save-command shape used by the previously successful v0.104 helper; the cause
+is not established. Do not label a ROM read failure as image corruption.
+
+To avoid leaving input offline, a separately journaled, single normal application
+reboot was attempted after fresh unchanged-media, disk-free-ROM and exact-A-UID
+checks. It also timed out after 10 seconds. A's expected serial port
+`/dev/cu.usbmodem21203` remained absent. Recovery evidence is under
+`restore-unchanged/` in that run, with its one-shot `restore_unchanged.py` beside
+the original logs. There was no reboot retry, ROM-storage entry, firmware write,
+or continued flashing after either failure. A is expected to retain its v0.104
+image; no post-failure full readback was obtained. B was not rebooted or upgraded
+by this attempt. Neither normal
+execution nor input recovery is claimed after the failed restoration.
+
+The requested manual power cycle and subsequent health checks are now complete,
+as recorded above. Investigate the serial-ROM read/reboot failure before another
+upgrade. Do not blindly rerun the failed workflow or the one-shot restoration
+helper.
+
+Initial read-only comparison identified two leads; the ROM-source review below
+subsequently rejected the simple retained-lock explanation:
+
+- The previously used v0.103 keyboard handler (`216a7f8`) entered ROM directly.
+  v0.104 wraps keyboard and serial entry in `firmware_update_lock()`. The SDK
+  critical-section implementation holds a hardware spinlock and disables local
+  interrupts. Serial entry runs on core 0, keyboard entry on core 1. Current
+  v0.104 keyboard entry therefore shares an unproven handoff condition and must
+  not be assumed a known-good fallback. The SDK delegates reset to ROM; its
+  internals were not inspected, so retained lock/interrupt state is not yet
+  established as the cause.
+- The new host workflow keeps its CDC descriptor open through ROM enumeration
+  and initial identity inspection, then drops DTR/restores terminal settings/
+  closes the descriptor before backup. Previous keyboard-triggered flashing
+  had no such live CDC handle. A host USB lifecycle interaction is another
+  hypothesis, not a diagnosis.
+
+No firmware fix or controlled handoff experiment followed this comparison. The
+later user-authorized unchanged retry reproduced the same backup failure.
+
+### ROM-source review after second recovery
+
+Official Raspberry Pi B2 ROM source shows that
+[`reset_usb_boot()`](https://github.com/raspberrypi/pico-bootrom-rp2040/blob/master/bootrom/bootrom_main.c)
+schedules a watchdog reboot into a USB wrapper. Its
+[watchdog implementation](https://github.com/raspberrypi/pico-bootrom-rp2040/blob/master/usb_device_tiny/runtime.c)
+resets both processors and SIO, not just application control flow. The held
+firmware spinlock and interrupt mask therefore do not simply survive into
+BOOTSEL. The [ROM task queue](https://github.com/raspberrypi/pico-bootrom-rp2040/blob/master/bootrom/async_task.c)
+does not use a hardware spinlock; PC_REBOOT also follows a separate direct
+dispatch path. Do not remove updater exclusion or force-clear locks as a
+speculative fix. This is source analysis, not a dump of the physical chip ROM.
+
+The host-lifecycle lead remains unproven: the first identity read succeeds while
+the old CDC descriptor is still open, and the next command fails after cleanup
+closes it. In [picotool 2.3.1](https://github.com/raspberrypi/picotool/blob/2.3.1/main.cpp),
+connection/model setup precedes opening the backup file and printing save
+progress. Neither failed run produced that file or progress, so the failure
+appears to precede the full-image data loop. Its approximately 10-second duration
+matches the [transport's default transfer/ACK timeout](https://github.com/raspberrypi/picotool/blob/2.3.1/picoboot_connection/picoboot_connection.c),
+but logs do not identify the failing low-level command.
+
+This review proposed a separately agreed, bounded, no-flash ROM read with more
+detailed transport evidence and a change to CDC-close ordering. Retaining the
+old descriptor through the read preserves the accepted reply's DTR lifetime
+while testing the current info/close/save boundary. Benji subsequently approved
+that experiment; its successful result is recorded at the top of this runbook.
+A lifecycle change was subsequently implemented, but the latest attempt above
+did not validate it as a fix; the precise cause remains unresolved.
+
+## Deployed v0.105: batched peer firmware transfer
+
+The reusable host updater was committed as `2509929` and pushed to
+`origin/codex/reusable-updater`. The next feature is on its child branch,
+`codex/batched-firmware-transfer`: negotiated 256-byte page bursts replace
+four-byte request/response exchanges when both executing peers support them.
+UART-v1 framing, configuration format 10, saved settings and QMK are unchanged.
+
+See the [v0.105 implementation and test record](docs/testing/batched-transfer-v105.md)
+for the wire protocol, fallback, source/receiver ownership and coverage limits.
+Each page must pass its own CRC before programming, and the existing whole-image
+checks and host readback/fresh verification remain mandatory. Keyboard/mouse
+traffic takes priority over the background stream. Batch pages are committed
+before requesting another burst so flash pauses cannot fill the 1 KiB RX ring
+with the next page. Failed pages retry with fresh tags and can fall back to
+the legacy word protocol without committing incomplete data.
+
+**The first v0.104-to-v0.105 propagation still uses legacy speed**, because the
+receiving Pico is executing v0.104 until it reboots. Subsequent upgrades with
+both boards starting at v0.105 can use batches. The normal paired simulation
+measured 17.405 seconds versus 49.200–49.380 seconds for mixed-version transfers;
+these are model measurements, not physical-board timing promises.
+
+Both Picos now execute the frozen v0.105 candidate and have passed separate
+read-only verification, as recorded in the latest-state section. The first
+installation used legacy transfer; actual new/new batch-transfer performance
+and Benji's physical input acceptance remain unmeasured. Historical failed
+attempts and recoveries above must not be confused with current hardware state.
+
+Final offline acceptance passed all 52 deep-tier steps and ARM configuration/
+build. `make flash-plan TEST_TIER=deep` reused the frozen candidate at
+`build/releases/deskhop-v0.105-__6cn3kp/manifest.json`, full-slot CRC `e4843d6a`
+and metadata image CRC `6bffee14`. Its manifest binds the uncommitted branch
+snapshot, not just base commit `2509929`. The linked record includes hashes
+and selected source-coverage results. No hardware was accessed during candidate
+preparation. The later authorized deployment and separate successful
+verification are recorded above.
+
+## Repository-owned updater (deployed; fresh verification required after busy)
 
 Use the root Makefile and `scripts/update_firmware.py` for future upgrades;
 release-specific scripts under `build/flashing/` are retained historical evidence,
@@ -28,11 +354,12 @@ migration, not this automatic workflow.
 
 Evidence is retained under `build/releases/` and `build/updater/runs/`; checks and
 settings backups are not traded away for speed. Preparation can reuse the same
-validated candidate when inputs are unchanged. Firmware sources/version, QMK,
-and the deployed pair are unchanged by this host-only work. Actual flashing and
-serial-command hardware acceptance remain pending; offline test doubles are not
-evidence of physical USB/ROM behavior. Ask Benji to check normal input after any
-future successful device verification.
+validated candidate when inputs are unchanged. The v0.105 deployment exercised
+serial entry, backups, load/readback, settings preservation, reboot and automatic
+propagation. A conservative busy verdict stopped that run's final diagnostics;
+separate read-only verification then passed. Offline test doubles alone are
+not evidence of physical USB/ROM behavior. Ask Benji to check normal input after
+successful device verification; do not treat busy as a CRC pass.
 
 Host-only validation on 2026-09-15 passed all 99 updater tests, all 40 fast-tier
 steps, ARM configuration/build, default Make help, and hardware-free preview.
@@ -523,7 +850,7 @@ PIO USB timing. See the [validation record](docs/testing/validation.md).
 
 | Component | Local repository | Remote | Source / verified state |
 | --- | --- | --- | --- |
-| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.92 with upstream `ce8abb6` merged; seven native suites and ARM build pass. Flashed 2026-09-14; basic input checks reported normal. Peer version not independently read back. |
+| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.105 with upstream `ce8abb6` integrated. Both Picos freshly verified at full-slot CRC `e4843d6a`; deep tests, 105 host-updater tests and ARM build pass. See the latest deployment record above for physical acceptance and timing limits. |
 | Sofle/QMK | `/Users/benji/qmk_firmware` | `git@github.com:benji-york/qmk_firmware.git` | `master` at `469f5dc815` (`Map DeskHop reboot to Layer 3 Q`) |
 | Physical carrier project | n/a | [jfedor2/screen-hopper](https://github.com/jfedor2/screen-hopper) | The installed two-Pico board shown in the setup photo |
 
@@ -544,7 +871,8 @@ The hardware-verified auto-start build is:
 
 - `/Users/benji/Documents/Codex/2026-08-13/i/outputs/deskhop-v0.91-auto-start-jitter.uf2`
 
-The v0.92 build flashed on 2026-09-14 is:
+The v0.92 build flashed on 2026-09-14 was produced at this mutable build path
+(which does not necessarily still contain that image):
 
 - `/Users/benji/Documents/ChatGPT/DeskHop/build/deskhop.uf2`
 
@@ -558,8 +886,10 @@ basic deployment smoke test, not an independent readback of both Pico versions.
 Extended v0.92 zoom assist, timed jitter, and coordinated reboot tests have not
 yet been recorded.
 
-The main snapshot builds v0.92; Pico A now runs the test-framework branch's
-v0.94 described above. To reproduce hardware-verified v0.91,
+The current `main` snapshot builds v0.105, which both Picos now execute; the
+v0.92/v0.94 notes above describe earlier deployments. The deployed v0.105 frozen
+manifest is `build/releases/deskhop-v0.105-__6cn3kp/manifest.json`.
+To reproduce hardware-verified v0.91,
 use commit `c1e9420` or its archived binary. For the older hardware-tested v0.90
 state, use commit `6d1cd12` or its archived binary.
 
