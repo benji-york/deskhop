@@ -7,23 +7,23 @@ speed up the UART protocol, or remove any image checks. Firmware already checks
 the received/programmed image; the host also retains independent readback and
 fresh checks on both Picos.
 
-`main` and both physical Picos now use accepted v0.106: the
-[v0.105 batch implementation](testing/batched-transfer-v105.md) with only a
-version bump to exercise a new/new transfer. Automatic propagation and fresh
-verification passed, and Benji confirmed normal input behavior. Its measured
-speed does not establish batch use or acceleration. See the
-[v0.106 hardware record](testing/batched-transfer-hardware-v106.md). Publication
-does not reflash the devices; same-version replacements and downgrades remain
-refused by the updater.
+The current accepted release is [v0.109 configuration validation](testing/configuration-validation-v109.md).
+Both physical Picos passed automatic propagation and fresh firmware verification;
+after returning from AFK, Benji confirmed "Looks good; please merge and push"
+following the requested input, switching and config-page checks. This authorizes
+publication of the hardware-tested source. The earlier
+[v0.108 hardware record](testing/verification-contention-v108.md) is retained as
+history. Publication does not reflash the devices; same-version replacements and
+downgrades remain refused by the updater.
 
 The subsequent v0.107 attempt failed at the first ROM backup, before any write.
 After power cycling, both v0.106 images passed a fresh CRC scan, but the complete
 verification sequence remained unsuccessful because A intermittently reported
-post-scan `busy`. These are separate failures. The unpublished
+post-scan `busy`. These are separate failures. The subsequently deployed
 [v0.108 firmware repair](testing/verification-contention-v108.md) addresses the
 verification contention; the [USB timeout investigation](testing/rom-backup-timeout-investigation.md)
-identifies a failed initial exclusive-access ACK and proposes a no-flash
-experiment, not a proven transport fix. Current deployment safety gates and
+records subsequent successful no-flash experiments, not a proven transport fix.
+Current deployment safety gates and
 stock-picotool invocation remain unchanged. The `verify` CLI prints a diagnostic-
 only plan; it does not perform the ROM-entry/load steps used by `flash`.
 
@@ -91,7 +91,7 @@ verdict separate; physical input acceptance and new/new batch timing are not
 established by those checks. All 105 host updater tests pass.
 
 The older deployment narratives below retain historical outcomes; the current
-v0.106 status and acceptance above supersede their then-current statements.
+status and acceptance above supersede their then-current statements.
 
 ## Commands
 

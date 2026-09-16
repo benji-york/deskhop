@@ -3,6 +3,25 @@ const configReportLength = 12;
 const jitterMode = 2;
 const disabledMode = 0;
 const screensaverModeKeys = [19, 49];
+const configTimeMax = 0xffffffffffffn; // Six value bytes fit the peer SET route.
+const configFieldRules = {
+  71: [0n, 1n], 72: [0n, 1n], 73: [0n, 1n], 74: [0n, 255n],
+  75: [0n, 1n], 76: [0n, 1n], 77: [0n, 65535n], 83: [0n, 4294967295n]
+};
+for (const base of [10, 40]) {
+  const rules = {
+    1: [1n, 2147483647n], 2: [1n, 128n], 3: [1n, 128n],
+    4: [0n, 32766n], 5: [1n, 32767n],
+    6: [1n, 255n, [1n, 2n, 3n, 4n, 255n]], 7: [1n, 2n],
+    8: [0n, 3n, [0n, 1n, 3n]], 9: [0n, 2n], 10: [0n, 1n],
+    11: [0n, configTimeMax], 12: [0n, configTimeMax]
+  };
+  for (const [offset, rule] of Object.entries(rules))
+    configFieldRules[base + Number(offset)] = rule;
+}
+const borderKeys = [14, 15, 44, 45];
+const pendingConfigReads = new Map();
+let configWriteQueue = Promise.resolve();
 var device;
 
 const packetType = {
@@ -41,6 +60,8 @@ function makeReport(type, payload, proxy=false) {
   const dataOffset = proxy ? 4 : 3;
   const bytes = payload ? [...payload] : [];
   const capacity = proxy ? 7 : 8;
+  if (bytes.some(value => !Number.isInteger(value) || value < 0 || value > 255))
+    throw new RangeError('Configuration payload must contain bytes');
   /* The proxy consumes one of the payload bytes for its command. Existing
      packValue returns eight bytes, so only zero padding may be discarded. */
   if (bytes.slice(capacity).some(value => value !== 0))
@@ -69,7 +90,7 @@ function timerMicroseconds(seconds) {
   if (!parts)
     throw new RangeError('Enter nonnegative seconds with at most 6 decimal places.');
   const value = BigInt(parts[1]) * 1000000n + BigInt((parts[2] || '').padEnd(6, '0'));
-  if (value > 0xffffffffffffn)
+  if (value > configTimeMax)
     throw new RangeError('The maximum writable timer is 281474976.710655 seconds.');
   return value;
 }
@@ -79,54 +100,52 @@ function timerSeconds(microseconds) {
   return (microseconds / 1000000n).toString() + (fraction ? '.' + fraction : '');
 }
 
-function validateTimerChange(element) {
-  if (!isScaledTimer(element))
-    return true;
-  /* Larger fetched values may still be retained; an unchanged Save must never
-     overwrite them with a narrowed representation. */
-  try {
-    if (element.getAttribute('fetched-value') !== getValue(element))
-      timerMicroseconds(element.value);
-    element.setCustomValidity('');
-    return true;
-  } catch (error) {
-    element.setCustomValidity(error.message);
-    element.reportValidity();
-    return false;
-  }
+function configurationInteger(value) {
+  const text = String(value).trim();
+  if (!/^-?\d+$/.test(text))
+    throw new RangeError('Enter a whole decimal number');
+  return BigInt(text);
 }
 
-function packValue(element, key, dataType, buffer) {
-  const dataOffset = 1;
-  var buffer = new ArrayBuffer(8);
-  var view = new DataView(buffer);
+function configurationLabel(key) {
+  const element = document.querySelector(`.api[data-key="${key}"]`);
+  const name = element?.getAttribute('aria-label') || 'Configuration value';
+  const output = key >= 11 && key <= 22 ? 'Output A: ' : key >= 41 && key <= 52 ? 'Output B: ' : '';
+  return output + name;
+}
 
-  const methods = {
-    "uint32": view.setUint32,
-    "uint64": view.setUint32, /* Unscaled legacy fields retain their encoding. */
-    "int32": view.setInt32,
-    "uint16": view.setUint16,
-    "uint8": view.setUint8,
-    "int16": view.setInt16,
-    "int8": view.setInt8
-  };
+function validateConfigurationValue(key, value) {
+  const rule = configFieldRules[key];
+  if (!rule)
+    throw new RangeError('Unknown or read-only configuration value');
+  if (value < rule[0] || value > rule[1] || (rule[2] && !rule[2].includes(value)))
+    throw new RangeError(`${configurationLabel(key)}: enter ${rule[2] ? rule[2].join(', ') : `${rule[0]} to ${rule[1]}`}`);
+  return value;
+}
 
-  if (isScaledTimer(element)) {
-    let value = timerMicroseconds(element.value);
-    for (let offset = dataOffset; offset < buffer.byteLength; offset++) {
-      view.setUint8(offset, Number(value & 0xffn));
-      value >>= 8n;
-    }
-  } else if (dataType in methods) {
-    const method = methods[dataType];
-    if (element.type === 'checkbox')
-      view.setUint8(dataOffset, element.checked ? 1 : 0, true);
-    else
-      method.call(view, dataOffset, element.value, true);
+function configurationValue(element) {
+  return isScaledTimer(element) ? timerMicroseconds(element.value) : configurationInteger(getValue(element));
+}
+
+function packValue(element, key, dataType) {
+  const widths = {uint8: 1, int8: 1, uint16: 2, int16: 2, uint32: 4, int32: 4, uint64: 7};
+  if (!Object.hasOwn(widths, dataType))
+    throw new TypeError('Unknown configuration data type');
+  const value = validateConfigurationValue(Number(key), configurationValue(element));
+  const bits = BigInt(widths[dataType] * 8);
+  const signed = dataType.startsWith('int');
+  const low = signed ? -(1n << (bits - 1n)) : 0n;
+  const high = (1n << (signed ? bits - 1n : bits)) - 1n;
+  if (value < low || value > high)
+    throw new RangeError('Value does not fit its configuration data type');
+  const bytes = new Uint8Array(8);
+  bytes[0] = Number(key);
+  let remaining = BigInt.asUintN(Number(bits), value);
+  for (let i = 1; i <= widths[dataType]; i++) {
+    bytes[i] = Number(remaining & 255n);
+    remaining >>= 8n;
   }
-
-  view.setUint8(0, key);
-  return new Uint8Array(buffer);
+  return bytes;
 }
 
 window.addEventListener('load', function () {
@@ -138,6 +157,15 @@ window.addEventListener('load', function () {
     const element = document.querySelector(`[data-key="${key}"]`);
     if (element)
       element.addEventListener('change', updateAutoStartJitter);
+  }
+
+  for (const element of document.querySelectorAll('.api')) {
+    const rule = configFieldRules[element.getAttribute('data-key')];
+    if (rule && element.type === 'number') {
+      element.setAttribute('min', rule[0]);
+      element.setAttribute('max', rule[1]);
+      element.setAttribute('step', '1');
+    }
   }
 
   this.document.getElementById('menu-buttons').addEventListener('click', function (event) {
@@ -222,37 +250,39 @@ function autoStartJitterChanged(checkbox) {
 }
 
 
-function updateElement(key, event) {
-  var dataOffset = 4;
-  var element = document.querySelector(`[data-key="${key}"]`);
-
-  if (!element)
-    return;
-
-  if (isScaledTimer(element)) {
+function unpackValue(dataType, data) {
+  const dataOffset = 4;
+  if (dataType === 'uint64') {
     let value = 0n;
     for (let offset = dataOffset + 6; offset >= dataOffset; offset--)
-      value = (value << 8n) | BigInt(event.data.getUint8(offset));
-    setValue(element, timerSeconds(value));
-    element.setCustomValidity('');
-    return;
+      value = (value << 8n) | BigInt(data.getUint8(offset));
+    // GET exposes 56 bits, even though SET to both outputs can carry only 48.
+    return value.toString();
   }
-
   const methods = {
-    "uint32": event.data.getUint32,
-    "uint64": event.data.getUint32, /* Yes, I know. :-| */
-    "int32": event.data.getInt32,
-    "uint16": event.data.getUint16,
-    "uint8": event.data.getUint8,
-    "int16": event.data.getInt16,
-    "int8": event.data.getInt8
+    uint32: 'getUint32', int32: 'getInt32', uint16: 'getUint16',
+    uint8: 'getUint8', int16: 'getInt16', int8: 'getInt8'
   };
+  if (!Object.hasOwn(methods, dataType))
+    throw new TypeError('Unknown configuration data type');
+  return data[methods[dataType]](dataOffset, true);
+}
 
-  dataType = element.getAttribute('data-type');
-
-  if (dataType in methods) {
-    var value = methods[dataType].call(event.data, dataOffset, true);
-    setValue(element, value);
+function updateElement(key, event) {
+  const element = document.querySelector(`.api[data-key="${key}"]`);
+  if (!element)
+    return;
+  try {
+    const value = unpackValue(element.getAttribute('data-type'), event.data);
+    if (configFieldRules[key] && !isScaledTimer(element))
+      validateConfigurationValue(key, configurationInteger(value));
+    const pending = pendingConfigReads.get(key);
+    if (pending) {
+      pending.resolve(String(value));
+      return;
+    }
+    setValue(element, isScaledTimer(element) ? timerSeconds(BigInt(value)) : value);
+    element.setCustomValidity('');
 
     if (element.hasAttribute('data-hex'))
       setValue(element, parseInt(value).toString(16));
@@ -263,6 +293,9 @@ function updateElement(key, event) {
       const minor = (value - 100) % 1000;
       setValue(element, `v${major}.${minor}`);
     }
+  } catch (error) {
+    pendingConfigReads.get(key)?.reject(error);
+    showConfigStatus(error.message, true);
   }
 }
 
@@ -290,53 +323,115 @@ async function enterBootloaderHandler() {
   await sendReport(packetType.firmwareUpgradeMsg, [], true);
 }
 
-async function valueChangedHandler(element) {
-  if (!validateTimerChange(element))
-    return false;
+function showConfigStatus(message, isError = false) {
+  const status = document.getElementById('config-status');
+  status.textContent = message;
+  status.style.color = isError ? '#a00' : '';
+}
 
-  var key = element.getAttribute('data-key');
-  var dataType = element.getAttribute('data-type');
-
-  var origValue = element.getAttribute('fetched-value');
-  var newValue = getValue(element);
-
-  if (origValue != newValue) {
-    uintBuffer = packValue(element, key, dataType);
-
-    /* Send to both devices */
-    await sendReport(packetType.setValMsg, uintBuffer, true);
-
-    /* Set this as the current value */
-    element.setAttribute('fetched-value', newValue);
+function configurationEdit(element) {
+  try {
+    const key = Number(element.getAttribute('data-key'));
+    const payload = packValue(element, key, element.getAttribute('data-type'));
+    element.setCustomValidity('');
+    return {element, key, payload, expected: configurationValue(element).toString()};
+  } catch (error) {
+    element.setCustomValidity(error.message);
+    element.reportValidity();
+    throw error;
   }
+}
 
-  if (screensaverModeKeys.includes(Number(key)))
+function planConfigurationEdits(elements) {
+  const editable = [...elements].filter(element => !element.hasAttribute('readonly'));
+  for (const element of editable)
+    if (element.getAttribute('fetched-value') == getValue(element))
+      element.setCustomValidity('');
+  /* Do not pack unchanged timers: fetched 56-bit values can exceed the 48-bit
+     SET limit. Leaving those fields unsent preserves the stored full uint64. */
+  const edits = editable.filter(element => element.getAttribute('fetched-value') != getValue(element))
+                        .map(configurationEdit);
+  const result = edits.filter(edit => !borderKeys.includes(edit.key));
+  for (const base of [10, 40]) {
+    const pair = [base + 4, base + 5].map(key => editable.find(element => Number(element.getAttribute('data-key')) === key));
+    const changed = edits.filter(edit => edit.key === base + 4 || edit.key === base + 5);
+    if (!changed.length)
+      continue;
+    if (pair.some(element => !element || !element.hasAttribute('fetched-value')))
+      throw new Error('Read both borders before saving calibration');
+    const [top, bottom] = pair.map(element => configurationInteger(getValue(element)));
+    if (top >= bottom)
+      throw new RangeError('Border Top must be less than Border Bottom');
+    /* Expand before shrinking so every SET is valid against the connected
+       device's fetched interval. A divergent peer has no readback/transaction
+       acknowledgment in this protocol and can still reject an intermediate SET. */
+    const bottomFirst = top >= configurationInteger(pair[1].getAttribute('fetched-value'));
+    changed.sort((a, b) => bottomFirst ? b.key - a.key : a.key - b.key);
+    result.push(...changed);
+  }
+  return result;
+}
+
+async function writeConfigurationEdit(edit) {
+  if (!device || !device.opened)
+    throw new Error('Connect before applying configuration');
+  await sendReport(packetType.setValMsg, edit.payload, true);
+  const accepted = new Promise((resolve, reject) => {
+    pendingConfigReads.set(edit.key, {resolve, reject});
+  });
+  const timeout = setTimeout(() => pendingConfigReads.get(edit.key)?.reject(
+    new Error(`${configurationLabel(edit.key)}: no readback; Read to check device values`)), 1500);
+  try {
+    const [, actual] = await Promise.all([sendReport(packetType.getValMsg, [edit.key]), accepted]);
+    if (actual !== edit.expected)
+      throw new Error(`${configurationLabel(edit.key)} rejected: device retained ${actual} ${isScaledTimer(edit.element) ? 'microseconds' : ''}`);
+    edit.element.setAttribute('fetched-value', isScaledTimer(edit.element) ? timerSeconds(BigInt(actual)) : actual);
+  } finally {
+    clearTimeout(timeout);
+    pendingConfigReads.delete(edit.key);
+  }
+}
+
+function enqueueConfigurationWrite(operation) {
+  configWriteQueue = configWriteQueue.then(operation).catch(error => {
+    showConfigStatus(error.message, true);
+    return false;
+  });
+  return configWriteQueue;
+}
+
+async function valueChangedHandler(element) {
+  if (element.hasAttribute('readonly'))
+    return false;
+  if (borderKeys.includes(Number(element.getAttribute('data-key')))) {
+    showConfigStatus('Border edits apply together when you Save. Top must be less than Bottom.');
+    return true;
+  }
+  return enqueueConfigurationWrite(async () => {
+    if (element.getAttribute('fetched-value') != getValue(element))
+      await writeConfigurationEdit(configurationEdit(element));
+    else
+      element.setCustomValidity('');
     updateAutoStartJitter();
-  return true;
+    showConfigStatus('Applied and checked on the connected device. Save to persist.');
+    return true;
+  });
 }
 
 async function saveHandler() {
-  const elements = document.querySelectorAll('.api');
-
   if (!device || !device.opened)
-    return;
-
-  /* Validate every changed timer before sending any configuration update.
-     Otherwise an invalid later field could leave a partially applied Save. */
-  for (const element of elements)
-    if (!element.hasAttribute('readonly') && !validateTimerChange(element))
-      return;
-
-  for (const element of elements) {
-    var origValue = element.getAttribute('fetched-value')
-
-    if (element.hasAttribute('readonly'))
-      continue;
-
-    if (origValue != getValue(element))
-      await valueChangedHandler(element);
-  }
-  await sendReport(packetType.saveConfigMsg, [], true);
+    return false;
+  return enqueueConfigurationWrite(async () => {
+    if (!device || !device.opened)
+      throw new Error('Connect before saving configuration');
+    const edits = planConfigurationEdits(document.querySelectorAll('.api'));
+    for (const edit of edits)
+      await writeConfigurationEdit(edit);
+    await sendReport(packetType.saveConfigMsg, [], true);
+    updateAutoStartJitter();
+    showConfigStatus('Save requested on both devices. Changes checked in connected-device RAM; peer acceptance and flash completion are not acknowledged.');
+    return true;
+  });
 }
 
 async function wipeConfigHandler() {

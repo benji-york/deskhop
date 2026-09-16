@@ -8,7 +8,30 @@ README.
 
 Snapshot: 2026-09-16
 
-## Current accepted release: v0.108
+## Current accepted release: v0.109
+
+Implemented on `codex/configuration-validation-v0.109`, based on accepted v0.108,
+in `/private/tmp/deskhop-config-validation.I4A81W`. It resumes the preserved old
+draft without replacing the current USB, timer UI, verification, keyboard or
+update fixes. All 61 deep-tier steps and the ARM build passed. Benji then
+authorized an AFK deployment: both Picos now run firmware-verified v0.109.
+After returning, Benji confirmed "Looks good; please merge and push" in response
+to the requested typing, mouse/right-click, switching and config-page Read/Save
+checks, accepting the release and authorizing publication. The contract and evidence are in
+[the configuration-validation record](docs/testing/configuration-validation-v109.md).
+Frozen manifest: `build/releases/deskhop-v0.109-6wekbwwa/manifest.json`
+(in the canonical repository); full-slot CRC `9ea98c93`.
+Deployment evidence: `build/updater/runs/20260916T181039Z-t7wuxvw8/` in the
+canonical repository. The single maintained-updater run took 50.627909 seconds;
+A's exact firmware readback and all 4096 saved-settings bytes passed, B propagated
+and rebooted automatically, and both boards passed fresh correct/wrong/correct
+CRC checks with progressing cores. No retry or power cycle was needed.
+The automatic journal retains its original `input_acceptance=pending`; a separate
+`user-acceptance.json` records Benji's later confirmation. The frozen deployed
+image is unchanged by committing or publishing the source. The following v0.108
+record is historical and does not supersede this release.
+
+## Previous accepted release: v0.108
 
 Both Picos were upgraded and verified on 2026-09-16 using the frozen v0.108
 candidate. Benji then confirmed "Everything works normally" for typing and
@@ -30,7 +53,8 @@ See [the v0.108 deployment record](docs/testing/verification-contention-v108.md)
 for exact identities, timing and acceptance limits. The USB-ROM hang remains
 unresolved and is parked at Benji's request; this successful upgrade does not
 prove it fixed. Batch transfer acceleration remains unproven. Configuration
-validation and broad reboot/power-loss safety are still outstanding.
+validation is addressed by the accepted v0.109 release above; broad
+reboot/power-loss safety is still outstanding.
 
 The following development/deployment sections are historical. Statements there
 that v0.108 was uninstalled, or that main/devices remained at v0.106, describe

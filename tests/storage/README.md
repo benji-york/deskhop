@@ -50,6 +50,13 @@ bytes. If its real config-lock acquisition blocks, the boundary defers the
 side-effect-free setter until the save releases that lock. Removing the setter's
 lock allows it to execute inside the copy and produces a torn persisted value.
 This suite does **not** run two CPUs or exhaustively interleave C memory accesses.
+Configuration validation adds the opposite schedule: a real snapshot reader
+preempts a SET, border-pair update, or load publication. Both writer/reader
+orders split a timeout after four bytes or a border pair between top and bottom.
+The blocked operation resumes only after the owning core releases the real
+configuration lock. A stale screen-index update after a count reduction also
+runs against the production publication helper. These are selected schedules,
+not an instruction-level race proof.
 The broader simulator and reduced model checker cover additional
 scheduling questions at their separately documented abstraction levels.
 
@@ -89,6 +96,10 @@ console/peer verification policy and scan scheduling have their own suites.
 | Metadata formats | Current metadata/version/transferred CRC and packed legacy direct rollback | Direct old images accepted; unaligned legacy peer metadata rejected |
 | Config persistence | Actual v8/v9/v10 load, migration, flash save, later reload, manual auto-start disable, corruption fallback | Independent persisted CRC; preserved speed, border and timeout fields; defaults comparison |
 | Config SET_VAL/save race | `config_set_during_save_keeps_persisted_crc_coherent`: actual setter runs at a selected snapshot-copy preemption, then a later save/reload | Independent CRC over persisted bytes and a whole-old/whole-new field oracle; later RAM edit remains available; config lock must be released before every flash operation |
+| Config semantic repair | Valid-CRC current-format images poison each scalar with an invalid representable value; v8/v9/v10 images poison identity, border relationships and screen indices | Exact repaired field values; unrelated customized OS, speeds, LED, hotkey, timeout and calibration bytes preserved; current-format repair stays in RAM until SAVE; migrations persist after repair |
+| Legacy full-width timers | All four persisted timer fields include values from 2^48 through UINT64_MAX across v8/v9/v10 load, unrelated edit, SAVE and reload | Exact original timer bytes survive; only an explicit timer SET replaces the requested field with its new 48-bit wire value |
+| Invalid SAVE | Semantically invalid live images, including zero-height borders | No flash operation or RAM mutation; earlier valid settings remain byte-for-byte intact |
+| Config publication | SET during reader copy, reader during SET/load/border publication, paired borders and stale index publication | Snapshot is whole old or whole new; border relationship never tears; final index fits the current count |
 | Power interruption | Seven partial firmware erase/program cuts; one partial config program | NOR persists, RAM state vanishes; damaged image CRC rejected; torn config loads defaults |
 | Watchdog | Core1 hang threshold minus one and threshold, deliberate reboot | Observable kick counts, no wall-clock sleeping |
 | Update history | Successful and corrupt full peer/UF2 images; receiving, 25/50/75/100% progress, validating, reboot pending or failure | Exact seven-record timelines in the real ring; failure visible before reset; no duplicate progress-age refresh, invalid-UF2 events, or stale peer takeover |
@@ -98,7 +109,7 @@ console/peer verification policy and scan scheduling have their own suites.
 | Nonblocking verification | Firmware lock busy, flash lock busy, IRQ already disabled, unrelated config lock held, invalid pointers/lengths/ranges, active/dirty update and pending reboot | One attempt per needed lock, no blocking acquisition, no leaked ownership/IRQ state, no copied bytes on refusal |
 | Verification generation | Identical programming, previously read bytes, reserved metadata, recovery erase, nonoverlapping settings/staging writes | Old generation refuses subsequent reads/finish; settings/staging writes preserve generation; counter exhaustion remains invalid instead of wrapping |
 
-`mutations.py` compiles and runs twenty-one isolated production variants. It must kill all
+`mutations.py` compiles and runs isolated production variants. It must kill all
 of them at runtime: duplicate UF2 programming, early completion, skipped embedded
 CRC, UF2 after reboot reservation, consuming a word on TX failure, premature page
 zero commit, missing final page, stale response acceptance, config-save guard
@@ -118,12 +129,21 @@ write hooks through exhaustion and repeated later writes. Production has no
 test setter or configurable generation. The wrap mutant uses that same fixture;
 normal storage seeds continue to start at zero.
 
-The configuration format remains 10 in firmware v0.94. `save_config` copies RAM
+Three configuration variants additionally remove reader snapshot locking,
+semantic load repair, and semantic SAVE validation. Their failures must reach
+the independent publication or persisted-settings oracles; build failures do
+not count.
+
+The configuration format remains 10 in the firmware 0.109 candidate, based on
+accepted firmware 0.108. Existing full-width unsigned 64-bit timer values remain
+valid on disk and survive migration, unrelated edits and saving. New timer SETs
+are limited to 48 bits to match direct and proxied wire capacity. `save_config` copies RAM
 under a short config lock and calculates the persisted checksum from that copy;
 the lock ends before erase/program. Known config writers use the same lock,
 including API SET, screensaver settings, screen borders and desktop screen-index
-changes. This guarantees a coherent persisted snapshot for those writers, not
-atomicity of every live config read. The updater/flash ownership design and
+changes. Runtime consumers take short-lock snapshots to read a complete
+configuration, and publication rechecks the current count for screen-index
+updates. These tests demonstrate the selected copy schedules above. The updater/flash ownership design and
 power-loss recovery guarantees are unchanged.
 
 ## Extending scenarios

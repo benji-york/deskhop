@@ -267,6 +267,11 @@ bool diagnostic_peer_poll(peer_status_result_t *result) {
     return true;
 }
 device_t global_state;
+/* This USB fixture is single-threaded. Production snapshot locking and copy
+ * publication interleavings are exercised by the storage-boundary suite. */
+void config_snapshot(const device_t *state, config_t *snapshot) {
+    *snapshot = state->config;
+}
 static endpoint_t *endpoint(uint8_t ep) { return &endpoints[(ep >> 7) & 1][ep & 15]; }
 void dcd_init(uint8_t rhport) { CHECK(rhport == 0); }
 bool dcd_deinit(uint8_t rhport) { return true; }

@@ -18,6 +18,9 @@
 void set_keyboard_leds(uint8_t requested_led_state, device_t *state) {
     static uint8_t new_led_value;
 
+    if (BOARD_ROLE >= NUM_SCREENS)
+        return;
+
     new_led_value = requested_led_state;
     if (state->keyboard_connected) {
         if(tuh_hid_set_report(state->kbd_dev_addr,
@@ -32,12 +35,18 @@ void set_keyboard_leds(uint8_t requested_led_state, device_t *state) {
 }
 
 static uint8_t active_keyboard_leds(device_t *state) {
-    uint8_t leds = state->keyboard_leds_desired[state->active_output];
+    uint8_t active_output = state->active_output;
+    if (active_output >= NUM_SCREENS)
+        return 0;
 
-    if (state->config.kbd_led_as_indicator) {
+    config_t config;
+    config_snapshot(state, &config);
+    uint8_t leds = state->keyboard_leds_desired[active_output];
+
+    if (config.kbd_led_as_indicator) {
         leds &= ~KEYBOARD_LED_CAPSLOCK;
 
-        if (state->active_output == OUTPUT_B)
+        if (active_output == OUTPUT_B)
             leds |= KEYBOARD_LED_CAPSLOCK;
     }
 
@@ -70,6 +79,9 @@ void blink_led(device_t *state) {
 }
 
 void led_sync_task(device_t *state) {
+    if (BOARD_ROLE >= NUM_SCREENS)
+        return;
+
     /* Do not overwrite an intentional acknowledgement blink. */
     if (state->blinks_left != 0)
         return;

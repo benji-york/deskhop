@@ -59,6 +59,179 @@ void config_unlock(void) {
     critical_section_exit(&config_critical_section);
 }
 
+/* Readers copy under the same lock as publishers, then release it before
+ * queues, USB, flash, or other locks. A mutex around writers alone cannot
+ * protect a 64-bit timeout or the relationship between two borders. */
+void config_snapshot(const device_t *state, config_t *snapshot) {
+    config_lock();
+    memcpy(snapshot, &state->config, sizeof(*snapshot));
+    config_unlock();
+}
+
+static size_t config_field_size(const field_map_t *map) {
+    return map->type == UINT64 ? sizeof(uint64_t) : map->len;
+}
+
+static uint8_t *config_field(config_t *config, const field_map_t *map) {
+    return (uint8_t *)config + map->offset - offsetof(device_t, config);
+}
+
+static bool config_value_valid(uint8_t index, uint64_t value) {
+    if (index >= 40 && index <= 52)
+        index -= 30;
+    switch (index) {
+        case 11: return value >= 1 && value <= CONFIG_SCREEN_COUNT_MAX;
+        case 12: case 13: return value >= 1 && value <= CONFIG_SPEED_MAX;
+        case 14: case 15: return value <= MAX_SCREEN_COORD;
+        case 16: return value == LINUX || value == MACOS || value == WINDOWS
+                       || value == ANDROID || value == OTHER;
+        case 17: return value == LEFT || value == RIGHT;
+        case 18: return value == 0 || value == 1 || value == 3;
+        case 19: return value <= MAX_SS_VAL;
+        case 20: case 71: case 72: case 73: case 75: case 76: return value <= 1;
+        /* All persisted uint64 durations are meaningful. The legacy API can
+         * only SET 48 bits, but loading or editing a different field must not
+         * silently replace a larger existing duration. */
+        case 21: case 22: return true;
+        /* The persisted hotkey byte is currently dormant: the hotkey table
+         * uses HOTKEY_TOGGLE at compile time. Preserve every legacy byte. */
+        case 74: return value <= UINT8_MAX;
+        case 77: return value <= UINT16_MAX;
+        case 83: return value <= UINT32_MAX;
+        default: return false;
+    }
+}
+
+static bool config_border_valid(const border_size_t *border) {
+    return border->top >= 0 && border->top < border->bottom
+        && border->bottom <= MAX_SCREEN_COORD;
+}
+
+bool config_validate(const config_t *config) {
+    if (config->magic_header != default_config.magic_header
+        || config->version != CURRENT_CONFIG_VERSION)
+        return false;
+    for (size_t i = 0; i < get_field_map_length(); ++i) {
+        const field_map_t *map = get_field_map_index(i);
+        if (map->readonly)
+            continue;
+        uint64_t value = 0;
+        memcpy(&value, (const uint8_t *)config + map->offset - offsetof(device_t, config),
+               config_field_size(map));
+        if (!config_value_valid(map->idx, value))
+            return false;
+    }
+    for (unsigned i = 0; i < NUM_SCREENS; ++i) {
+        const output_t *out = &config->output[i];
+        if (out->number != i || !config_border_valid(&out->border)
+            || out->screen_index < 1 || out->screen_index > out->screen_count)
+            return false;
+    }
+    return true;
+}
+
+/* After integrity/version checks and migration, salvage independent settings.
+ * Invalid scalar fields use their own defaults; an invalid border relationship
+ * resets only that pair. A reduced monitor count clamps the runtime index. */
+bool config_repair(config_t *config) {
+    bool repaired = false;
+    for (size_t i = 0; i < get_field_map_length(); ++i) {
+        const field_map_t *map = get_field_map_index(i);
+        if (map->readonly)
+            continue;
+        size_t size = config_field_size(map);
+        uint64_t value = 0;
+        memcpy(&value, config_field(config, map), size);
+        if (!config_value_valid(map->idx, value)) {
+            memcpy(config_field(config, map),
+                   (const uint8_t *)&default_config + map->offset - offsetof(device_t, config), size);
+            repaired = true;
+        }
+    }
+    for (unsigned i = 0; i < NUM_SCREENS; ++i) {
+        output_t *out = &config->output[i];
+        if (out->number != i) {
+            out->number = i;
+            repaired = true;
+        }
+        if (!config_border_valid(&out->border)) {
+            out->border = default_config.output[i].border;
+            repaired = true;
+        }
+        uint32_t index = out->screen_index;
+        if (index < 1) index = 1;
+        if (index > out->screen_count) index = out->screen_count;
+        if (out->screen_index != index) {
+            out->screen_index = index;
+            repaired = true;
+        }
+    }
+    return repaired;
+}
+
+bool config_set_value(device_t *state, uint8_t index, const uint8_t value[7]) {
+    const field_map_t *map = get_field_map_entry(index);
+    if (!map || map->readonly)
+        return false;
+    /* All unused bytes must be zero, including high bits callers could have
+     * accidentally truncated to a narrow integer. Never silently discard. */
+    for (unsigned i = map->len; i < 7; ++i)
+        if (value[i]) return false;
+    uint64_t decoded = 0;
+    for (unsigned i = 0; i < map->len; ++i)
+        decoded |= (uint64_t)value[i] << (8 * i);
+    if (map->type == UINT64 && decoded > CONFIG_TIMEOUT_MAX_US)
+        return false;
+    if (!config_value_valid(index, decoded))
+        return false;
+    config_lock();
+    config_t candidate = state->config;
+    /* UINT64 writes replace all eight storage bytes, never stale upper bits. */
+    memcpy(config_field(&candidate, map), &decoded, config_field_size(map));
+    if (index == 11 || index == 41) {
+        output_t *out = &candidate.output[index == 41];
+        if (out->screen_index > out->screen_count)
+            out->screen_index = out->screen_count;
+    }
+    bool valid = config_validate(&candidate);
+    if (valid) memcpy(&state->config, &candidate, sizeof(candidate));
+    config_unlock();
+    return valid;
+}
+
+bool config_set_border(device_t *state, uint8_t output, const border_size_t *border) {
+    if (output >= NUM_SCREENS || !config_border_valid(border))
+        return false;
+    config_lock();
+    config_t candidate = state->config;
+    candidate.output[output].border = *border;
+    bool valid = config_validate(&candidate);
+    if (valid) memcpy(&state->config, &candidate, sizeof(candidate));
+    config_unlock();
+    return valid;
+}
+
+bool config_set_screensaver_mode(device_t *state, uint8_t output, uint8_t mode) {
+    if (output >= NUM_SCREENS) return false;
+    const uint8_t value[7] = {mode};
+    return config_set_value(state, output == OUTPUT_A ? 19 : 49, value);
+}
+
+void config_set_screen_index(device_t *state, uint8_t output, uint32_t index) {
+    if (output >= NUM_SCREENS) return;
+    config_lock();
+    /* The count may have shrunk since the mouse consumer's snapshot. */
+    uint32_t count = state->config.output[output].screen_count;
+    if (count < 1 || count > CONFIG_SCREEN_COUNT_MAX) {
+        config_unlock();
+        return;
+    }
+    if (index < 1) index = 1;
+    if (index > count) index = count;
+    state->config.output[output].screen_index = index;
+    config_unlock();
+}
+
 /* ================================================== *
  * ==============  Checksum Functions  ============== *
  * ================================================== */
@@ -326,7 +499,7 @@ void load_config(device_t *state) {
        migration enables the requested keep-awake behavior for existing
        installations; Web Config can subsequently disable it by saving both
        output modes as Disabled. */
-    if (config_valid
+    bool migrated = config_valid
         && migrate_config_to_current(
             running_config->version,
             &running_config->version,
@@ -334,21 +507,21 @@ void load_config(device_t *state) {
             &running_config->output[OUTPUT_A].screensaver.mode,
             &running_config->output[OUTPUT_B].screensaver.mode,
             SCREENSAVER_SYSTEM_TIMEOUT_SEC,
-            JITTER)) {
-        config_lock();
-        memcpy(&state->config, running_config, sizeof(config_t));
-        config_unlock();
-        save_config(state);
-        return;
-    }
+            JITTER);
 
     /* On any condition failing, we fall back to default config */
     if (!config_valid || running_config->version != CURRENT_CONFIG_VERSION)
         memcpy(running_config, &default_config, sizeof(config_t));
 
+    /* Current-format repairs remain in RAM until an explicit SAVE. Migration
+     * retains its existing one-time persistence, after semantic repair. */
+    config_repair(running_config);
+
     config_lock();
     memcpy(&state->config, running_config, sizeof(config_t));
     config_unlock();
+    if (migrated)
+        save_config(state);
 }
 
 void save_config(device_t *state) {
@@ -361,6 +534,11 @@ void save_config(device_t *state) {
     /* Snapshot and checksum the same bytes. SET_VAL on the other core may
        update live config after this short section, but cannot tear this save. */
     config_lock();
+    if (!config_validate(&state->config)) {
+        config_unlock();
+        firmware_update_unlock();
+        return;
+    }
     memcpy(state->page_buffer, &state->config, sizeof(config_t));
     uint32_t checksum = calc_crc32(state->page_buffer, offsetof(config_t, checksum));
     memcpy(state->page_buffer + offsetof(config_t, checksum), &checksum, sizeof(checksum));

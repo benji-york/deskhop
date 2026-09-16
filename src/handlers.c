@@ -66,19 +66,26 @@ void reboot_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
     request_graceful_reboot(state, true);
 }
 
-void _get_border_position(device_t *state, border_size_t *border) {
-    /* To avoid having 2 different keys, if we're above half, it's the top coord */
-    if (state->pointer_y > (MAX_SCREEN_COORD / 2))
-        border->bottom = state->pointer_y;
-    else
-        border->top = state->pointer_y;
+static bool set_border_position(device_t *state, uint8_t output, border_size_t *border) {
+    /* Update only the chosen edge under the publication lock. Copying an old
+       pair back here would overwrite a concurrent edit to the opposite edge. */
+    int32_t position = state->pointer_y;
+    uint8_t field = output == OUTPUT_A ? 14 : 44;
+    if (position > (MAX_SCREEN_COORD / 2))
+        ++field;
+    uint8_t value[7] = {0};
+    memcpy(value, &position, sizeof(position));
+    if (!config_set_value(state, field, value))
+        return false;
+    config_t config;
+    config_snapshot(state, &config);
+    *border = config.output[output].border;
+    return true;
 }
 
 void _screensaver_set(device_t *state, uint8_t value) {
     if (CURRENT_BOARD_IS_ACTIVE_OUTPUT) {
-        config_lock();
-        state->config.output[BOARD_ROLE].screensaver.mode = value;
-        config_unlock();
+        config_set_screensaver_mode(state, BOARD_ROLE, value);
     } else
         send_value(value, SCREENSAVER_MSG);
 };
@@ -86,15 +93,17 @@ void _screensaver_set(device_t *state, uint8_t value) {
 /* This key combo records switch y top coordinate for different-size monitors  */
 void screen_border_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
     bool save = CURRENT_BOARD_IS_ACTIVE_OUTPUT;
+    uint8_t output = state->active_output;
+    if (output >= NUM_SCREENS) return;
     border_size_t snapshot;
-    config_lock();
-    border_size_t *border = &state->config.output[state->active_output].border;
-    if (save)
-        _get_border_position(state, border);
-    snapshot = *border;
-    config_unlock();
-    if (save)
+    if (save) {
+        if (!set_border_position(state, output, &snapshot)) return;
         save_config(state);
+    } else {
+        config_t config;
+        config_snapshot(state, &config);
+        snapshot = config.output[output].border;
+    }
 
     queue_packet((uint8_t *)&snapshot, SYNC_BORDERS_MSG, sizeof(snapshot));
 };
@@ -145,9 +154,11 @@ void clear_zoom_assist_hotkey_handler(device_t *state, hid_keyboard_report_t *re
 /* This key combo locks both outputs simultaneously */
 void screenlock_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
     hid_keyboard_report_t lock_report = {0}, release_keys = {0};
+    config_t config;
+    config_snapshot(state, &config);
 
     for (int out = 0; out < NUM_SCREENS; out++) {
-        switch (state->config.output[out].os) {
+        switch (config.output[out].os) {
             case WINDOWS:
             case LINUX:
                 lock_report.modifier   = KEYBOARD_MODIFIER_LEFTGUI;
@@ -186,7 +197,9 @@ void mouse_zoom_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
 
 /* When pressed, enables the pong screensaver on active output */
 void enable_screensaver_pong_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
-    uint8_t desired_mode = state->config.output[BOARD_ROLE].screensaver.mode;
+    config_t config;
+    config_snapshot(state, &config);
+    uint8_t desired_mode = config.output[BOARD_ROLE].screensaver.mode;
 
     /* If the user explicitly asks for pong screensaver to be active, ignore config and turn it on */
     if (desired_mode == DISABLED || desired_mode == JITTER)
@@ -197,7 +210,9 @@ void enable_screensaver_pong_hotkey_handler(device_t *state, hid_keyboard_report
 
 /* When pressed, enables the jitter screensaver on active output */
 void enable_screensaver_jitter_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
-    uint8_t desired_mode = state->config.output[BOARD_ROLE].screensaver.mode;
+    config_t config;
+    config_snapshot(state, &config);
+    uint8_t desired_mode = config.output[BOARD_ROLE].screensaver.mode;
 
     /* If the user explicitly asks for jitter screensaver to be active, ignore config and turn it on */
     if (desired_mode == DISABLED || desired_mode == PONG)
@@ -445,15 +460,15 @@ void handle_switch_lock_msg(uart_packet_t *packet, device_t *state) {
 /* Handle border syncing message that lets the other device know about monitor height offset */
 void handle_sync_borders_msg(uart_packet_t *packet, device_t *state) {
     bool notify = CURRENT_BOARD_IS_ACTIVE_OUTPUT;
+    uint8_t output = state->active_output;
+    if (output >= NUM_SCREENS) return;
     border_size_t snapshot;
-    config_lock();
-    border_size_t *border = &state->config.output[state->active_output].border;
-    if (notify)
-        _get_border_position(state, border);
-    else
-        memcpy(border, packet->data, sizeof(border_size_t));
-    snapshot = *border;
-    config_unlock();
+    if (notify) {
+        if (!set_border_position(state, output, &snapshot)) return;
+    } else {
+        memcpy(&snapshot, packet->data, sizeof(snapshot));
+        if (!config_set_border(state, output, &snapshot)) return;
+    }
     if (notify)
         queue_packet((uint8_t *)&snapshot, SYNC_BORDERS_MSG, sizeof(snapshot));
 
@@ -473,9 +488,9 @@ void handle_wipe_config_msg(uart_packet_t *packet, device_t *state) {
 
 /* Update screensaver state after received message */
 void handle_screensaver_msg(uart_packet_t *packet, device_t *state) {
-    config_lock();
-    state->config.output[BOARD_ROLE].screensaver.mode = packet->data[0];
-    config_unlock();
+    for (unsigned i = 1; i < PACKET_DATA_LENGTH; ++i)
+        if (packet->data[i]) return;
+    config_set_screensaver_mode(state, BOARD_ROLE, packet->data[0]);
 }
 
 /* Process consumer control message */
@@ -521,16 +536,11 @@ void handle_api_msgs(uart_packet_t *packet, device_t *state) {
         return;
 
     /* Create a pointer to the offset into the structure we need to access */
-    uint8_t *ptr = (((uint8_t *)&global_state) + map->offset);
+    uint8_t *ptr = (((uint8_t *)state) + map->offset);
 
     if (packet->type == SET_VAL_MSG) {
-        /* Not allowing writes to objects defined as read-only */
-        if (map->readonly)
+        if (!config_set_value(state, value_idx, &packet->data[1]))
             return;
-
-        config_lock();
-        memcpy(ptr, &packet->data[1], map->len);
-        config_unlock();
     }
     else if (packet->type == GET_VAL_MSG) {
         uart_packet_t response = {.type=GET_VAL_MSG, .data={[0] = value_idx}};

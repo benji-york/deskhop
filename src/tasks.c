@@ -147,9 +147,15 @@ void screensaver_task(device_t *state) {
         10000000, /* JITTER, once every 10 sec is more than enough */
     };
     static uint32_t last_pointer_move = 0;
+    if (BOARD_ROLE >= NUM_SCREENS)
+        return;
+
+    config_t config;
+    config_snapshot(state, &config);
     uint64_t now = time_us_64();
-    screensaver_t *screensaver = &state->config.output[BOARD_ROLE].screensaver;
-    uint64_t inactivity_period = now - state->last_activity[BOARD_ROLE];
+    const screensaver_t *screensaver = &config.output[BOARD_ROLE].screensaver;
+    uint64_t last_activity = state->last_activity[BOARD_ROLE];
+    uint64_t inactivity_period = now >= last_activity ? now - last_activity : 0;
 
     /* If we're not enabled, nothing to do here. */
     if (screensaver->mode == DISABLED)
@@ -160,8 +166,10 @@ void screensaver_task(device_t *state) {
         return;
 
     /* We exceeded the maximum permitted screensaver runtime */
+    /* Subtract only after the idle threshold check. Adding two preserved
+       64-bit timers could wrap and stop an otherwise unlimited-long run. */
     if (screensaver->max_time_us
-        && inactivity_period > (screensaver->max_time_us + screensaver->idle_time_us))
+        && inactivity_period - screensaver->idle_time_us > screensaver->max_time_us)
         return;
 
     /* If we're the selected output and we can only run on inactive output, nothing to do here. */
@@ -176,7 +184,7 @@ void screensaver_task(device_t *state) {
                                       state->direct_activity_valid,
                                       state->peer_activity,
                                       state->peer_activity_valid),
-            state->config.screensaver_system_timeout_sec))
+            config.screensaver_system_timeout_sec))
         return;
 
     /* We're active! Now check if it's time to move the cursor yet. */

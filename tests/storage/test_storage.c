@@ -24,8 +24,14 @@ static bool config_set_on_copy, config_set_pending;
 static bool batch_flash_order;
 static unsigned config_set_invoked;
 static bool config_set_active;
+static bool config_set_on_read, config_read_on_copy, config_read_active, config_read_pending;
+static unsigned config_read_invoked;
+static bool config_write_border, config_write_opposite_edge;
+static size_t config_copy_split;
+static config_t observed_config;
 static jmp_buf config_set_blocked;
 static void interleaved_config_set(void);
+static void interleaved_config_read(void);
 static void event(const char *kind, uint32_t value) {
     if (trace) fprintf(trace, "{\"scenario\":\"%s\",\"seed\":%u,\"step\":%u,\"time_us\":%llu,\"core\":%u,\"event\":\"%s\",\"value\":%u}\n",
                        scenario, replay_seed, trace_step++, (unsigned long long)now, current_core, kind, value);
@@ -74,14 +80,32 @@ static void interleaved_config_set(void) {
     unsigned saved_core = current_core;
     current_core = 1;
     uart_packet_t packet = {.type = SET_VAL_MSG, .data = {21}};
-    uint64_t idle = UINT64_C(0x0066778899aabbcc);
+    uint64_t idle = UINT64_C(0x0000778899aabbcc);
+    if (config_write_opposite_edge) {
+        packet.data[0] = 15;
+        idle = 6000;
+    }
     memcpy(&packet.data[1], &idle, 7);
     config_set_active = true;
     if (setjmp(config_set_blocked) == 0) {
-        handle_api_msgs(&packet, &global_state);
+        if (config_write_border) {
+            const border_size_t border = {5000, 6000};
+            CHECK(config_set_border(&global_state, 0, &border));
+        } else handle_api_msgs(&packet, &global_state);
         ++config_set_invoked;
     }
     config_set_active = false;
+    current_core = saved_core;
+}
+static void interleaved_config_read(void) {
+    unsigned saved_core = current_core;
+    current_core = 1;
+    config_read_active = true;
+    if (setjmp(config_set_blocked) == 0) {
+        config_snapshot(&global_state, &observed_config);
+        ++config_read_invoked;
+    }
+    config_read_active = false;
     current_core = saved_core;
 }
 void *storage_memcpy(void *destination, const void *source, size_t length) {
@@ -95,15 +119,26 @@ void *storage_memcpy(void *destination, const void *source, size_t length) {
         CHECK(++verification_copies == 1);
         verification_bytes += (unsigned)length;
     }
-    if (config_set_on_copy && destination == global_state.page_buffer
+    if (((config_set_on_copy && destination == global_state.page_buffer) || config_set_on_read)
         && source == &global_state.config && length == sizeof(config_t)) {
         config_set_on_copy = false;
+        config_set_on_read = false;
         /* Preempt the native copy inside one multibyte config field. This
            models a legal copy interleaving; the actual setter must acquire its
            own lock to defer. Without serialization the saved field is torn. */
-        size_t split = offsetof(config_t, output[0].screensaver.idle_time_us) + 4;
+        size_t split = config_copy_split ? config_copy_split
+            : offsetof(config_t, output[0].screensaver.idle_time_us) + 4;
         memcpy(destination, source, split);
         interleaved_config_set();
+        memcpy((uint8_t *)destination + split, (const uint8_t *)source + split, length - split);
+        return destination;
+    }
+    if (config_read_on_copy && destination == &global_state.config && length == sizeof(config_t)) {
+        config_read_on_copy = false;
+        size_t split = config_copy_split ? config_copy_split
+            : offsetof(config_t, output[0].screensaver.idle_time_us) + 4;
+        memcpy(destination, source, split);
+        interleaved_config_read();
         memcpy((uint8_t *)destination + split, (const uint8_t *)source + split, length - split);
         return destination;
     }
@@ -127,8 +162,9 @@ void critical_section_enter_blocking(critical_section_t *cs) {
     if (lock_depth[cs->id]) {
         /* Run the real setter up to its blocked SDK acquisition, then resume
            that operation from its side-effect-free entry when the lock opens. */
-        CHECK(config_set_active && cs->id == 3 && lock_owner[cs->id] != current_core);
-        config_set_pending = true;
+        CHECK((config_set_active || config_read_active) && cs->id == 3 && lock_owner[cs->id] != current_core);
+        if (config_set_active) config_set_pending = true;
+        if (config_read_active) config_read_pending = true;
         longjmp(config_set_blocked, 1);
     }
     lock_owner[cs->id] = current_core;
@@ -159,6 +195,10 @@ void critical_section_exit(critical_section_t *cs) {
     if (cs->id == 3 && config_set_pending) {
         config_set_pending = false;
         interleaved_config_set();
+    }
+    if (cs->id == 3 && config_read_pending) {
+        config_read_pending = false;
+        interleaved_config_read();
     }
 }
 uint32_t save_and_disable_interrupts(void) {
@@ -269,12 +309,21 @@ bool queue_packet_try(const uint8_t *data, enum packet_type_e type, int length) 
     }
     return admitted;
 }
+void queue_packet(const uint8_t *data, enum packet_type_e type, int length) {
+    /* This storage-boundary call observes publication of the calibrated pair;
+       protected UART encoding/delivery remains in the paired simulator. */
+    CHECK(queue_packet_try(data, type, length));
+}
 
 static void fresh(const char *name) {
     scenario = name;
     batch_flash_order = false;
     config_set_on_copy = config_set_pending = config_set_active = false;
     config_set_invoked = 0;
+    config_set_on_read = config_read_on_copy = config_read_active = config_read_pending = false;
+    config_read_invoked = 0;
+    config_write_border = config_write_opposite_edge = false;
+    config_copy_split = 0;
     event("scenario-start", 0);
     memset(&global_state, 0, sizeof(global_state));
     storage_flash = receiver_flash;
@@ -1055,21 +1104,271 @@ static void config_persistence_and_migration(void) {
 
 static void config_set_during_save(void) {
     fresh("config_set_during_save_keeps_persisted_crc_coherent");
-    global_state.config.output[0].screensaver.idle_time_us = UINT64_C(0x0011223344556677);
+    global_state.config.output[0].screensaver.idle_time_us = UINT64_C(0x0000223344556677);
     config_set_on_copy = true;
     save_config(&global_state);
     CHECK(config_set_invoked == 1);
     config_t persisted;
     memcpy(&persisted, ADDR_CONFIG, sizeof(persisted));
     CHECK(persisted.checksum == oracle_crc32((const uint8_t *)&persisted, offsetof(config_t, checksum)));
-    CHECK(persisted.output[0].screensaver.idle_time_us == UINT64_C(0x0011223344556677)
-          || persisted.output[0].screensaver.idle_time_us == UINT64_C(0x0066778899aabbcc));
-    CHECK(global_state.config.output[0].screensaver.idle_time_us == UINT64_C(0x0066778899aabbcc));
+    CHECK(persisted.output[0].screensaver.idle_time_us == UINT64_C(0x0000223344556677)
+          || persisted.output[0].screensaver.idle_time_us == UINT64_C(0x0000778899aabbcc));
+    CHECK(global_state.config.output[0].screensaver.idle_time_us == UINT64_C(0x0000778899aabbcc));
     /* The later SET was not lost: a subsequent explicit save persists it. */
     save_config(&global_state);
     memset(&global_state.config, 0, sizeof(config_t));
     load_config(&global_state);
-    CHECK(global_state.config.output[0].screensaver.idle_time_us == UINT64_C(0x0066778899aabbcc));
+    CHECK(global_state.config.output[0].screensaver.idle_time_us == UINT64_C(0x0000778899aabbcc));
+}
+
+static config_t customized_config(void) {
+    config_t config = default_config;
+    config.force_mouse_boot_mode = 1;
+    config.force_kbd_boot_protocol = 1;
+    config.kbd_led_as_indicator = 0;
+    config.hotkey_toggle = 0xa5;
+    config.enable_acceleration = 0;
+    config.enforce_ports = 0;
+    config.jump_threshold = 987;
+    config.screensaver_system_timeout_sec = 123456789;
+    for (unsigned i = 0; i < 2; ++i) {
+        config.output[i].screen_count = 7 + i;
+        config.output[i].screen_index = 3 + i;
+        config.output[i].speed_x = 47 + i;
+        config.output[i].speed_y = 59 + i;
+        config.output[i].border = (border_size_t){901 + (int)i, 31000 - (int)i};
+        config.output[i].os = i ? LINUX : MACOS;
+        config.output[i].mouse_park_pos = 3;
+        config.output[i].screensaver.mode = i ? PONG : DISABLED;
+        config.output[i].screensaver.only_if_inactive = 1;
+        config.output[i].screensaver.idle_time_us = UINT64_C(7200000000) + i;
+        config.output[i].screensaver.max_time_us = UINT64_C(281474976710655) - i;
+    }
+    return config;
+}
+static void install_config(config_t *config) {
+    config->checksum = oracle_crc32((const uint8_t *)config, offsetof(config_t, checksum));
+    memcpy(storage_flash + STORAGE_CONFIG_OFFSET, config, sizeof(*config));
+}
+static void same_settings(const config_t *left, const config_t *right) {
+    CHECK(memcmp(left, right, offsetof(config_t, checksum)) == 0);
+}
+static void config_semantic_persistence(void) {
+    /* Every scalar with an invalid representable storage value is repaired
+       independently. Full-width byte/uint16/uint32 fields have no such value. */
+    /* Locate the actual persisted members, not the production field map.
+       A mistaken API mapping must not move both fixture and repair oracle. */
+#define INVALID(MEMBER, VALUE) {offsetof(config_t, MEMBER), sizeof(((config_t *)0)->MEMBER), VALUE}
+    static const struct { size_t offset, width; uint64_t invalid; } invalid[] = {
+        INVALID(output[0].screen_count, 0), INVALID(output[0].speed_x, 0),
+        INVALID(output[0].speed_y, 129), INVALID(output[0].border.top, UINT32_MAX),
+        INVALID(output[0].border.bottom, 32768), INVALID(output[0].os, 0),
+        INVALID(output[0].pos, 3), INVALID(output[0].mouse_park_pos, 2),
+        INVALID(output[0].screensaver.mode, 3), INVALID(output[0].screensaver.only_if_inactive, 2),
+        INVALID(output[1].screen_count, UINT32_MAX), INVALID(output[1].speed_x, UINT32_MAX),
+        INVALID(output[1].speed_y, 129), INVALID(output[1].border.top, 32768),
+        INVALID(output[1].border.bottom, UINT32_MAX), INVALID(output[1].os, 5),
+        INVALID(output[1].pos, 0), INVALID(output[1].mouse_park_pos, 2),
+        INVALID(output[1].screensaver.mode, 255), INVALID(output[1].screensaver.only_if_inactive, 255),
+        INVALID(force_mouse_boot_mode, 2), INVALID(force_kbd_boot_protocol, 2),
+        INVALID(kbd_led_as_indicator, 255), INVALID(enable_acceleration, 255),
+        INVALID(enforce_ports, 255),
+    };
+#undef INVALID
+    for (unsigned test = 0; test < sizeof(invalid) / sizeof(invalid[0]); ++test) {
+        fresh("valid_crc_invalid_scalar_repairs_only_affected_setting");
+        config_t stored = customized_config(), expected = stored;
+        size_t offset = invalid[test].offset, size = invalid[test].width;
+        memcpy((uint8_t *)&stored + offset, &invalid[test].invalid, size);
+        memcpy((uint8_t *)&expected + offset, (const uint8_t *)&default_config + offset, size);
+        for (unsigned output = 0; output < 2; ++output) {
+            if (expected.output[output].screen_index > expected.output[output].screen_count)
+                expected.output[output].screen_index = expected.output[output].screen_count;
+        }
+        install_config(&stored);
+        global_state.config = stored;
+        save_config(&global_state);
+        CHECK(!programs && !erases);
+        CHECK(memcmp(&global_state.config, &stored, sizeof(stored)) == 0);
+        load_config(&global_state);
+        same_settings(&global_state.config, &expected);
+        CHECK(!programs && !erases); /* Current format repairs are RAM-only. */
+        CHECK(memcmp(ADDR_CONFIG, &stored, sizeof(stored)) == 0);
+        save_config(&global_state);
+        CHECK(programs == 1 && erases == 1);
+        config_t saved;
+        memcpy(&saved, ADDR_CONFIG, sizeof(saved));
+        CHECK(saved.checksum == oracle_crc32((const uint8_t *)&saved, offsetof(config_t, checksum)));
+        same_settings(&saved, &expected);
+        memset(&global_state.config, 0, sizeof(config_t));
+        load_config(&global_state);
+        same_settings(&global_state.config, &expected);
+    }
+    for (unsigned version = 8; version <= 10; ++version) {
+        fresh("identity_border_and_runtime_index_repair_after_migration");
+        config_t stored = customized_config(), expected = stored;
+        stored.version = version;
+        stored.output[0].number = 3;
+        stored.output[1].number = UINT32_MAX;
+        stored.output[0].border = (border_size_t){16384, 16384};
+        stored.output[1].border = (border_size_t){25000, 12000};
+        stored.output[0].screen_index = 0;
+        stored.output[1].screen_index = UINT32_MAX;
+        expected.output[0].border = default_config.output[0].border;
+        expected.output[1].border = default_config.output[1].border;
+        expected.output[0].screen_index = 1;
+        expected.output[1].screen_index = expected.output[1].screen_count;
+        if (version < 10) {
+            expected.output[0].screensaver.mode = JITTER;
+            expected.output[1].screensaver.mode = JITTER;
+        }
+        if (version == 8) expected.screensaver_system_timeout_sec = SCREENSAVER_SYSTEM_TIMEOUT_SEC;
+        install_config(&stored);
+        load_config(&global_state);
+        same_settings(&global_state.config, &expected);
+        CHECK(programs == (version < 10 ? 1u : 0u));
+        if (version < 10) same_settings(ADDR_CONFIG, &expected);
+        else CHECK(memcmp(ADDR_CONFIG, &stored, sizeof(stored)) == 0);
+    }
+    fresh("save_refuses_invalid_snapshot_without_flash_or_ram_mutation");
+    global_state.config = customized_config();
+    save_config(&global_state);
+    uint8_t sector[FLASH_SECTOR_SIZE];
+    memcpy(sector, ADDR_CONFIG, sizeof(sector));
+    global_state.config.output[0].border = (border_size_t){16384, 16384};
+    config_t invalid_ram = global_state.config;
+    save_config(&global_state);
+    CHECK(programs == 1 && erases == 1);
+    CHECK(memcmp(sector, ADDR_CONFIG, sizeof(sector)) == 0);
+    CHECK(memcmp(&invalid_ram, &global_state.config, sizeof(invalid_ram)) == 0);
+    const unsigned bad_versions[] = {0, 7, 11, UINT32_MAX};
+    for (unsigned i = 0; i < sizeof(bad_versions) / sizeof(bad_versions[0]); ++i) {
+        fresh("unsupported_persisted_version_uses_defaults");
+        config_t stored = customized_config();
+        stored.version = bad_versions[i];
+        install_config(&stored);
+        load_config(&global_state);
+        same_settings(&global_state.config, &default_config);
+        CHECK(!programs && !erases);
+    }
+    fresh("valid_crc_bad_magic_uses_defaults");
+    config_t wrong_magic = customized_config();
+    wrong_magic.magic_header ^= 1;
+    install_config(&wrong_magic);
+    load_config(&global_state);
+    same_settings(&global_state.config, &default_config);
+    CHECK(!programs && !erases);
+}
+static void config_publication_schedules(void) {
+    fresh("set_preempts_real_reader_snapshot_mid_timeout");
+    const uint64_t before = UINT64_C(0x0000223344556677);
+    const uint64_t after = UINT64_C(0x0000778899aabbcc);
+    global_state.config.output[0].screensaver.idle_time_us = before;
+    config_set_on_read = true;
+    config_t snapshot;
+    config_snapshot(&global_state, &snapshot);
+    CHECK(config_set_invoked == 1);
+    CHECK(snapshot.output[0].screensaver.idle_time_us == before);
+    CHECK(global_state.config.output[0].screensaver.idle_time_us == after);
+    fresh("reader_preempts_set_publication_mid_timeout");
+    global_state.config.output[0].screensaver.idle_time_us = before;
+    config_read_on_copy = true;
+    uart_packet_t packet = {.type = SET_VAL_MSG, .data = {21}};
+    memcpy(packet.data + 1, &after, 7);
+    handle_api_msgs(&packet, &global_state);
+    CHECK(config_read_invoked == 1);
+    CHECK(observed_config.output[0].screensaver.idle_time_us == after);
+    same_settings(&observed_config, &global_state.config);
+    fresh("reader_preempts_load_publication_mid_timeout");
+    global_state.config.output[0].screensaver.idle_time_us = before;
+    config_t stored = customized_config();
+    install_config(&stored);
+    config_read_on_copy = true;
+    load_config(&global_state);
+    CHECK(config_read_invoked == 1);
+    same_settings(&observed_config, &stored);
+    fresh("border_pair_writer_preempts_reader_between_top_and_bottom");
+    global_state.config.output[0].border = (border_size_t){100, 1000};
+    config_set_on_read = config_write_border = true;
+    config_copy_split = offsetof(config_t, output[0].border.bottom);
+    config_snapshot(&global_state, &snapshot);
+    CHECK(config_set_invoked == 1);
+    CHECK(snapshot.output[0].border.top == 100 && snapshot.output[0].border.bottom == 1000);
+    CHECK(global_state.config.output[0].border.top == 5000 && global_state.config.output[0].border.bottom == 6000);
+    fresh("reader_preempts_border_pair_publication_between_top_and_bottom");
+    global_state.config.output[0].border = (border_size_t){100, 1000};
+    config_read_on_copy = true;
+    config_copy_split = offsetof(config_t, output[0].border.bottom);
+    const border_size_t border = {5000, 6000};
+    CHECK(config_set_border(&global_state, 0, &border));
+    CHECK(config_read_invoked == 1);
+    CHECK(observed_config.output[0].border.top == 5000 && observed_config.output[0].border.bottom == 6000);
+    fresh("calibration_preserves_concurrent_opposite_edge_set");
+    global_state.active_output = global_state.board_role = 0;
+    global_state.pointer_y = 200;
+    global_state.config.output[0].border = (border_size_t){100, 30000};
+    config_set_on_read = config_write_opposite_edge = true;
+    screen_border_hotkey_handler(&global_state, NULL);
+    CHECK(config_set_invoked == 1);
+    CHECK(global_state.config.output[0].border.top == 200);
+    CHECK(global_state.config.output[0].border.bottom == 6000);
+    config_t calibrated;
+    memcpy(&calibrated, ADDR_CONFIG, sizeof(calibrated));
+    CHECK(calibrated.output[0].border.top == 200 && calibrated.output[0].border.bottom == 6000);
+    CHECK(calibrated.checksum == oracle_crc32((const uint8_t *)&calibrated, offsetof(config_t, checksum)));
+    fresh("stale_consumer_index_publication_after_count_reduction");
+    global_state.config.output[0].screen_count = 10;
+    global_state.config.output[0].screen_index = 7;
+    config_snapshot(&global_state, &snapshot);
+    packet = (uart_packet_t){.type = SET_VAL_MSG, .data = {11, 2}};
+    handle_api_msgs(&packet, &global_state);
+    config_set_screen_index(&global_state, 0, snapshot.output[0].screen_index + 1);
+    CHECK(global_state.config.output[0].screen_count == 2);
+    CHECK(global_state.config.output[0].screen_index == 2);
+}
+
+static void config_full_width_legacy_timers(void) {
+    /* SET's 48-bit transport limit must not become a persisted-data limit.
+       Exercise all four fields across current and migrated formats. */
+    const uint64_t durations[] = {
+        UINT64_C(281474976710656), UINT64_C(0x00ffffffffffffff),
+        UINT64_C(0x8000000000000000), UINT64_MAX,
+    };
+    for (unsigned version = 8; version <= 10; ++version) {
+        fresh("full64_legacy_timers_preserved_on_load_edit_save_and_reload");
+        config_t stored = customized_config(), expected = stored;
+        for (unsigned output = 0; output < 2; ++output) {
+            stored.output[output].screensaver.idle_time_us = durations[output * 2];
+            stored.output[output].screensaver.max_time_us = durations[output * 2 + 1];
+            expected.output[output].screensaver = stored.output[output].screensaver;
+            if (version < 10) expected.output[output].screensaver.mode = JITTER;
+        }
+        stored.version = version;
+        if (version == 8) expected.screensaver_system_timeout_sec = SCREENSAVER_SYSTEM_TIMEOUT_SEC;
+        install_config(&stored);
+        load_config(&global_state);
+        same_settings(&global_state.config, &expected);
+        CHECK(programs == (version < 10 ? 1u : 0u));
+        CHECK(erases == programs);
+        /* Unrelated valid edit must neither be rejected nor wipe the timers. */
+        uart_packet_t packet = {.type = SET_VAL_MSG, .data = {12, 63}};
+        handle_api_msgs(&packet, &global_state);
+        expected.output[0].speed_x = 63;
+        same_settings(&global_state.config, &expected);
+        save_config(&global_state);
+        config_t saved;
+        memcpy(&saved, ADDR_CONFIG, sizeof(saved));
+        CHECK(saved.checksum == oracle_crc32((const uint8_t *)&saved, offsetof(config_t, checksum)));
+        same_settings(&saved, &expected);
+        memset(&global_state.config, 0, sizeof(config_t));
+        load_config(&global_state);
+        same_settings(&global_state.config, &expected);
+        /* An explicit narrow timer SET replaces all eight bytes by request. */
+        packet = (uart_packet_t){.type = SET_VAL_MSG, .data = {21, 1}};
+        handle_api_msgs(&packet, &global_state);
+        expected.output[0].screensaver.idle_time_us = 1;
+        same_settings(&global_state.config, &expected);
+    }
 }
 
 static void power_cut_observation(void) {
@@ -1406,6 +1705,9 @@ int main(int argc, char **argv) {
     for (unsigned failure = 0; failure < 4; ++failure) actual_batch_transfer(failure);
     config_persistence_and_migration();
     config_set_during_save();
+    config_semantic_persistence();
+    config_publication_schedules();
+    config_full_width_legacy_timers();
     power_cut_observation();
     watchdog_contract();
     diagnostic_task_checkpoints();

@@ -328,6 +328,9 @@ int main(void) {
     }
     sim_task(3);assert(outputs==1);
     wide_motion();
+    /* The malformed-motion fixture intentionally poisons speed fields. The
+       following transport cases require an independently valid config. */
+    global_state.config = default_config;
     vendor_diagnostics_cannot_enter_core1();
     vendor_transport_integrity();
 #if SIM_HAS_DIAGNOSTIC_HISTORY

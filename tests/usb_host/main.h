@@ -17,6 +17,7 @@ typedef struct { unsigned unused; } queue_t;
 #include "pinout.h"
 #include "hid_report.h"
 extern device_t global_state;
+void config_snapshot(const device_t *, config_t *);
 void restore_leds(device_t *);
 void send_value(uint8_t, enum packet_type_e);
 bool validate_packet(uart_packet_t *);

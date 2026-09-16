@@ -99,6 +99,9 @@ void tud_hid_set_report_cb(uint8_t instance,
     if (report_id != REPORT_ID_KEYBOARD || bufsize != 1 || report_type != HID_REPORT_TYPE_OUTPUT)
         return;
 
+    if (BOARD_ROLE >= NUM_SCREENS)
+        return;
+
     uint8_t leds = buffer[0];
 
     /* Cache the host's unmodified state. The focus indicator is applied when
@@ -240,6 +243,11 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     if (dev_addr == 0 || dev_addr > MAX_DEVICES || instance >= MAX_INTERFACES)
         return;
 
+    /* Port policy and boot protocol must come from one published config.
+       Release its lock before parsing or making any TinyUSB calls. */
+    config_t config;
+    config_snapshot(&global_state, &config);
+
     /* Get interface information */
     hid_interface_t *iface = &global_state.iface[dev_addr-1][instance];
 
@@ -261,10 +269,10 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
 
     switch (itf_protocol) {
         case HID_ITF_PROTOCOL_KEYBOARD:
-            if (global_state.config.enforce_ports && BOARD_ROLE == OUTPUT_B)
+            if (config.enforce_ports && BOARD_ROLE == OUTPUT_B)
                 return;
 
-            if (global_state.config.force_kbd_boot_protocol)
+            if (config.force_kbd_boot_protocol)
                 tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_BOOT);
 
             /* Keeping this is required for setting leds from device set_report callback */
@@ -274,10 +282,10 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
             break;
 
         case HID_ITF_PROTOCOL_MOUSE:
-            if (global_state.config.enforce_ports && BOARD_ROLE == OUTPUT_A)
+            if (config.enforce_ports && BOARD_ROLE == OUTPUT_A)
                 return;
 
-            if (global_state.config.force_mouse_boot_mode) {
+            if (config.force_mouse_boot_mode) {
                 /* User requested boot mode - simpler protocol for compatibility.
                    Note: many mice still send wheel data even in boot mode. */
                 tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_BOOT);

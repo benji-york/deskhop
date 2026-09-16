@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <limits.h>
 #include "config_migration.h"
 #include "structs.h"
 #include "misc.h"
@@ -44,6 +45,19 @@ size_t             get_field_map_length(void);
 /* Protect brief RAM configuration mutations/snapshots, never flash or queues. */
 void config_lock(void);
 void config_unlock(void);
+/* Persisted layout is unchanged. Both direct and proxied SETs carry six value
+ * bytes; byte seven in a direct UINT64 request must be zero. Existing full-width
+ * persisted durations remain valid and are never narrowed during load/save. */
+#define CONFIG_TIMEOUT_MAX_US UINT64_C(281474976710655)
+#define CONFIG_SPEED_MAX 128
+#define CONFIG_SCREEN_COUNT_MAX INT32_MAX
+void config_snapshot(const device_t *, config_t *);
+bool config_validate(const config_t *);
+bool config_repair(config_t *);
+bool config_set_value(device_t *, uint8_t, const uint8_t value[7]);
+bool config_set_border(device_t *, uint8_t, const border_size_t *);
+bool config_set_screensaver_mode(device_t *, uint8_t, uint8_t);
+void config_set_screen_index(device_t *, uint8_t, uint32_t);
 void load_config(device_t *);
 void queue_cfg_packet(uart_packet_t *, device_t *);
 void reset_config_timer(device_t *);

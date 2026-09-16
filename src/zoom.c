@@ -31,12 +31,15 @@ static void send_zoom_assist_state(device_t *state, uint8_t output) {
 }
 
 bool zoom_assist_is_active(const device_t *state) {
-    if (state->active_output >= NUM_SCREENS)
+    uint8_t active_output = state->active_output;
+    if (active_output >= NUM_SCREENS)
         return false;
 
-    return state->config.output[state->active_output].os == MACOS
-           && (state->zoom_assist[state->active_output].active
-               || state->zoom_activation_pending[state->active_output]);
+    config_t config;
+    config_snapshot(state, &config);
+    return config.output[active_output].os == MACOS
+           && (state->zoom_assist[active_output].active
+               || state->zoom_activation_pending[active_output]);
 }
 
 bool mouse_uses_relative_mode(const device_t *state) {
@@ -44,10 +47,12 @@ bool mouse_uses_relative_mode(const device_t *state) {
 }
 
 bool is_macos_zoom_scroll(const device_t *state, int32_t wheel) {
-    if (wheel == 0 || state->active_output >= NUM_SCREENS)
+    uint8_t active_output = state->active_output;
+    if (wheel == 0 || active_output >= NUM_SCREENS)
         return false;
 
-    const output_t *output = &state->config.output[state->active_output];
+    config_t config;
+    config_snapshot(state, &config);
     uint64_t now = time_us_64();
     uint8_t modifiers = state->local_modifiers;
 
@@ -55,7 +60,7 @@ bool is_macos_zoom_scroll(const device_t *state, int32_t wheel) {
                                      state->peer_modifiers_last_seen, now))
         modifiers |= state->peer_modifiers;
 
-    return output->os == MACOS && (modifiers & MACOS_ZOOM_MODIFIERS) != 0;
+    return config.output[active_output].os == MACOS && (modifiers & MACOS_ZOOM_MODIFIERS) != 0;
 }
 
 void clear_zoom_assist(device_t *state, uint8_t output, bool forget_direction) {

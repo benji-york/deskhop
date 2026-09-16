@@ -14,9 +14,14 @@ from run import ROOT, SOURCES, build, build_saturation
 
 # Each change is intentionally small and directly tied to a production invariant.
 MUTATIONS = [
-    ("config-set-without-snapshot-lock", "handlers.c",
-     "        config_lock();\n        memcpy(ptr, &packet->data[1], map->len);\n        config_unlock();",
-     "        memcpy(ptr, &packet->data[1], map->len);"),
+    ("config-set-without-snapshot-lock", "utils.c",
+     "bool config_set_value(", "bool config_set_value("),
+    ("config-reader-without-snapshot-lock", "utils.c",
+     "void config_snapshot(", "void config_snapshot("),
+    ("config-load-without-semantic-repair", "utils.c",
+     "    config_repair(running_config);", "    /* mutant: publish unchecked settings */"),
+    ("config-save-without-semantic-validation", "utils.c",
+     "    if (!config_validate(&state->config)) {", "    if (false) {"),
     ("duplicate-uf2-program", "ramdisk.c",
      "if (fw_update_mark_block(global_state.uf2_blocks_received,\n"
      "                             &global_state.uf2_blocks_received_count,\n"
@@ -113,7 +118,17 @@ def main():
                 raise RuntimeError(f"Mutation anchor drifted: {name}")
             # Replacing every flash-lock acquisition also catches readers via
             # balanced-release checks; all other anchors are unique.
-            target.write_text(text.replace(old, new))
+            if name in ("config-set-without-snapshot-lock", "config-reader-without-snapshot-lock"):
+                start = text.index(old)
+                terminator = '\nbool config_set_border(' if name == "config-set-without-snapshot-lock" else '\nstatic size_t config_field_size('
+                end = text.index(terminator, start)
+                setter = text[start:end]
+                assert setter.count('    config_lock();') == 1
+                assert setter.count('    config_unlock();') == 1
+                setter = setter.replace('    config_lock();', '').replace('    config_unlock();', '')
+                target.write_text(text[:start] + setter + text[end:])
+            else:
+                target.write_text(text.replace(old, new))
             if name == "wrap-verification-generation":
                 binary = build_saturation(path / "saturation", source_root=path)
                 command = [str(binary), args.seed, "generation-saturation"]

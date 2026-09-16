@@ -19,6 +19,7 @@ typedef struct { unsigned unused; } queue_t;
 #define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8
 void pico_get_unique_board_id_string(char *, unsigned);
 extern device_t global_state;
+void config_snapshot(const device_t *, config_t *);
 void restore_leds(device_t *);
 void send_value(uint8_t, enum packet_type_e);
 bool validate_packet(uart_packet_t *);

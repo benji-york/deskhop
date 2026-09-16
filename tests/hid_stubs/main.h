@@ -19,6 +19,9 @@
 
 typedef struct { unsigned unused; } queue_t;
 typedef struct {
+    bool enforce_ports, force_kbd_boot_protocol, force_mouse_boot_mode;
+} config_t;
+typedef struct {
     uint8_t kbd_dev_addr, kbd_instance;
     uint8_t active_output, board_role, max_kbd_idx, peer_modifiers;
     uint8_t keyboard_leds_desired[NUM_SCREENS];
@@ -36,10 +39,14 @@ typedef struct {
     bool kbd_latest_pending;
     uint32_t kbd_host_generation;
     uint32_t kbd_remote_generation;
-    struct {
-        bool enforce_ports, force_kbd_boot_protocol, force_mouse_boot_mode;
-    } config;
+    config_t config;
 } device_t;
+
+/* Single-threaded HID boundary: production snapshot locking is exercised by
+ * tests/storage, while these tests retain their minimal HID-only state. */
+static inline void config_snapshot(const device_t *state, config_t *snapshot) {
+    *snapshot = state->config;
+}
 
 typedef struct {
     uint8_t modifier, keys[KEYS_IN_USB_REPORT], key_count;

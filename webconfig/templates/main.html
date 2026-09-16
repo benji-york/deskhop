@@ -113,6 +113,10 @@
 
           <h3>Common Config</h3>
 
+          <p>Enter whole numbers except for screensaver times, which use seconds
+             with up to 6 decimal places. Border edits apply on Save, with Top less than Bottom.</p>
+          <p id="config-status" role="status" aria-live="polite"></p>
+
             {% for item in config %}
               {% include "form.html" with context %}
             {% endfor %}

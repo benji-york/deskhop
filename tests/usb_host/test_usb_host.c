@@ -6,6 +6,9 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "USB host failure %s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 
 device_t global_state;
+/* Host-class tests are single-threaded; real config exclusion has its own
+ * production storage-boundary schedule tests. */
+void config_snapshot(const device_t *state, config_t *snapshot) { *snapshot = state->config; }
 static uint32_t virtual_ms;
 static bool connected, trackball_only, multi_keyboard;
 static unsigned controls, mounts, unmounts, resets, mouse_reports, keyboard_reports, modifier_publishes, activity_records, idle_stalls;

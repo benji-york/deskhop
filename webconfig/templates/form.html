@@ -3,7 +3,7 @@
 {% set key = item.key %}
 
 {% macro input(item, type='text', class='api', name='name') %}
-<input class="{{ class }}" type="{{ type }}" name="{{ name }}{{ key }}" data-type="{{ item.type }}" data-key="{{ key }}"{% if item.scale != 1 %} data-scale="{{ item.scale }}" inputmode="decimal" aria-describedby="timer-range-{{ key }}"{% endif %}
+<input class="{{ class }}" type="{{ type }}" name="{{ name }}{{ key }}" data-type="{{ item.type }}" data-key="{{ key }}"{% if item.scale != 1 %} data-scale="{{ item.scale }}" inputmode="decimal" aria-describedby="timer-range-{{ key }}"{% endif %} aria-label="{{ item.name }}"
   onchange="valueChangedHandler(this)"
 {% endmacro %}
 
@@ -44,9 +44,13 @@
 
   </div>
 
+  {% elif item.get("elem") == "number" %}
+    {{ label(item, class='') | trim }}
+    {{ input(item, type="number") | trim }} step="1" />
+
   {% elif item["values"] %}
     {{ label(item, class='') }}
-    <select class="api" data-type="{{ item.type }}" data-key="{{ key }}" required>
+    <select class="api" data-type="{{ item.type }}" data-key="{{ key }}" aria-label="{{ item.name }}" required>
     <option disabled selected value></option>
 
     {% for k, v in item["values"].items() %}

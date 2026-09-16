@@ -19,7 +19,7 @@ const field_map_t api_field_map[] = {
     { 3,  true,  INT16,  2, offsetof(device_t, mouse_buttons) },
 
     /* Output A */
-    { 10, false, UINT32, 4, offsetof(device_t, config.output[0].number) },
+    { 10, true,  UINT32, 4, offsetof(device_t, config.output[0].number) },
     { 11, false, UINT32, 4, offsetof(device_t, config.output[0].screen_count) },
     { 12, false, INT32,  4, offsetof(device_t, config.output[0].speed_x) },
     { 13, false, INT32,  4, offsetof(device_t, config.output[0].speed_y) },
@@ -31,12 +31,14 @@ const field_map_t api_field_map[] = {
     { 19, false, UINT8,  1, offsetof(device_t, config.output[0].screensaver.mode) },
     { 20, false, UINT8,  1, offsetof(device_t, config.output[0].screensaver.only_if_inactive) },
 
-    /* Until we increase the payload size from 8 bytes, clamp to avoid exceeding the field size */
+    /* GET retains its historical seven-byte representation. New SET values
+     * are limited to six bytes for identical direct/proxy semantics; existing
+     * persisted durations still occupy a full uint64_t. */
     { 21, false, UINT64, 7, offsetof(device_t, config.output[0].screensaver.idle_time_us) },
     { 22, false, UINT64, 7, offsetof(device_t, config.output[0].screensaver.max_time_us) },
 
     /* Output B */
-    { 40, false, UINT32, 4, offsetof(device_t, config.output[1].number) },
+    { 40, true,  UINT32, 4, offsetof(device_t, config.output[1].number) },
     { 41, false, UINT32, 4, offsetof(device_t, config.output[1].screen_count) },
     { 42, false, INT32,  4, offsetof(device_t, config.output[1].speed_x) },
     { 43, false, INT32,  4, offsetof(device_t, config.output[1].speed_y) },
@@ -51,7 +53,7 @@ const field_map_t api_field_map[] = {
     { 52, false, UINT64, 7, offsetof(device_t, config.output[1].screensaver.max_time_us) },
 
     /* Common config */
-    { 70, false, UINT32, 4, offsetof(device_t, config.version) },
+    { 70, true,  UINT32, 4, offsetof(device_t, config.version) },
     { 71, false, UINT8,  1, offsetof(device_t, config.force_mouse_boot_mode) },
     { 72, false, UINT8,  1, offsetof(device_t, config.force_kbd_boot_protocol) },
     { 73, false, UINT8,  1, offsetof(device_t, config.kbd_led_as_indicator) },
