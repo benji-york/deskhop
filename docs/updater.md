@@ -7,6 +7,36 @@ speed up the UART protocol, or remove any image checks. Firmware already checks
 the received/programmed image; the host also retains independent readback and
 fresh checks on both Picos.
 
+`main` intentionally retains v0.104 firmware. Both physical Picos currently run
+verified v0.105 from `codex/batched-firmware-transfer`, whose new batch path
+still awaits a physical new/new transfer test. Publishing `main` does not
+downgrade the devices, and the normal updater refuses an older candidate.
+
+## Stock-picotool invocation and hardware evidence
+
+The host workaround retained on `main` keeps the old CDC connection open through
+all ROM operations and normal reboot, then closes it before fresh diagnostics.
+Every stock picotool child receives `LIBUSB_DEBUG=4`; this is a supported libusb
+diagnostic setting, not a custom tool or driver. Only this override is journaled,
+not ambient environment values. Output remains in bounded-command log files.
+Failures still stop without automatic retries and clean up the serial context.
+
+CDC retention alone did not resolve the earlier timeout. The combined stock-tool
+invocation succeeded in a no-flash v0.104 validation and the subsequent physical
+upgrade, but its precise USB timing mechanism remains unproven. Do not interpret
+one successful upgrade as a guarantee that every timeout is fixed.
+
+Evidence: `build/updater/runs/stock-debug-once-20260916/` read the full v0.104
+firmware and saved settings twice, rebooted normally and verified both boards
+without any flash write. `build/updater/runs/20260916T003027Z-v6d93apw/` then
+completed backup, verified load, exact readback, unchanged settings, reboot and
+legacy peer propagation. Its final scan stopped on A `UNVERIFIED busy` (B PASS).
+Separate read-only verification in
+`build/updater/runs/20260916T003133Z-r795gjiq/` passed both-board identity, progress,
+history and correct/wrong/correct full-slot checks. Keep the original failed
+verdict separate; physical input acceptance and new/new batch timing are not
+established by those checks. All 105 host updater tests pass.
+
 ## Commands
 
 Run these from the repository root:
@@ -82,7 +112,8 @@ are not silently repaired. Review the evidence instead of blindly retrying.
    evidence. Stage private per-run image copies and recheck them before writing.
    Check Mac media clients and both running Pico identities/core freshness.
 2. Send the local `bootloader A` or `bootloader B` command exactly once, retaining
-   DTR/the serial connection through its complete response and ROM enumeration.
+   DTR/the serial connection through its complete response, ROM operations and
+   normal application reboot; close it before fresh application diagnostics.
    Confirm the selected flash UID and **disk-free PICOBOOT only**.
 3. Back up the full 256 KiB firmware slot and all 4,096 saved-settings bytes.
    Validate the old image and version, then load the UF2 with picotool verification.

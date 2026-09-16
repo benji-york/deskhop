@@ -8,7 +8,51 @@ README.
 
 Snapshot: 2026-09-15
 
-## Repository-owned updater (host implementation; hardware acceptance pending)
+## Publication boundary: main is v0.104; the devices remain on v0.105
+
+Benji requested merging only physically tested changes and explicitly limited
+`main` to v0.104. The completed dependency chain through `2509929` is included:
+hardware-free testing and input fixes, keyboard-state recovery, UART integrity
+and its v0.102 migration, the Bootloader button fix, serial bootloader commands,
+and the reusable updater. Firmware/build/vendor/disk inputs match the accepted
+v0.104 snapshot exactly (full-slot CRC `befb208b`, metadata CRC `4f648cd9`).
+
+The host-only stock-picotool workaround is included as `499ee96`, cherry-picked
+from `07fa0b4`. It retains CDC through ROM operations/reboot and enables
+`LIBUSB_DEBUG=4` only for stock picotool children. It has been exercised on the
+physical devices; no firmware changes are required. All 105 updater tests pass.
+
+v0.105 batching (`0245392`) remains on `codex/batched-firmware-transfer`, not
+merged into `main`. Although both Picos have v0.105 installed and verified, the
+first upgrade used the old v0.104 receiver's legacy transfer path. The new
+batch-transfer behavior still needs a physical new/new upgrade before merging.
+The branch retains the detailed deployment record in
+`docs/testing/batched-transfer-v105.md`.
+
+This publication does not flash or downgrade either Pico. Both still run
+v0.105, full-slot CRC `e4843d6a`, metadata CRC `6bffee14`. The normal updater
+refuses a v0.104 downgrade; do not bypass that guard. Latest flash evidence is
+`build/updater/runs/20260916T003027Z-v6d93apw/`: backup, verified write, independent
+readback, unchanged settings, normal reboot and automatic peer propagation
+completed. Its final diagnostic stopped on A `UNVERIFIED busy`; the separate
+read-only run `build/updater/runs/20260916T003133Z-r795gjiq/` then passed fresh
+correct/wrong/correct full-slot checks on both Picos. The original failed result
+is preserved, not relabeled. Physical input acceptance remains separate.
+
+Also excluded: unfinished configuration-validation work in its own worktree,
+broad reboot-safety work, superseded selective/replay integration alternatives,
+and newly fetched upstream `bff4d0c` (the integrated upstream baseline remains
+`ce8abb6`). These are not hardware-tested additions to this publication.
+
+Duplicate files with ` 2` suffixes appeared during the earlier branch operation;
+70 were byte-identical to their corresponding files when inspected. They were
+left untracked and untouched, not included in any commit. Review them before
+preparing a new release, because source snapshots include untracked inputs.
+
+The deployment notes below retain historical evidence; this section supersedes
+their then-current branch, hardware and acceptance statements.
+
+## Repository-owned updater (hardware-exercised; verification remains mandatory)
 
 Use the root Makefile and `scripts/update_firmware.py` for future upgrades;
 release-specific scripts under `build/flashing/` are retained historical evidence,
@@ -28,11 +72,12 @@ migration, not this automatic workflow.
 
 Evidence is retained under `build/releases/` and `build/updater/runs/`; checks and
 settings backups are not traded away for speed. Preparation can reuse the same
-validated candidate when inputs are unchanged. Firmware sources/version, QMK,
-and the deployed pair are unchanged by this host-only work. Actual flashing and
-serial-command hardware acceptance remain pending; offline test doubles are not
-evidence of physical USB/ROM behavior. Ask Benji to check normal input after any
-future successful device verification.
+validated candidate when inputs are unchanged. The latest live workflow
+exercised local serial ROM entry, upload/readback, unchanged settings, reboot and
+automatic propagation. A separate read-only verification passed after a busy
+verdict, as recorded above. Offline test doubles alone are not evidence of
+physical USB/ROM behavior. Ask Benji to check normal input after any future
+successful device verification.
 
 Host-only validation on 2026-09-15 passed all 99 updater tests, all 40 fast-tier
 steps, ARM configuration/build, default Make help, and hardware-free preview.
@@ -65,9 +110,10 @@ CRC `befb208b`, unchanged boot sessions and advancing cores. Combined history
 checks and unchanged active/nonbusy Mac media checks passed. Evidence:
 `build/updater/runs/20260915T210433Z-y3kn8rst/result.json`, with
 `firmware_verified=true`, `write_started=false`, and `reboot_requested=false`.
-The new updater's live diagnostic path is exercised; serial ROM entry, upload
-and auto-propagation through this new host workflow remain untested. No firmware
-or QMK changes were needed, and no new user-input acceptance is claimed.
+At this stage only the live diagnostic path had been exercised; serial ROM
+entry, upload and auto-propagation were tested subsequently as recorded above.
+No firmware or QMK changes were needed for this diagnostic run, and no new
+user-input acceptance was claimed.
 
 ## Accepted v0.104: serial bootloader entry (physical command check pending)
 
@@ -523,7 +569,7 @@ PIO USB timing. See the [validation record](docs/testing/validation.md).
 
 | Component | Local repository | Remote | Source / verified state |
 | --- | --- | --- | --- |
-| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`, firmware v0.92 with upstream `ce8abb6` merged; seven native suites and ARM build pass. Flashed 2026-09-14; basic input checks reported normal. Peer version not independently read back. |
+| DeskHop | `/Users/benji/Documents/ChatGPT/DeskHop` | `git@github.com:benji-york/deskhop.git` | `main`: accepted v0.104 firmware plus the hardware-exercised host updater workaround; upstream `ce8abb6` integrated. Devices remain on verified v0.105 from the separate batching branch. See the publication boundary above. |
 | Sofle/QMK | `/Users/benji/qmk_firmware` | `git@github.com:benji-york/qmk_firmware.git` | `master` at `469f5dc815` (`Map DeskHop reboot to Layer 3 Q`) |
 | Physical carrier project | n/a | [jfedor2/screen-hopper](https://github.com/jfedor2/screen-hopper) | The installed two-Pico board shown in the setup photo |
 
@@ -544,7 +590,8 @@ The hardware-verified auto-start build is:
 
 - `/Users/benji/Documents/Codex/2026-08-13/i/outputs/deskhop-v0.91-auto-start-jitter.uf2`
 
-The v0.92 build flashed on 2026-09-14 is:
+The v0.92 build flashed on 2026-09-14 was produced at this mutable build path
+(which does not necessarily still contain that image):
 
 - `/Users/benji/Documents/ChatGPT/DeskHop/build/deskhop.uf2`
 
@@ -558,8 +605,9 @@ basic deployment smoke test, not an independent readback of both Pico versions.
 Extended v0.92 zoom assist, timed jitter, and coordinated reboot tests have not
 yet been recorded.
 
-The main snapshot builds v0.92; Pico A now runs the test-framework branch's
-v0.94 described above. To reproduce hardware-verified v0.91,
+The current `main` snapshot builds v0.104; both Picos remain on the separate
+v0.105 batching branch's image. The v0.92/v0.94 notes above are historical.
+To reproduce hardware-verified v0.91,
 use commit `c1e9420` or its archived binary. For the older hardware-tested v0.90
 state, use commit `6d1cd12` or its archived binary.
 
