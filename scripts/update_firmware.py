@@ -16,7 +16,7 @@ import time
 
 from deskhop_update.artifact import fingerprint_sources, freeze, load_candidate
 from deskhop_update.platform import MacBackend, deployment_lock, require, write_json
-from deskhop_update.workflow import Updater, validate_profile
+from deskhop_update.workflow import Updater, VERIFICATION_MODES, validate_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 LATEST = ROOT / 'build/updater/latest.json'
@@ -125,18 +125,24 @@ def read_profile(args):
     return validate_profile(profile)
 
 
-def describe(candidate, profile, already_bootloader=False, *, verify_only=False):
+def describe(candidate, profile, already_bootloader=False, *, verify_only=False,
+             verification_mode='normal'):
     target = profile['target']
     print(f"Candidate: v{candidate['build']} | CRC32 {candidate['slot_crc']} | BIN SHA256 {candidate['bin_sha256']}")
     print(f"Manifest: {candidate['manifest_path']}")
     print(f"USB target: {target} ({profile['uids'][target]}), console {profile['port']}")
+    print(f'Verification mode: {verification_mode}')
+    scans = ('correct/wrong/correct CRC scans on both boards' if verification_mode == 'thorough'
+             else 'one fresh correct-CRC scan on both boards')
     if verify_only:
-        print('Plan: read-only media/identity checks → both-board fresh CRC/core/history verification.')
+        print(f'Plan: read-only media/identity checks → {scans} + core/history verification.')
         print('No bootloader entry, firmware/settings write, or reboot will be requested.')
         return
+    readback = ('extra ROM firmware readback + settings readback' if verification_mode == 'thorough'
+                else 'settings readback')
     print('Plan: media/identity checks → ' + ('inspect existing disk-free ROM' if already_bootloader else 'serial bootloader entry')
-          + ' → firmware/settings backups → load + independent readback → normal reboot\n'
-          '      → bounded peer propagation → both-board fresh CRC/core/history verification.')
+          + f' → firmware/settings backups → picotool load -v → {readback} → normal reboot\n'
+          + f'      → bounded peer propagation → {scans} + core/history verification.')
     print('Already-current images are verified without rewriting. Same-version replacements/downgrades are refused.')
 
 
@@ -157,7 +163,8 @@ def stage_images(candidate, directory):
 def operate(args):
     candidate = load_candidate(manifest_path(args.manifest))
     profile = read_profile(args)
-    describe(candidate, profile, args.already_bootloader, verify_only=args.command == 'verify')
+    describe(candidate, profile, args.already_bootloader, verify_only=args.command == 'verify',
+             verification_mode=args.verification_mode)
     if args.command == 'plan':
         print('Preview only: no USB inspection, serial port, or picotool was opened.')
         return
@@ -169,12 +176,13 @@ def operate(args):
         evidence = Path(tempfile.mkdtemp(prefix=prefix, dir=args.evidence_dir)).resolve()
         print(f'Evidence: {evidence}', flush=True)
         write_json(evidence / 'invocation.json', {'operation': args.command, 'profile': profile,
-                   'manifest': str(candidate['manifest_path']), 'already_bootloader': args.already_bootloader})
+                   'manifest': str(candidate['manifest_path']), 'already_bootloader': args.already_bootloader,
+                   'verification_mode': args.verification_mode})
         (evidence / 'candidate-manifest.json').write_bytes(candidate['manifest_path'].read_bytes())
         candidate = stage_images(candidate, evidence)
         backend = MacBackend(evidence, profile['port'], args.picotool)
         updater = Updater(candidate, profile, backend, evidence, already_bootloader=args.already_bootloader,
-                          rollout_timeout=args.rollout_timeout)
+                          rollout_timeout=args.rollout_timeout, verification_mode=args.verification_mode)
         if args.command == 'flash':
             updater.run()
         else:
@@ -205,6 +213,8 @@ def parser():
         child.add_argument('--picotool', default='picotool')
         child.add_argument('--evidence-dir', type=Path, default=ROOT / 'build/updater/runs')
         child.add_argument('--rollout-timeout', type=float, default=90)
+        child.add_argument('--verification-mode', choices=VERIFICATION_MODES, default='normal',
+                           help='normal: one fresh both-board CRC check; thorough: negative/repeat checks and extra flash readback during upgrades')
         child.add_argument('--already-bootloader', action='store_true', help='explicit entry for a target already in disk-free ROM')
     return p
 

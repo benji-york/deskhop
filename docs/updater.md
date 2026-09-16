@@ -2,10 +2,14 @@
 
 The root Makefile and `scripts/update_firmware.py` replace release-specific
 helpers under ignored build directories. They automate preparation and the
-existing conservative macOS flash/verify sequence. They do not change firmware,
-speed up the UART protocol, or remove any image checks. Firmware already checks
-the received/programmed image; the host also retains independent readback and
-fresh checks on both Picos.
+conservative macOS flash/verify sequence. The default `normal` verification mode
+retains stock picotool's full byte verification, unchanged-settings checks, and
+one fresh full-image CRC scan on each Pico. It omits a duplicate host firmware
+readback and the diagnostic wrong-CRC/repeat-CRC scans. Opt-in `thorough` mode
+retains that previous sequence. Neither mode changes firmware or speeds up the
+UART protocol. All 134 updater tests and a normal read-only check on both
+installed Picos pass; a full normal-mode upgrade is not yet hardware-tested.
+See [the validation record and timing estimate](testing/normal-upgrade-verification.md).
 
 The current accepted release is [v0.109 configuration validation](testing/configuration-validation-v109.md).
 Both physical Picos passed automatic propagation and fresh firmware verification;
@@ -23,9 +27,9 @@ post-scan `busy`. These are separate failures. The subsequently deployed
 [v0.108 firmware repair](testing/verification-contention-v108.md) addresses the
 verification contention; the [USB timeout investigation](testing/rom-backup-timeout-investigation.md)
 records subsequent successful no-flash experiments, not a proven transport fix.
-Current deployment safety gates and
-stock-picotool invocation remain unchanged. The `verify` CLI prints a diagnostic-
-only plan; it does not perform the ROM-entry/load steps used by `flash`.
+Identity, media, session, backup, settings and failure-stop gates, and the
+stock-picotool transport invocation remain unchanged. The `verify` CLI prints a
+diagnostic-only plan; it does not perform the ROM-entry/load steps used by `flash`.
 
 ## Stock-picotool invocation and hardware evidence
 
@@ -49,8 +53,9 @@ IORegistry identity, session, location, USB address and VID/PID must match
 before and after the UID check, before every ROM operation, and after each
 read/write. The binding is discarded on any operation failure and on reboot;
 it cannot be silently refreshed or reused. `rom-session.json` records the
-original binding, not a reusable configuration. There are no new options or
-custom picotool dependencies. Keep cables connected and other USB tools idle:
+original binding, not a reusable configuration. There are no custom picotool
+dependencies or new picotool transport options. Keep cables connected and other
+USB tools idle:
 these checks observe enumeration changes but do not hold an atomic USB handle
 across separate picotool processes.
 
@@ -102,8 +107,10 @@ make                         # help only; never flashes
 make test-updater             # hardware-free updater unit/contract tests
 make release                  # tests + ARM build + frozen candidate; no USB
 make flash-plan               # prepare/reuse candidate and preview; no USB
-make flash                    # actual upgrade, including final verification
-make verify                   # fresh read-only diagnostics; no reboot or flash
+make flash                    # actual upgrade, normal verification by default
+make verify                   # one fresh both-board CRC check; no reboot or flash
+make flash VERIFY_MODE=thorough # upgrade with duplicate readback + diagnostic scans
+make verify VERIFY_MODE=thorough # read-only correct/wrong/correct CRC checks
 ```
 
 `make flash` prepares a candidate if inputs changed. Repeated preparation reuses
@@ -123,6 +130,35 @@ Replace the example directory with the path printed by `make release`. The
 default `build/updater/latest.json` is only a convenience pointer; candidate
 directories are unique, never overwritten, and contain read-only artifacts.
 SHA-256 validation, not file permissions alone, protects their integrity.
+
+## Normal and thorough verification
+
+`VERIFY_MODE=normal` is the default for Make's `flash-plan`, `flash`,
+`flash-bootloader`, and `verify` targets. The equivalent CLI option is
+`--verification-mode normal` or `--verification-mode thorough`; the Python
+`Updater` argument is `verification_mode`, also defaulting to `normal`.
+
+| Check | Normal | Thorough |
+| --- | --- | --- |
+| Full firmware and 4,096-byte settings backups before writing | Retained | Retained |
+| Stock `picotool load -v` full byte verification | Retained | Retained |
+| Separate post-load 256 KiB firmware readback and exact comparison | Omitted | Retained |
+| Post-load settings readback and exact comparison | Retained | Retained |
+| Fresh full-slot CRC scans after both boards settle | One expected-CRC scan per Pico | Expected / wrong / expected CRC per Pico |
+| Identity, USB/session, both-core progress, history, peer rollout and media gates | Retained | Retained |
+
+`picotool load -v` reads the programmed image back over USB and compares its
+bytes; it is not merely a checksum of outgoing data. Normal mode therefore
+still checks the target's programmed image before reboot, then checks both
+running images with fresh firmware-computed CRCs. It does not replace stock
+picotool, upload a custom RAM checker, or rely solely on boot metadata.
+
+Choose `thorough` when deliberately testing the verifier's rejection path or
+collecting a second, independently compared firmware readback. It is not a
+retry or recovery mode. In either mode, an already-current pair follows the
+read-only verification path. `make verify`, including `VERIFY_MODE=thorough`,
+**never enters ROM or performs a USB firmware readback**: thorough read-only
+verification adds only the wrong-CRC and final expected-CRC scans.
 
 ## Prerequisites and physical selection
 
@@ -175,20 +211,23 @@ are not silently repaired. Review the evidence instead of blindly retrying.
    Confirm the selected flash UID and **disk-free PICOBOOT only**, then pin
    that connection for all subsequent ROM commands.
 3. Back up the full 256 KiB firmware slot and all 4,096 saved-settings bytes.
-   Validate the old image and version, then load the UF2 with picotool verification.
-4. Independently read the complete firmware slot and saved settings. Require an
-   exact image match and byte-for-byte unchanged settings. Only then request a
-   normal application reboot. Close the old serial context before waiting for
-   the application port and opening a fresh diagnostic session.
+   Validate the old image and version, then load the UF2 with stock
+   `picotool load -v` byte verification.
+4. Read saved settings and require them to be byte-for-byte unchanged.
+   In `thorough` mode, also independently read the complete firmware slot and
+   require an exact candidate-image match. Only then request a normal
+   application reboot. Close the old serial context before waiting for the
+   application port and opening a fresh diagnostic session.
 5. Watch peer propagation with bounded status polling, checking identities,
    executing versions/boot CRCs, new boot sessions and both-core progress.
-6. Check help, two progressing statuses, history, and three fresh full-slot
-   CRC scans using **correct / deliberately incorrect / correct** expectations.
-   Require PASS/FAIL/PASS on both Picos, full coverage, stable image generations,
-   fresh scans and advancing cores. Recheck history and Mac media health.
+6. Check help, two progressing statuses, history, and one fresh full-slot
+   expected-CRC scan per Pico. Require PASS on both, full coverage, stable image
+   generations, fresh scans and advancing cores. `Thorough` mode additionally
+   performs the deliberately incorrect and repeated correct scans, requiring
+   PASS/FAIL/PASS on each Pico. Recheck history and Mac media health.
 
-The deliberately incorrect CRC is a read-only negative test, not corruption or
-a failed upload. It must return `FAIL crc_mismatch`; the next correct scan must
+In thorough mode, the deliberately incorrect CRC is a read-only negative test,
+not corruption or a failed upload. It must return `FAIL crc_mismatch`; the next correct scan must
 pass. User input acceptance is separate: after success, check typing, trackball
 movement/buttons, keyboard-generated right-click, and switching in both directions.
 The journal keeps `input_acceptance: pending` rather than claiming these checks.
@@ -227,9 +266,10 @@ uncommitted source. No claim is made that the source archive plus tool-version
 text is a hermetic reproducible toolchain.
 
 `build/updater/runs/TIMESTAMP-…/` contains per-run image copies, source manifest
-reference, profile, serial transcripts, command logs, firmware/settings backups,
-readbacks and `result.json`. Side-effect intent is journaled **before** flash or
-reboot. Phase timestamps and command durations distinguish transfer time from
+reference, profile, selected verification mode, serial transcripts, command logs,
+firmware/settings backups, retained readbacks and `result.json`. Normal flashing
+does not create `firmware-after.bin`; thorough flashing does. Side-effect intent
+is journaled **before** flash or reboot. Phase timestamps and command durations distinguish transfer time from
 host orchestration time. Preparation logs live under `build/updater/prepare/`.
 
 A nonblocking lock prevents overlapping updater runs from this checkout. It is
@@ -255,19 +295,41 @@ initial installation on pre-v0.104 UART-v1 firmware:
 make flash-bootloader MANIFEST=/path/to/candidate/manifest.json
 ```
 
-This mode still checks USB identity, old-image integrity/version, backups,
-readback, settings, propagation and final diagnostics. It cannot query the
+This entry path still checks USB identity, old-image integrity/version, backups,
+stock load verification, settings, propagation and final diagnostics; the
+separate firmware readback depends on `VERIFY_MODE`. It cannot query the
 peer's version or capture either board's pre-upgrade boot session through a
 console that is already gone. Establish the peer's compatibility and older
 version before using it. It is not a retry/recovery shortcut for unknown state.
 
 ## Validation boundary and expected speedup
 
+The normal/thorough split is a host-only change: no firmware version bump,
+firmware rebuild requirement, or device reflash is introduced by changing this
+policy. All 134 updater tests pass, and a normal read-only verification passed
+on both installed v0.109 Picos in 3.367517 seconds, without rebooting or flashing.
+No live normal-mode upgrade has been claimed. The accepted v0.109 hardware
+record used the previous, now-thorough sequence and remains unchanged.
+
+That v0.109 run measured 0.569 seconds for the duplicate firmware readback,
+3.893 seconds for the retained stock load/verify, and 5.804 seconds for the full
+post-rollout diagnostics. Each of its two extra CRC requests took about
+1.2 seconds, not the entire 5.804-second diagnostic phase. Removing those two
+requests plus the duplicate readback suggests roughly **3–4 seconds saved**,
+including associated request/observation overhead. This is an estimate, not a
+measured normal-mode improvement. The 37.380-second peer wait/settle phase is
+unchanged. See [the timing breakdown](testing/normal-upgrade-verification.md).
+
 The offline suite tests BIN/UF2 geometry and settings exclusion, source/evidence
 binding, console grammar/freshness, transport failures and the complete A/B
 workflow against controlled device doubles. It does not execute RP2040 ROM or
 prove physical USB timing. The firmware's existing native/simulator tests also
 run during preparation; the extended tier remains available.
+
+### Historical updater validation and transport investigation
+
+The following records describe the firmware and verification policy at the
+time of each run, not the current default mode or accepted release above.
 
 The host workflow has exercised serial bootloader entry, backup, verified load,
 independent readback, unchanged settings, reboot and legacy propagation on

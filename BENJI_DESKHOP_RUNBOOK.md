@@ -8,6 +8,35 @@ README.
 
 Snapshot: 2026-09-16
 
+## Current host updater policy: normal verification by default
+
+The host-only updater simplification introduces `VERIFY_MODE=normal` (default)
+and opt-in `VERIFY_MODE=thorough`; direct CLI calls use
+`--verification-mode normal|thorough`. It does not change DeskHop firmware,
+bump its version, reflash either Pico, or accelerate peer propagation.
+
+Normal flashing retains the full firmware backup, all 4096 saved-settings
+backup bytes, stock `picotool load -v` full byte verification, exact settings
+readback, identity/USB/session/media gates, bounded peer rollout, core/history
+checks, and one fresh expected-CRC scan on each Pico after reboot. It omits only
+the duplicate host firmware readback and the wrong-CRC/repeated-correct-CRC
+diagnostic scans. Thorough flashing retains the former complete sequence.
+
+Use `make verify` for the normal read-only health check, or
+`make verify VERIFY_MODE=thorough` for correct/wrong/correct CRC testing.
+Neither read-only mode enters ROM, writes settings/firmware, requests a reboot,
+or performs a ROM firmware readback. The mode does not relax failure handling:
+no automatic retry, power cycle, device reselection or recovery bypass.
+
+All 134 updater tests pass. A normal read-only verification passed on both
+installed v0.109 Picos in 3.367517 seconds, with one fresh CRC scan each and no
+reboot or flash. A complete normal-mode upgrade has not yet been hardware-tested.
+The accepted v0.109 deployment below used the previous sequence; its historical
+evidence remains unchanged. Its timings support an estimated 3–4 seconds saved,
+not elimination of the approximately 37-second peer wait.
+See [the updater guide](docs/updater.md) and
+[the normal-mode verification record](docs/testing/normal-upgrade-verification.md).
+
 ## Current accepted release: v0.109
 
 Implemented on `codex/configuration-validation-v0.109`, based on accepted v0.108,
@@ -398,15 +427,18 @@ preparing a new release, because source snapshots include untracked inputs.
 The deployment notes below retain historical evidence; this section supersedes
 their then-current branch, hardware and acceptance statements.
 
-## Repository-owned updater (hardware-exercised; verification remains mandatory)
+## Repository-owned updater (verification remains mandatory)
 
 Use the root Makefile and `scripts/update_firmware.py` for future upgrades;
 release-specific scripts under `build/flashing/` are retained historical evidence,
 not the maintained entry point. `make` shows help. `make release` tests/builds
 and freezes a validated candidate; `make flash-plan` previews without touching
 USB. An explicitly requested `make flash` performs serial ROM entry, UID-targeted
-backup/load/readback, unchanged-settings checks, normal reboot, bounded peer
-propagation and complete fresh both-board verification. `make verify` is read-only.
+backups, stock verified load, unchanged-settings checks, normal reboot, bounded
+peer propagation and fresh both-board verification. Normal mode is now the
+default; `make flash VERIFY_MODE=thorough` also retains the duplicate firmware
+readback and correct/wrong/correct diagnostic sequence. `make verify` is read-only
+in both modes. The new normal-mode path is not yet hardware-tested.
 
 The profile in `config/updater.json` pins A/B's physical UIDs and A's current
 callout port. See [the updater guide](docs/updater.md) for tool paths, explicit
@@ -416,14 +448,14 @@ Normal upgrades require a candidate newer than both boards; an already-current
 pair is verified without rewriting. UART framing changes require a separate
 migration, not this automatic workflow.
 
-Evidence is retained under `build/releases/` and `build/updater/runs/`; checks and
-settings backups are not traded away for speed. Preparation can reuse the same
-validated candidate when inputs are unchanged. The latest live workflow
-exercised local serial ROM entry, upload/readback, unchanged settings, reboot and
-automatic propagation. A separate read-only verification passed after a busy
-verdict, as recorded above. Offline test doubles alone are not evidence of
-physical USB/ROM behavior. Ask Benji to check normal input after any future
-successful device verification.
+Evidence is retained under `build/releases/` and `build/updater/runs/`, including
+the selected verification mode. Both modes keep the backups and programmed-image,
+settings, identity and health checks described above; thorough mode collects
+additional diagnostic evidence. Preparation can reuse the same validated
+candidate when inputs are unchanged. Historical live upgrades exercised the
+sequence now called thorough, including independent firmware readback. Offline
+test doubles alone are not evidence of physical USB/ROM behavior. Ask Benji to
+check normal input after any future successful device verification.
 
 Host-only validation on 2026-09-15 passed all 99 updater tests, all 40 fast-tier
 steps, ARM configuration/build, default Make help, and hardware-free preview.
@@ -1498,8 +1530,11 @@ than invoking it directly on macOS.
    A remote target must also support the new command. No `RPI-RP2` volume should
    appear. Identify the physical flash UID before writing; remote ACK acceptance
    alone does not establish ROM entry. Upload on the Mac wired to the target Pico.
-4. Use official picotool to back up the firmware/settings, load and verify the
-   frozen candidate, read back the firmware/settings, and reboot normally.
+4. Prefer the maintained updater, which uses official picotool to back up the
+   firmware/settings, load and byte-verify the frozen candidate, verify unchanged
+   settings, and reboot normally. Add `VERIFY_MODE=thorough` for a second full
+   firmware readback and the extra diagnostic scans; normal mode retains one
+   fresh expected-CRC scan per Pico after peer propagation.
 5. Leave both sides powered for several one-second heartbeat cycles. The older
    peer should pull and install the 256 KiB running image automatically.
 6. Check the trackball, keyboard right-click on both Macs, F24 switching, Pico

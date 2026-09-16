@@ -6,6 +6,7 @@ RELEASE_DIR ?= build/releases
 PROFILE ?= config/updater.json
 PICOTOOL ?= picotool
 TEST_TIER ?= fast
+VERIFY_MODE ?= normal
 JOBS ?= 4
 ROLLOUT_TIMEOUT ?= 90
 
@@ -17,7 +18,7 @@ endif
 
 UPDATER = $(PYTHON) scripts/update_firmware.py
 PREPARE_ARGS = --build-dir "$(BUILD_DIR)" --release-dir "$(RELEASE_DIR)" --tier "$(TEST_TIER)" --jobs "$(JOBS)" $(if $(TOOLCHAIN_DIR),--toolchain-dir "$(TOOLCHAIN_DIR)") $(if $(FORCE),--force)
-DEVICE_ARGS = --manifest "$(MANIFEST)" --profile "$(PROFILE)" --picotool "$(PICOTOOL)" --rollout-timeout "$(ROLLOUT_TIMEOUT)" $(if $(PORT),--port "$(PORT)") $(if $(TARGET),--target "$(TARGET)")
+DEVICE_ARGS = --manifest "$(MANIFEST)" --profile "$(PROFILE)" --picotool "$(PICOTOOL)" --rollout-timeout "$(ROLLOUT_TIMEOUT)" --verification-mode "$(VERIFY_MODE)" $(if $(PORT),--port "$(PORT)") $(if $(TARGET),--target "$(TARGET)")
 
 .PHONY: help test test-updater release flash-plan flash flash-bootloader verify
 help:
@@ -25,6 +26,7 @@ help:
 	@echo 'Default is help; release/flash-plan/test never access hardware. flash writes hardware.'
 	@echo 'Options: PROFILE=... PORT=/dev/cu... TARGET=A|B PICOTOOL=... TOOLCHAIN_DIR=...'
 	@echo 'MANIFEST=... selects a frozen candidate without rebuilding; TEST_TIER=deep extends validation.'
+	@echo 'VERIFY_MODE=normal (default) checks each Pico once; thorough retains extra upgrade/read-only diagnostics.'
 	@echo 'See docs/updater.md for safety, prerequisites, evidence and recovery.'
 test:
 	$(PYTHON) tests/run.py "$(TEST_TIER)"

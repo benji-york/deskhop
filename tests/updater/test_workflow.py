@@ -16,7 +16,7 @@ from unittest.mock import patch
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from deskhop_update.console import BootloaderUnconfirmed
+from deskhop_update.console import BootloaderUnconfirmed, ProtocolError
 from deskhop_update.workflow import Updater, backup_version, check_status, progressing
 from deskhop_update.platform import DeploymentError
 from test_console import IDS, SESSIONS, HELP, status, verify, history
@@ -81,7 +81,7 @@ class FakeConsole:
                                   b"progress_age_ms=unavailable target=unknown attempt=0",
                                   b"seen=1 source=peer phase=receiving received=65536 total=262144 "
                                   b"progress_age_ms=1 target=0.105 attempt=1", 1)
-            return raw
+            return b.response(command, raw)
         if command.startswith("verify "):
             supplied = command.split()[2]
             actual = b.candidate["slot_crc"]
@@ -90,9 +90,10 @@ class FakeConsole:
             raw = re.sub(rb"\b12345679\b", f"{int(actual, 16) ^ 1:08x}".encode(), raw)
             raw = re.sub(rb"\b12345678\b", actual.encode(), raw).replace(b"deadbeef", b.candidate["boot_crc"].encode())
             b.clock += 1.026
-            return raw
+            return b.response(command, raw)
         if command.startswith("history "):
-            return history(int(b.clock * 1_000_000), build=build, local=b.local, count=int(command.split()[1]))
+            raw = history(int(b.clock * 1_000_000), build=build, local=b.local, count=int(command.split()[1]))
+            return b.response(command, raw)
         raise AssertionError(f"Unexpected command: {command}")
 
     def bootloader(self, target):
@@ -123,6 +124,12 @@ class FakeBackend:
         self.freeze_from = None
         self.status_count = self.last_status_us = 0
         self.mutate_before_load = None
+        self.response_mutators = {}
+
+    def response(self, command, raw):
+        """Fault injection changes actual bytes, never the production parsers."""
+        mutate = self.response_mutators.get(command.split()[0])
+        return mutate(raw) if mutate else raw
 
     def now(self):
         return self.clock
@@ -220,7 +227,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.calls("load"), [])
         self.assertEqual(self.calls("reboot"), [])
 
-    def assert_serial_flash_lifecycle(self):
+    def assert_serial_flash_lifecycle(self, mode="normal"):
         calls = self.backend.calls
         opens = [index for index, call in enumerate(calls) if call[0] == "console_open"]
         closes = [index for index, call in enumerate(calls) if call[0] == "console_close"]
@@ -230,7 +237,7 @@ class WorkflowTests(unittest.TestCase):
         wait_port = calls.index(("wait_port",))
         self.assertLess(opens[0], enumeration)
         rom_operations = [index for index, call in enumerate(calls) if call[0] in ("save", "load", "reboot")]
-        self.assertEqual(len(rom_operations), 6)
+        self.assertEqual(len(rom_operations), 6 if mode == "thorough" else 5)
         for index in rom_operations:
             self.assertLess(enumeration, index)
             self.assertLess(index, closes[0])
@@ -245,8 +252,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(self.backend.console_open)
 
     def test_success_local_a_and_full_diagnostics(self):
-        result = self.updater().run()
+        result = self.updater(verification_mode="thorough").run()
         self.assertEqual(result["stage"], "complete")
+        self.assertEqual(result["verification_mode"], "thorough")
+        self.assertTrue(result["picotool_verified"])
         self.assertTrue(result["firmware_verified"])
         self.assertTrue(result["independent_readback"])
         self.assertTrue(result["settings_unchanged"])
@@ -258,77 +267,134 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(result["histories"]), 2)
         commands = [call[1] for call in self.calls("command")]
         self.assertEqual(len([command for command in commands if command.startswith("verify ")]), 3)
-        self.assert_serial_flash_lifecycle()
+        self.assert_serial_flash_lifecycle("thorough")
         journal = json.loads((self.directory / "result.json").read_text())
         self.assertTrue(journal["firmware_verified"])
 
-    def test_success_local_b(self):
-        self.profile["target"] = self.backend.local = "B"
-        result = self.updater().run()
-        self.assertEqual(result["target"], "B")
-        self.assertEqual(self.calls("bootloader"), [("bootloader", "B")])
-        self.assertEqual(self.calls("reboot"), [("reboot", IDS["B"])])
-        self.assert_serial_flash_lifecycle()
-
-    def test_already_bootloader_opens_only_fresh_application_console(self):
+    def test_default_normal_success_local_a_and_b(self):
         for role in ("A", "B"):
             with self.subTest(role=role):
                 self.profile["target"] = role
                 self.backend = FakeBackend(self.candidate, local=role)
-                self.backend.rom = True
-                result = self.updater(already_bootloader=True).run()
+                result = self.updater().run()  # Exercise the public default.
+                self.assertEqual(result["stage"], "complete")
+                self.assertEqual(result["verification_mode"], "normal")
+                self.assertEqual(result["target"], role)
                 self.assertTrue(result["firmware_verified"])
-                self.assertTrue(result["independent_readback"])
+                self.assertTrue(result["picotool_verified"])
+                self.assertFalse(result["independent_readback"])
                 self.assertTrue(result["settings_unchanged"])
-                self.assertEqual(self.calls("bootloader"), [])
-                self.assertEqual(self.calls("wait_bootloader"), [])
-                self.assertEqual(len(self.calls("console_open")), 1)
-                self.assertEqual(len(self.calls("console_close")), 1)
-                self.assertEqual(len(self.calls("load")), 1)
+                self.assertEqual(result["input_acceptance"], "pending")
+                self.assertEqual(self.calls("bootloader"), [("bootloader", role)])
                 self.assertEqual(self.calls("reboot"), [("reboot", IDS[role])])
-                calls = self.backend.calls
-                self.assertLess(calls.index(("reboot", IDS[role])), calls.index(("wait_port",)))
-                self.assertLess(calls.index(("wait_port",)), calls.index(("console_open",)))
-                self.assertFalse(self.backend.console_open)
+                self.assertEqual(len(self.calls("load")), 1)
+                self.assertEqual([call[1:4] for call in self.calls("save")], [
+                    ("firmware-before", 0x10000000, 0x10040000),
+                    ("settings-before", 0x101ff000, 0x10200000),
+                    ("settings-after", 0x101ff000, 0x10200000),
+                ])
+                self.assertEqual(result["backup"]["firmware_sha256"], hashlib.sha256(self.backend.old).hexdigest())
+                self.assertEqual(result["backup"]["settings_sha256"], hashlib.sha256(self.backend.settings).hexdigest())
+                self.assertEqual([v["result"] for v in result["verifications"]], ["PASS"])
+                self.assertEqual(set(result["verifications"][0]["boards"]), {"A", "B"})
+                self.assertEqual(len(result["histories"]), 2)
+                self.assertEqual([call[1] for call in self.calls("command") if call[1].startswith("verify ")],
+                                 [f"verify {self.candidate['build']} {self.candidate['slot_crc']}"])
+                self.assert_serial_flash_lifecycle()
+                self.assertEqual(json.loads((self.directory / "result.json").read_text()), result)
 
-    def test_rom_transport_failures_close_once_and_never_continue_or_retry(self):
-        operations = ("enumeration", "firmware-before", "settings-before", "load",
-                      "firmware-after", "settings-after", "reboot")
-        expected_stages = ("bootloader_requested", "backing_up", "backing_up", "flashing",
-                           "readback", "readback", "reboot_requested")
-        for role in ("A", "B"):
-            for failed_index, (operation, stage) in enumerate(zip(operations, expected_stages)):
-                with self.subTest(role=role, operation=operation):
+    def test_invalid_mode_is_rejected_before_any_device_activity(self):
+        for mode in (None, "", "Normal", "fast", "THOROUGH", 0, False):
+            with self.subTest(mode=mode), self.assertRaises(DeploymentError):
+                self.updater(verification_mode=mode)
+            self.assertEqual(self.backend.calls, [])
+            self.assertFalse((self.directory / "result.json").exists())
+
+    def test_initial_evidence_does_not_claim_unperformed_checks(self):
+        for mode in ("normal", "thorough"):
+            with self.subTest(mode=mode):
+                record = self.updater(verification_mode=mode).record
+                self.assertEqual(record["verification_mode"], mode)
+                for claim in ("write_started", "reboot_requested", "picotool_verified",
+                              "independent_readback", "settings_unchanged", "firmware_verified"):
+                    self.assertIs(record[claim], False, claim)
+        self.assertEqual(self.backend.calls, [])
+
+    def test_already_bootloader_opens_only_fresh_application_console(self):
+        for mode in ("normal", "thorough"):
+            for role in ("A", "B"):
+                with self.subTest(mode=mode, role=role):
                     self.profile["target"] = role
                     self.backend = FakeBackend(self.candidate, local=role)
-                    error = DeploymentError(f"injected {operation} failure")
-                    if operation == "enumeration":
-                        self.backend.enumeration_error = error
-                    else:
-                        self.backend.operation_errors[operation] = error
-                    with self.assertRaises(DeploymentError) as caught:
-                        self.updater().run()
-                    self.assertIs(caught.exception, error)
-                    self.assertEqual(self.calls("bootloader"), [("bootloader", role)])
+                    self.backend.rom = True
+                    result = self.updater(already_bootloader=True, verification_mode=mode).run()
+                    self.assertTrue(result["firmware_verified"])
+                    self.assertTrue(result["picotool_verified"])
+                    self.assertEqual(result["independent_readback"], mode == "thorough")
+                    self.assertTrue(result["settings_unchanged"])
+                    self.assertEqual(len(result["verifications"]), 3 if mode == "thorough" else 1)
+                    self.assertEqual([c[1] for c in self.calls("save")],
+                                     ["firmware-before", "settings-before"]
+                                     + (["firmware-after"] if mode == "thorough" else []) + ["settings-after"])
+                    self.assertEqual(self.calls("bootloader"), [])
+                    self.assertEqual(self.calls("wait_bootloader"), [])
                     self.assertEqual(len(self.calls("console_open")), 1)
                     self.assertEqual(len(self.calls("console_close")), 1)
+                    self.assertEqual(len(self.calls("load")), 1)
+                    self.assertEqual(self.calls("reboot"), [("reboot", IDS[role])])
+                    calls = self.backend.calls
+                    self.assertLess(calls.index(("reboot", IDS[role])), calls.index(("wait_port",)))
+                    self.assertLess(calls.index(("wait_port",)), calls.index(("console_open",)))
                     self.assertFalse(self.backend.console_open)
-                    self.assertTrue(self.backend.rom)
-                    attempted = []
-                    for call in self.backend.calls:
-                        if call[0] == "wait_bootloader":
-                            attempted.append("enumeration")
-                        elif call[0] == "save":
-                            attempted.append(call[1])
-                        elif call[0] in ("load", "reboot"):
-                            attempted.append(call[0])
-                    self.assertEqual(attempted, list(operations[:failed_index + 1]))
-                    self.assertEqual(self.backend.calls[-1], ("console_close",))
-                    self.assertEqual(self.calls("wait_port"), [])
-                    journal = json.loads((self.directory / "result.json").read_text())
-                    self.assertEqual(journal["failed_stage"], stage)
-                    self.assertEqual(journal["write_started"], failed_index >= operations.index("load"))
-                    self.assertEqual(journal["reboot_requested"], operation == "reboot")
+
+    def test_rom_transport_failures_close_once_and_never_continue_or_retry(self):
+        for mode in ("normal", "thorough"):
+            operations = ["enumeration", "firmware-before", "settings-before", "load"]
+            if mode == "thorough":
+                operations.append("firmware-after")
+            operations += ["settings-after", "reboot"]
+            stages = {"enumeration": "bootloader_requested", "firmware-before": "backing_up",
+                      "settings-before": "backing_up", "load": "flashing",
+                      "firmware-after": "readback", "settings-after": "readback", "reboot": "reboot_requested"}
+            for role in ("A", "B"):
+                for failed_index, operation in enumerate(operations):
+                    with self.subTest(mode=mode, role=role, operation=operation):
+                        self.profile["target"] = role
+                        self.backend = FakeBackend(self.candidate, local=role)
+                        error = DeploymentError(f"injected {operation} failure")
+                        if operation == "enumeration":
+                            self.backend.enumeration_error = error
+                        else:
+                            self.backend.operation_errors[operation] = error
+                        with self.assertRaises(DeploymentError) as caught:
+                            self.updater(verification_mode=mode).run()
+                        self.assertIs(caught.exception, error)
+                        self.assertEqual(self.calls("bootloader"), [("bootloader", role)])
+                        self.assertEqual(len(self.calls("console_open")), 1)
+                        self.assertEqual(len(self.calls("console_close")), 1)
+                        self.assertFalse(self.backend.console_open)
+                        self.assertTrue(self.backend.rom)
+                        attempted = []
+                        for call in self.backend.calls:
+                            if call[0] == "wait_bootloader":
+                                attempted.append("enumeration")
+                            elif call[0] == "save":
+                                attempted.append(call[1])
+                            elif call[0] in ("load", "reboot"):
+                                attempted.append(call[0])
+                        self.assertEqual(attempted, operations[:failed_index + 1])
+                        self.assertEqual(self.backend.calls[-1], ("console_close",))
+                        self.assertEqual(self.calls("wait_port"), [])
+                        journal = json.loads((self.directory / "result.json").read_text())
+                        self.assertEqual(journal["failed_stage"], stages[operation])
+                        self.assertEqual(journal["verification_mode"], mode)
+                        self.assertEqual(journal["write_started"], failed_index >= operations.index("load"))
+                        self.assertEqual(journal["picotool_verified"], failed_index > operations.index("load"))
+                        self.assertEqual(journal["independent_readback"],
+                                         mode == "thorough" and failed_index > operations.index("firmware-after"))
+                        self.assertEqual(journal["settings_unchanged"], operation == "reboot")
+                        self.assertEqual(journal["reboot_requested"], operation == "reboot")
+                        self.assertFalse(journal["firmware_verified"])
 
     def test_old_console_cleanup_errors_are_recorded_after_success(self):
         self.backend.cleanup_errors = ["DTR: [Errno 6] Device not configured", "termios: stale device"]
@@ -397,22 +463,33 @@ class WorkflowTests(unittest.TestCase):
     def test_readback_mismatch_never_reboots_or_retries(self):
         self.backend.bad_readback = True
         with self.assertRaisesRegex(DeploymentError, "readback differs"):
-            self.updater().run()
+            self.updater(verification_mode="thorough").run()
         self.assertEqual(len(self.calls("load")), 1)
         self.assertEqual(self.calls("reboot"), [])
         self.assertTrue(self.backend.rom)
         journal = json.loads((self.directory / "result.json").read_text())
         self.assertTrue(journal["write_started"])
+        self.assertTrue(journal["picotool_verified"])
+        self.assertFalse(journal["independent_readback"])
+        self.assertFalse(journal["firmware_verified"])
         self.assertFalse(journal["reboot_requested"])
         self.assertEqual(journal["failed_stage"], "readback")
 
     def test_changed_settings_never_reboots(self):
-        self.backend.bad_settings = True
-        with self.assertRaisesRegex(DeploymentError, "settings changed"):
-            self.updater().run()
-        self.assertEqual(len(self.calls("load")), 1)
-        self.assertEqual(self.calls("reboot"), [])
-        self.assertTrue(self.backend.rom)
+        for mode in ("normal", "thorough"):
+            with self.subTest(mode=mode):
+                self.backend = FakeBackend(self.candidate)
+                self.backend.bad_settings = True
+                with self.assertRaisesRegex(DeploymentError, "settings changed"):
+                    self.updater(verification_mode=mode).run()
+                self.assertEqual(len(self.calls("load")), 1)
+                self.assertEqual(self.calls("reboot"), [])
+                self.assertTrue(self.backend.rom)
+                journal = json.loads((self.directory / "result.json").read_text())
+                self.assertTrue(journal["picotool_verified"])
+                self.assertEqual(journal["independent_readback"], mode == "thorough")
+                self.assertFalse(journal["settings_unchanged"])
+                self.assertFalse(journal["firmware_verified"])
 
     def test_propagation_timeout_never_repeats_flash_or_reboot(self):
         self.backend.rollout_stuck = True
@@ -424,19 +501,136 @@ class WorkflowTests(unittest.TestCase):
         self.assertLess(self.backend.clock, 15)
 
     def test_already_current_verifies_without_device_writes(self):
-        self.backend.running_candidate = True
-        result = self.updater().run()
-        self.assertTrue(result["already_current"])
+        for mode in ("normal", "thorough"):
+            with self.subTest(mode=mode):
+                self.backend = FakeBackend(self.candidate)
+                self.backend.running_candidate = True
+                result = self.updater(verification_mode=mode).run()
+                self.assertTrue(result["already_current"])
+                self.assert_read_only_result(result, mode)
+
+    def assert_read_only_result(self, result, mode):
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual(result["verification_mode"], mode)
         self.assertTrue(result["firmware_verified"])
-        self.assertFalse(result["write_started"])
-        self.assertEqual(self.calls("bootloader"), [])
-        self.assertEqual(self.calls("save"), [])
-        self.assertEqual(self.calls("wait_bootloader"), [])
-        self.assertEqual(self.calls("wait_port"), [])
+        for claim in ("write_started", "reboot_requested", "picotool_verified",
+                      "independent_readback", "settings_unchanged"):
+            self.assertIs(result[claim], False, claim)
+        self.assertEqual([v["result"] for v in result["verifications"]],
+                         ["PASS", "FAIL", "PASS"] if mode == "thorough" else ["PASS"])
+        self.assertEqual(len(result["histories"]), 2)
+        for operation in ("bootloader", "identity", "save", "wait_bootloader", "wait_port"):
+            self.assertEqual(self.calls(operation), [], operation)
         self.assertEqual(len(self.calls("console_open")), 1)
         self.assertEqual(len(self.calls("console_close")), 1)
         self.assertFalse(self.backend.console_open)
         self.assert_no_write()
+
+    def test_verify_only_respects_both_modes_without_rom_checks(self):
+        for mode in ("normal", "thorough"):
+            for role in ("A", "B"):
+                with self.subTest(mode=mode, role=role):
+                    self.profile["target"] = role
+                    self.backend = FakeBackend(self.candidate, local=role)
+                    self.backend.running_candidate = True
+                    result = self.updater(verification_mode=mode).verify_only()
+                    self.assertNotIn("already_current", result)
+                    self.assert_read_only_result(result, mode)
+
+    def test_default_verify_only_uses_single_fresh_scan(self):
+        self.backend.running_candidate = True
+        self.assert_read_only_result(self.updater().verify_only(), "normal")
+
+    def test_normal_corrupt_or_incomplete_scan_fails_without_retry(self):
+        actual = self.candidate["slot_crc"].encode()
+        wrong = f"{int(self.candidate['slot_crc'], 16) ^ 1:08x}".encode()
+        mutations = {
+            "flash_crc": lambda raw: raw.replace(b"bytes=262144 crc32=" + actual,
+                                                  b"bytes=262144 crc32=" + wrong, 1),
+            "short_coverage": lambda raw: raw.replace(b"bytes=262144 crc32=", b"bytes=262143 crc32=", 1),
+            "boot_metadata": lambda raw: raw.replace(b"metadata_crc32=" + self.candidate["boot_crc"].encode(),
+                                                     b"metadata_crc32=00000000", 1),
+            "changed_generation": lambda raw: raw.replace(b"generation_start=12 generation_end=12",
+                                                          b"generation_start=12 generation_end=13", 1),
+            "stale_scan_cores": lambda raw: raw.replace(b"age_ms=1 valid=1", b"age_ms=501 valid=1", 1),
+            "stopped_scan_core": lambda raw: re.sub(rb"( core=0 start=)(\d+)( end=)\d+",
+                                                     lambda m: m[1] + m[2] + m[3] + m[2], raw, count=1),
+            "unverified_busy": lambda raw: raw.replace(b"result=PASS reason=match",
+                                                       b"result=UNVERIFIED reason=busy", 1),
+            "missing_footer": lambda raw: raw.split(b"END verify")[0],
+        }
+        for role in ("A", "B"):
+            mutations[f"{role}_wrong_uid"] = lambda raw, role=role: raw.replace(
+                IDS[role].encode(), b"0000000000000000")
+            mutations[f"{role}_rebooted"] = lambda raw, role=role: raw.replace(
+                SESSIONS[role].encode(), b"0000000000000000")
+        for name, mutate in mutations.items():
+            with self.subTest(fault=name):
+                self.backend = FakeBackend(self.candidate)
+                self.backend.response_mutators["verify"] = mutate
+                with self.assertRaises(ProtocolError):
+                    self.updater().run()
+                self.assertEqual(len(self.calls("load")), 1)
+                self.assertEqual(len(self.calls("reboot")), 1)
+                self.assertEqual(len([c for c in self.calls("command") if c[1].startswith("verify ")]), 1)
+                self.assertNotIn("firmware-after", [c[1] for c in self.calls("save")])
+                journal = json.loads((self.directory / "result.json").read_text())
+                self.assertEqual(journal["failed_stage"], "verifying_both")
+                self.assertTrue(journal["picotool_verified"])
+                self.assertTrue(journal["settings_unchanged"])
+                self.assertFalse(journal["independent_readback"])
+                self.assertFalse(journal["firmware_verified"])
+                self.assertFalse(self.backend.console_open)
+
+    def test_normal_scan_does_not_replace_postscan_progress_gate(self):
+        def stop_after_scan(raw):
+            self.backend.freeze_from = self.backend.status_count + 1
+            return raw
+        self.backend.response_mutators["verify"] = stop_after_scan
+        with self.assertRaisesRegex(DeploymentError, "stopped making progress"):
+            self.updater().run()
+        journal = json.loads((self.directory / "result.json").read_text())
+        self.assertEqual(journal["failed_stage"], "verifying_both")
+        self.assertFalse(journal["firmware_verified"])
+        self.assertEqual(len(self.calls("load")), 1)
+        self.assertEqual(len(self.calls("reboot")), 1)
+
+    def test_normal_scan_does_not_replace_final_history_gate(self):
+        def changed_history(raw):
+            return raw.replace(b"output=A", b"output=B", 1) if raw.startswith(b"history 64") else raw
+        self.backend.response_mutators["history"] = changed_history
+        with self.assertRaises(ProtocolError):
+            self.updater().run()
+        journal = json.loads((self.directory / "result.json").read_text())
+        self.assertEqual(journal["failed_stage"], "verifying_both")
+        self.assertFalse(journal["firmware_verified"])
+        self.assertEqual(len([c for c in self.calls("command") if c[1].startswith("verify ")]), 1)
+
+    def test_normal_stale_core_status_refused_before_bootloader(self):
+        self.backend.response_mutators["status"] = lambda raw: raw.replace(b"age_ms=1", b"age_ms=501", 1)
+        with self.assertRaisesRegex(DeploymentError, "core progress unavailable or stale"):
+            self.updater().run()
+        self.assertEqual(self.calls("bootloader"), [])
+        self.assert_no_write()
+
+    def test_thorough_requires_fresh_negative_and_final_scans(self):
+        for failed_scan in (2, 3):
+            with self.subTest(scan=failed_scan):
+                self.backend = FakeBackend(self.candidate)
+                captured = []
+                def reuse_first_scan(raw):
+                    captured.append(raw)
+                    return captured[0] if len(captured) == failed_scan else raw
+                self.backend.response_mutators["verify"] = reuse_first_scan
+                with self.assertRaises(ProtocolError):
+                    self.updater(verification_mode="thorough").run()
+                self.assertEqual(len(captured), failed_scan)
+                journal = json.loads((self.directory / "result.json").read_text())
+                self.assertTrue(journal["independent_readback"])
+                self.assertTrue(journal["picotool_verified"])
+                self.assertFalse(journal["firmware_verified"])
+                self.assertEqual(len(self.calls("load")), 1)
+                self.assertEqual(len(self.calls("reboot")), 1)
 
     def test_uid_mismatch_refused_before_bootloader(self):
         self.backend.wrong_uid = True

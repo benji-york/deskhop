@@ -10,6 +10,9 @@ from .console import parse_status, parse_verify, validate_help, validate_history
 from .platform import DeploymentError, require, write_json
 
 
+VERIFICATION_MODES = ('normal', 'thorough')
+
+
 def encoded(build):
     require(isinstance(build, str) and re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', build), 'Invalid firmware build.')
     major, minor = map(int, build.split('.'))
@@ -65,15 +68,19 @@ def backup_version(image):
 
 class Updater:
     def __init__(self, candidate, profile, backend, evidence, *, already_bootloader=False,
-                 rollout_timeout=90, progress=print):
+                 rollout_timeout=90, verification_mode='normal', progress=print):
+        require(verification_mode in VERIFICATION_MODES, 'Verification mode must be normal or thorough.')
         self.candidate, self.profile = candidate, validate_profile(profile)
         self.backend, self.evidence = backend, Path(evidence)
         require(1 <= rollout_timeout <= 300, 'Rollout timeout must be 1..300 seconds.')
         self.already_bootloader, self.rollout_timeout = already_bootloader, rollout_timeout
+        self.verification_mode = verification_mode
         self.progress = progress
         self.record = {'schema': 1, 'build': candidate['build'], 'slot_crc': candidate['slot_crc'],
                        'target': profile['target'], 'uids': profile['uids'], 'port': profile['port'],
                        'stage': 'preflight', 'write_started': False, 'reboot_requested': False,
+                       'verification_mode': verification_mode, 'picotool_verified': False,
+                       'independent_readback': False, 'settings_unchanged': False,
                        'firmware_verified': False, 'input_acceptance': 'pending', 'phases': [], 'statuses': []}
 
     def journal(self):
@@ -132,8 +139,15 @@ class Updater:
         require(progressing(prior, current), 'Both cores on both boards must advance.')
         history = validate_history(console.command('history 16'), current['boards'])
         verifications = []
-        wrong_crc = f"{int(self.candidate['slot_crc'], 16) ^ 1:08x}"
-        for crc in (self.candidate['slot_crc'], wrong_crc, self.candidate['slot_crc']):
+        # One fresh full-slot scan on each Pico verifies the running images.
+        # Negative/repeat scans exercise the verifier itself; retain them for
+        # deliberate diagnostics rather than every ordinary upgrade.
+        expected_crc = self.candidate['slot_crc']
+        checks = (expected_crc,)
+        if self.verification_mode == 'thorough':
+            wrong_crc = f"{int(expected_crc, 16) ^ 1:08x}"
+            checks = (expected_crc, wrong_crc, expected_crc)
+        for crc in checks:
             raw = console.command(f"verify {self.candidate['build']} {crc}")
             verification = parse_verify(raw, self.candidate['build'], self.candidate['slot_crc'],
                                         self.candidate['boot_crc'], current['boards'], command_crc=crc,
@@ -204,12 +218,17 @@ class Updater:
                 self.record['write_started'] = True
                 self.journal()  # Persist before a potentially partially successful hardware command.
                 self.backend.load(self.candidate['uf2_path'], uid)
+                # MacBackend.load always uses stock picotool load -v. A failed
+                # load/verify still stops before settings reads or reboot.
+                self.record['picotool_verified'] = True
                 self.stage('readback')
-                image = self.backend.save('firmware-after', 0x10000000, 0x10040000, uid)
+                if self.verification_mode == 'thorough':
+                    image = self.backend.save('firmware-after', 0x10000000, 0x10040000, uid)
+                    require(image == self.candidate['image'], 'Independent firmware readback differs; target left in ROM.')
+                    self.record['independent_readback'] = True
                 saved = self.backend.save('settings-after', 0x101ff000, 0x10200000, uid)
-                require(image == self.candidate['image'], 'Independent firmware readback differs; target left in ROM.')
                 require(saved == settings, 'Saved settings changed; target left in ROM for investigation.')
-                self.record.update(independent_readback=True, settings_unchanged=True)
+                self.record['settings_unchanged'] = True
                 self.backend.health(boot=True, baseline=baseline)
                 self.stage('reboot_requested')
                 self.record['reboot_requested'] = True

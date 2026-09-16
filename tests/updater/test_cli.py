@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -44,6 +45,55 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse((self.root / 'runs').exists())
 
+    def test_verification_modes_parse_for_each_device_command(self):
+        for command in ('plan', 'flash', 'verify'):
+            for explicit in (None, 'normal', 'thorough'):
+                with self.subTest(command=command, mode=explicit):
+                    flags = [] if explicit is None else ['--verification-mode', explicit]
+                    args = cli.parser().parse_args([command, *flags])
+                    self.assertEqual(args.verification_mode, explicit or 'normal')
+
+    def test_invalid_verification_mode_fails_before_candidate_or_hardware_access(self):
+        for command in ('plan', 'flash', 'verify'):
+            for mode in ('fast', 'deep', 'NORMAL', '', 'thoroughly'):
+                with self.subTest(command=command, mode=mode), \
+                     patch.object(cli, 'load_candidate') as candidate, \
+                     patch.object(cli, 'MacBackend') as backend, \
+                     patch.object(cli, 'Updater') as updater, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as stopped:
+                        cli.main([command, '--verification-mode', mode])
+                    self.assertEqual(stopped.exception.code, 2)
+                    candidate.assert_not_called()
+                    backend.assert_not_called()
+                    updater.assert_not_called()
+
+    def test_plan_distinguishes_normal_and_thorough_without_hardware(self):
+        for explicit in (None, 'normal', 'thorough'):
+            output = io.StringIO()
+            flags = [] if explicit is None else ['--verification-mode', explicit]
+            with self.subTest(mode=explicit), \
+                 patch.object(cli, 'load_candidate', return_value=self.candidate), \
+                 patch.object(cli, 'MacBackend') as backend, \
+                 patch.object(cli, 'Updater') as updater, \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main(['plan', '--manifest', str(self.manifest),
+                                          '--profile', str(self.profile), *flags]), 0)
+            backend.assert_not_called()
+            updater.assert_not_called()
+            plan = output.getvalue().lower()
+            self.assertIn('preview only', plan)
+            self.assertIn('load -v', plan, 'both modes retain stock picotool verification')
+            self.assertIn('settings', plan)
+            self.assertIn('on both boards', plan)
+            if explicit == 'thorough':
+                self.assertIn('extra rom firmware readback', plan)
+                self.assertIn('correct/wrong/correct', plan)
+            else:
+                self.assertIn('one fresh correct-crc scan', plan)
+                self.assertNotIn('extra rom firmware readback', plan)
+                self.assertNotIn('correct/wrong/correct', plan)
+
     def test_plan_still_rejects_unknown_target_identity(self):
         self.profile.write_text('{"target":"A","port":"/dev/cu.test","uids":{}}')
         with patch.object(cli, 'load_candidate', return_value=self.candidate), patch.object(cli, 'MacBackend') as backend, \
@@ -52,22 +102,69 @@ class CliTests(unittest.TestCase):
             backend.assert_not_called()
 
     def test_verify_prints_read_only_plan_and_never_runs_flash_workflow(self):
-        output = io.StringIO()
-        with patch.object(cli, 'ROOT', self.root), \
-             patch.object(cli, 'load_candidate', return_value=self.candidate), \
-             patch.object(cli, 'stage_images', return_value=self.candidate), \
-             patch.object(cli, 'MacBackend'), patch.object(cli, 'Updater') as updater, \
-             contextlib.redirect_stdout(output):
-            result = cli.main(['verify', '--manifest', str(self.manifest),
-                               '--profile', str(self.profile),
-                               '--evidence-dir', str(self.root / 'runs')])
-        self.assertEqual(result, 0)
-        updater.return_value.verify_only.assert_called_once_with()
-        updater.return_value.run.assert_not_called()
-        self.assertIn('Plan: read-only', output.getvalue())
-        self.assertIn('No bootloader entry, firmware/settings write, or reboot', output.getvalue())
-        self.assertNotIn('→ serial bootloader entry', output.getvalue())
-        self.assertNotIn('→ firmware/settings backups', output.getvalue())
+        for mode in ('normal', 'thorough'):
+            output = io.StringIO()
+            with self.subTest(mode=mode), patch.object(cli, 'ROOT', self.root), \
+                 patch.object(cli, 'load_candidate', return_value=self.candidate), \
+                 patch.object(cli, 'stage_images', return_value=self.candidate), \
+                 patch.object(cli, 'MacBackend'), patch.object(cli, 'Updater') as updater, \
+                 contextlib.redirect_stdout(output):
+                result = cli.main(['verify', '--manifest', str(self.manifest),
+                                   '--profile', str(self.profile), '--verification-mode', mode,
+                                   '--evidence-dir', str(self.root / 'runs')])
+            self.assertEqual(result, 0)
+            updater.return_value.verify_only.assert_called_once_with()
+            updater.return_value.run.assert_not_called()
+            plan = output.getvalue()
+            self.assertIn('Plan: read-only', plan)
+            self.assertIn('No bootloader entry, firmware/settings write, or reboot', plan)
+            self.assertNotIn('→ serial bootloader entry', plan)
+            self.assertNotIn('→ firmware/settings backups', plan)
+            self.assertNotIn('load -v', plan)
+            self.assertNotIn('ROM firmware readback', plan)
+            self.assertIn('one fresh correct-CRC scan' if mode == 'normal' else 'correct/wrong/correct', plan)
+
+    def test_operation_forwards_and_journals_default_and_explicit_verification_mode(self):
+        for command in ('flash', 'verify'):
+            for explicit in (None, 'normal', 'thorough'):
+                mode = explicit or 'normal'
+                evidence = self.root / f'{command}-{explicit or "default"}'
+                flags = [] if explicit is None else ['--verification-mode', explicit]
+                with self.subTest(command=command, mode=explicit), \
+                     patch.object(cli, 'ROOT', self.root), \
+                     patch.object(cli, 'load_candidate', return_value=self.candidate), \
+                     patch.object(cli, 'stage_images', return_value=self.candidate), \
+                     patch.object(cli, 'MacBackend'), patch.object(cli, 'Updater') as updater:
+                    result = cli.main([command, '--manifest', str(self.manifest),
+                                       '--profile', str(self.profile), '--rollout-timeout', '77',
+                                       '--evidence-dir', str(evidence), *flags])
+                self.assertEqual(result, 0)
+                self.assertEqual(updater.call_count, 1)
+                self.assertEqual(updater.call_args.kwargs['verification_mode'], mode)
+                self.assertEqual(updater.call_args.kwargs['rollout_timeout'], 77)
+                self.assertFalse(updater.call_args.kwargs['already_bootloader'])
+                getattr(updater.return_value, 'run' if command == 'flash' else 'verify_only').assert_called_once_with()
+                getattr(updater.return_value, 'verify_only' if command == 'flash' else 'run').assert_not_called()
+                journals = list(evidence.glob('*/invocation.json'))
+                self.assertEqual(len(journals), 1)
+                invocation = json.loads(journals[0].read_text())
+                self.assertEqual(invocation['operation'], command)
+                self.assertEqual(invocation['verification_mode'], mode)
+                self.assertEqual(invocation['profile']['target'], 'A')
+                self.assertEqual(invocation['manifest'], str(self.manifest))
+
+    def test_verify_rejects_bootloader_entry_in_either_mode(self):
+        for mode in ('normal', 'thorough'):
+            with self.subTest(mode=mode), \
+                 patch.object(cli, 'load_candidate', return_value=self.candidate), \
+                 patch.object(cli, 'MacBackend') as backend, \
+                 patch.object(cli, 'Updater') as updater, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(['verify', '--manifest', str(self.manifest),
+                                          '--profile', str(self.profile), '--verification-mode', mode,
+                                          '--already-bootloader']), 1)
+                backend.assert_not_called()
+                updater.assert_not_called()
 
     def test_pointer_resolves_relative_to_pointer_not_cwd(self):
         pointer = self.root / 'nested/latest.json'
@@ -178,6 +275,34 @@ class CliTests(unittest.TestCase):
         self.assertNotIn('update_firmware.py prepare', frozen)
         normal = subprocess.check_output(['make', '-n', 'flash'], cwd=repo, text=True)
         self.assertLess(normal.index('update_firmware.py prepare'), normal.index('update_firmware.py flash'))
+
+    def test_make_verification_mode_defaults_and_overrides_are_separate_from_test_tier(self):
+        repo = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        # Test Make's own defaults, not the developer's exported overrides.
+        for name in ('VERIFY_MODE', 'TEST_TIER', 'MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES'):
+            env.pop(name, None)
+        for target, command in (('flash-plan', 'plan'), ('flash', 'flash'),
+                                ('flash-bootloader', 'flash'), ('verify', 'verify')):
+            for mode in (None, 'normal', 'thorough'):
+                with self.subTest(target=target, mode=mode):
+                    flags = [] if mode is None else [f'VERIFY_MODE={mode}']
+                    output = subprocess.check_output(
+                        ['make', '-n', target, 'MANIFEST=/tmp/frozen.json', 'TEST_TIER=deep', *flags],
+                        cwd=repo, text=True, env=env)
+                    self.assertIn(f'update_firmware.py {command}', output)
+                    self.assertIn(f'--verification-mode "{mode or "normal"}"', output)
+                    self.assertNotIn('update_firmware.py prepare', output)
+                    self.assertNotIn('--tier', output)
+                    self.assertEqual('--already-bootloader' in output, target == 'flash-bootloader')
+        prepare = subprocess.check_output(['make', '-n', 'release', 'VERIFY_MODE=thorough', 'TEST_TIER=deep'],
+                                          cwd=repo, text=True, env=env)
+        self.assertIn('--tier "deep"', prepare)
+        self.assertNotIn('--verification-mode', prepare)
+        tests = subprocess.check_output(['make', '-n', 'test', 'VERIFY_MODE=thorough', 'TEST_TIER=deep'],
+                                        cwd=repo, text=True, env=env)
+        self.assertIn('tests/run.py "deep"', tests)
+        self.assertNotIn('--verification-mode', tests)
 
 
 if __name__ == '__main__':
