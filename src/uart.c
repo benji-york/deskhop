@@ -84,7 +84,7 @@ static bool process_config_bootloader_request(device_t *state) {
         firmware_update_unlock();
         return false;
     }
-    if (state->fw.upgrade_in_progress || state->fw.image_dirty) {
+    if (state->fw.upgrade_in_progress || state->fw.image_dirty || state->batch.tx.active) {
         state->config_bootloader_peer_pending = false;
         state->config_bootloader_local_pending = false;
         firmware_update_unlock();
@@ -127,7 +127,10 @@ void process_uart_tx_task(device_t *state) {
     if (dma_channel_is_busy(state->dma_tx_channel))
         return;
 
-    if (!queue_try_remove(&state->uart_tx_queue, &packet))
+    /* Page service never fills the normal queue. Pending input/control traffic
+     * always wins; at most the one DMA frame already selected can precede new HID. */
+    if (!queue_try_remove(&state->uart_tx_queue, &packet)
+        && !firmware_batch_next_tx(state, &packet))
         return;
 
     if (!maintenance_packet_allowed(packet.type, packet.data, time_us_64()))
@@ -222,6 +225,11 @@ const uart_handler_t uart_handler[] = {
     /* Firmware */
     {.type = REQUEST_BYTE_MSG, .handler = handle_request_byte_msg},
     {.type = RESPONSE_BYTE_MSG, .handler = handle_response_byte_msg},
+    {.type = FW_BATCH_CAPS_REQUEST_MSG, .handler = firmware_batch_packet},
+    {.type = FW_BATCH_CAPS_RESPONSE_MSG, .handler = firmware_batch_packet},
+    {.type = FW_BATCH_PAGE_REQUEST_MSG, .handler = firmware_batch_packet},
+    {.type = FW_BATCH_PAGE_DATA_MSG, .handler = firmware_batch_packet},
+    {.type = FW_BATCH_PAGE_END_MSG, .handler = firmware_batch_packet},
     {.type = DIAGNOSTIC_STATUS_REQUEST_MSG, .handler = handle_diagnostic_request},
     {.type = DIAGNOSTIC_STATUS_RESPONSE_MSG, .handler = handle_diagnostic_response},
     {.type = DIAGNOSTIC_HISTORY_REQUEST_MSG, .handler = handle_history_request},

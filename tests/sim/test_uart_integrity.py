@@ -422,6 +422,12 @@ def scenario_uart_update_retry(s):
     pump_wire(s, 2000)
     s.expect(1, 'fw_source', 1)
     s.expect(1, 'fw_address', 0)
+    # Exercise the unchanged word retry path by withholding the optional page
+    # capability reply. Wait just short of its bounded negotiation timeout so
+    # the CRC fault below still targets the first actual word response.
+    if hasattr(s.nodes[1], 'firmware_batch_init'):
+        s.do(0, 'fault', {'drop_types': [52], 'drop_type_count': 1})
+        pump_wire(s, 99000, update=True)
     # Damage a response CRC after a fully protected source discovery. The
     # pending address must survive until the actual production timeout retry.
     s.do(0, 'fault', {'xor_at': 29, 'xor': 1})

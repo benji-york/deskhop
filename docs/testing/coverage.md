@@ -1,10 +1,27 @@
 # Coverage, fidelity and remaining gaps
 
-Snapshot: 2026-09-14. This is a boundary/behavior inventory, not a claim that all
+Snapshot: 2026-09-15. This is a boundary/behavior inventory, not a claim that all
 firmware paths are covered. It describes the checked-in test artifacts and the
 models they use. The runner's generated execution coverage, when enabled, is a
 separate measurement; compiling a translation unit does not execute every branch
 in it. No source-line percentage is inferred from suite counts.
+
+The deployed [v0.105 batch-transfer addition](batched-transfer-v105.md) is covered
+at three layers: pure `fw_batch.c` protocol/collector tests, production
+`firmware_batch.c` and page-commit logic over the storage oracle, and paired
+UART/scheduler scenarios. The source-coverage runner includes both new units
+in their relevant layers; the percentages below remain historical. Deep tests
+add actual v0.104 mixed-version transfers and bounded four-core priority
+exploration. The optional flash-delay model keeps peer cores and UART DMA live
+while pausing both local cores; replay tests retain those durations and compare
+complete traces. This models a conservative flash blackout, not RP2040
+instruction/interrupt timing or physical USB behavior.
+
+The subsequent [v0.106 hardware test](batched-transfer-hardware-v106.md) used
+the same firmware with only a version bump. Propagation, image verification and
+user input acceptance passed; measured progress did not establish actual batch
+use or acceleration. Those performance/observability gaps remain after merging
+the operationally accepted release.
 
 ## Reproducible source coverage
 
@@ -74,11 +91,11 @@ interleavings. See the [candidate record](verification-v101.md).
 
 ## Layers and independent oracles
 
-The unflashed [UART integrity draft](uart-integrity-draft.md) adds independent
+The [UART integrity work released in v0.102](uart-integrity-draft.md) adds independent
 CRC32 wire fixtures, whole-frame bit corruption, stream resynchronization,
 mixed-protocol rejection and command-dispatch regression evidence. Historical
 claims of accepting legacy UART frames below describe earlier versions; the
-current draft accepts only protected UART v1, including for legacy payload shapes.
+current firmware accepts only protected UART v1, including for legacy payload shapes.
 
 The v0.99 diagnostic additions are exercised at separate boundaries: pure
 history/peer protocol units use independent CRC and wire oracles; the paired

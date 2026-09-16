@@ -272,6 +272,15 @@ void process_hid_queue_task(device_t *state) {
         queue_try_remove(&state->hid_queue_out, &packet);
 }
 
+static void commit_pending_firmware_page(device_t *state) {
+    if (!state->fw.page_pending)
+        return;
+    uint32_t page_start_addr = state->fw.address - FLASH_PAGE_SIZE;
+    write_flash_page((uint32_t)ADDR_FW_RUNNING + page_start_addr - XIP_BASE, state->page_buffer);
+    state->fw.image_dirty = true;
+    state->fw.page_pending = false;
+}
+
 /* Task that handles copying firmware from the other device to ours */
 static void firmware_upgrade_task_locked(device_t *state) {
     if (state->reboot_requested || !state->fw.upgrade_in_progress)
@@ -313,6 +322,7 @@ static void firmware_upgrade_task_locked(device_t *state) {
             .progressed_at_us = now,
         };
         diagnostic_update_begin(DIAGNOSTIC_SOURCE_PEER, version);
+        firmware_batch_begin_locked(state);
         return;
     }
 
@@ -329,26 +339,28 @@ static void firmware_upgrade_task_locked(device_t *state) {
     /* A timeout asks for the same address again. Do not run the completed-word
        page/finalization logic until a response has actually advanced it. */
     if (!state->fw.byte_done) {
-        request_byte(state, state->fw.address);
+        firmware_batch_request_locked(state, state->fw.address);
         return;
     }
 
-    /* Queue the next read before writing a completed page. Other cores can also
+    /* A batch response is 2080 wire bytes, larger than the 1KiB RX DMA ring.
+       Finish programming/erasing BEFORE asking for the next burst. Its page
+       ownership flag survives queue pressure and fallback to legacy words. */
+    if (state->batch.mode == FW_BATCH_PAGES)
+        commit_pending_firmware_page(state);
+
+    /* Legacy words keep their one-word prefetch. Other cores can also
        produce UART traffic, so request_byte must atomically succeed before it
        marks this word consumed. The response cannot update page_buffer until this
        task returns because packet_receiver_task runs on the same core. */
     bool transfer_complete = state->fw.address >= STAGING_IMAGE_SIZE;
-    if (!transfer_complete && !request_byte(state, state->fw.address))
+    if (!transfer_complete && !firmware_batch_request_locked(state, state->fw.address))
         return;
 
     /* A response advances address past the four bytes it supplied. At each page
        boundary, commit the page that has just finished. Address zero is the start
        of the transfer, not a completed page. */
-    if (state->fw.address != 0 && TU_U32_BYTE0(state->fw.address) == 0x00) {
-        uint32_t page_start_addr = state->fw.address - FLASH_PAGE_SIZE;
-        write_flash_page((uint32_t)ADDR_FW_RUNNING + page_start_addr - XIP_BASE, state->page_buffer);
-        state->fw.image_dirty = true;
-    }
+    commit_pending_firmware_page(state);
 
     /* The final response leaves address exactly at the image size. Finalize now;
        requesting that out-of-range address would never receive a response. */

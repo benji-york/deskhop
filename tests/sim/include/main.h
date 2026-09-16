@@ -12,6 +12,9 @@
 #include "constants.h"
 #include "misc.h"
 #include "structs.h"
+#if SIM_HAS_FW_BATCH
+#include "firmware_batch.h"
+#endif
 #include "config.h"
 #include "usb_descriptors.h"
 #include "user_config.h"

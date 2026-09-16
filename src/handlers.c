@@ -595,7 +595,7 @@ void handle_request_byte_msg(uart_packet_t *packet, device_t *state) {
 /* Process response message following a request we sent to read a byte */
 /* state->page_offset and state->page_number are kept locally and compared to returned values */
 static void handle_response_byte_msg_locked(uart_packet_t *packet, device_t *state) {
-    if (state->reboot_requested)
+    if (state->reboot_requested || !firmware_batch_accepts_word(state))
         return;
 
     uint32_t address = packet->data32[0];
@@ -624,8 +624,10 @@ static void handle_response_byte_msg_locked(uart_packet_t *packet, device_t *sta
 
     /* Neeeeeeext byte, please! */
     state->fw.address += sizeof(uint32_t);
-    if (state->fw.address % FLASH_PAGE_SIZE == 0)
+    if (state->fw.address % FLASH_PAGE_SIZE == 0) {
+        state->fw.page_pending = true;
         diagnostic_update_progress(state->fw.address);
+    }
     state->fw.progressed_at_us = time_us_32();
     state->fw.request_pending = false;
     state->fw.byte_done = true;
@@ -655,6 +657,7 @@ static void begin_firmware_pull(device_t *state,
         .progressed_at_us = now,
     };
     diagnostic_update_begin(DIAGNOSTIC_SOURCE_PEER, version);
+    firmware_batch_begin_locked(state);
 }
 
 /* Process a request to read a firmware package from flash */

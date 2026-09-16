@@ -63,11 +63,24 @@ ownership from each firmware's tables, including older baseline builds.
 
 ## Current release and Bootloader fix
 
+The deployed [v0.105 page-transfer release](batched-transfer-v105.md) adds
+native protocol/collector tests, real storage transactions and 13 paired batch
+scenarios, including full-slot transfers under modeled flash pauses. Deep testing
+also compiles actual v0.104 source at local commit `2509929` and transfers a full
+image in each mixed-version direction, without fetching. A short batch/retry
+scenario runs under all 24 modeled core-priority orders. This is compatibility
+and bounded timing evidence, not a physical batch-performance measurement. Both
+boards subsequently passed fresh firmware verification after installation; that
+first upgrade used the old receiver's legacy transfer path. The later
+[v0.106 version-only test](batched-transfer-hardware-v106.md) propagated between
+batch-capable peers and passed verification and user input acceptance. It is
+now integrated on `main`; actual batch use and speedup remain unproven.
+
 The accepted [v0.102](release-v102.md) released the keyboard
 and UART fixes below with their required version bump and two-board migration.
-The [v0.103 Bootloader-button fix](bootloader-button-v103.md) is now deployed
-and firmware-verified on both boards; user input and physical button acceptance
-remain pending. It adds an actual page-click/mock-HID test and 20 paired-production
+The [v0.103 Bootloader-button fix](bootloader-button-v103.md) was deployed
+and firmware-verified on both boards, and is retained in v0.105. It adds an
+actual page-click/mock-HID test and 20 paired-production
 scenarios for USB admission, peer routing, queue/DMA/UART drain and updater guards.
 These exercise production handlers, not the Pico ROM or physical USB hardware.
 
@@ -116,8 +129,10 @@ in the runbook. No command flashes or uploads firmware.
 - **Deep:** fast tier plus 20,000 HID cases, 16 storage seeds, 32 generated
   paired-input sequences, the backpressure scenario under all 24 fixed priority
   orders of the four modeled cores, equivalent order exploration for peer
-  status/history and simultaneous verification, and 38 compiled production
-  mutations (21 storage and 17 paired, including seven selection mutations).
+  status/history, simultaneous verification and batch transfer, and 43 compiled
+  production mutations (26 storage and 17 paired, including seven selection
+  mutations and five batch-transfer mutations). Full-slot mixed-version
+  transfers additionally require local v0.104 commit `2509929`.
   Model mutations are counted separately. Nine valid-input scenarios also run
   against original `d42c930` source (Git and that local commit are required;
   no fetching). Three host-effect traces match exactly; four compare ordered

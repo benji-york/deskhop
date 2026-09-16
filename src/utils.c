@@ -41,6 +41,10 @@ void firmware_update_lock(void) {
     critical_section_enter_blocking(&firmware_update_critical_section);
 }
 
+bool firmware_update_try_lock(void) {
+    return dh_critical_section_try_enter(&firmware_update_critical_section);
+}
+
 void firmware_update_unlock(void) {
     critical_section_exit(&firmware_update_critical_section);
 }

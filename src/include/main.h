@@ -34,6 +34,7 @@
 #include "dma.h"
 
 #include "firmware.h"
+#include "firmware_batch.h"
 #include "diagnostic_runtime.h"
 #include "flash.h"
 #include "handlers.h"

@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "flash.h"
 #include "fw_update.h"
+#include "fw_batch_state.h"
 #include "packet.h"
 #include "reboot_hotkey.h"
 #include "screen.h"
@@ -79,6 +80,7 @@ typedef struct {
     bool image_dirty;         // At least one page of the running image was overwritten
     bool request_pending;     // Only an outstanding request may accept a response
     bool byte_done;           // Has the byte been successfully transferred
+    bool page_pending;        // One validated complete page owns the next flash write
     bool upgrade_in_progress; // True if firmware transfer from the other box is in progress
 } fw_upgrade_state_t;
 
@@ -160,6 +162,7 @@ typedef struct {
 
     /* Firmware */
     fw_upgrade_state_t fw;           // State of the firmware upgrader
+    fw_batch_state_t batch;          // Optional, negotiated UART-v1 page transfer
     firmware_metadata_t _running_fw; // RAM copy of running fw metadata
     uint32_t peer_fw_last_seen_us;    // Last heartbeat, used for stalled-pull recovery
     bool reboot_requested;           // If set, stop updating watchdog

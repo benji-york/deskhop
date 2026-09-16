@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCES = ["utils.c", "ramdisk.c", "tasks.c", "handlers.c", "fw_update.c",
+SOURCES = ["utils.c", "ramdisk.c", "tasks.c", "handlers.c", "fw_update.c", "fw_batch.c", "firmware_batch.c",
            "config_migration.c", "constants.c", "defaults.c", "protocol.c", "selection.c",
            "diagnostic_runtime.c", "diagnostic_history.c", "history.c"]
 

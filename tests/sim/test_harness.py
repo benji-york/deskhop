@@ -38,11 +38,42 @@ def check_keyboard_startup_ownership():
     setup = (ROOT/'src/setup.c').read_text()
     assert setup.index('keyboard_sync_init(boot_session)') < setup.index('multicore_launch_core1(core1_main)')
     assert setup.index('maintenance_init(state->board_role, boot_session)') < setup.index('multicore_launch_core1(core1_main)')
+    assert setup.index('firmware_batch_init(state, boot_session)') < setup.index('multicore_launch_core1(core1_main)')
     handlers = (ROOT/'src/handlers.c').read_text()
     announcement = handlers.split('void announce_initial_output(', 1)[1].split('\n}', 1)[0]
     assert 'keyboard_host_reset(state)' in announcement
     for forbidden in ('keyboard_sync_', 'keyboard_focus_changed(', 'release_all_keys('):
         assert forbidden not in announcement
+
+
+def check_batch_flash_replay(path):
+    from test_fw_batch import image, prepare
+    with Simulation(seed=73, flash_erase_us=50000, flash_program_us=1000) as sim:
+        prepare(sim)
+        deadline = 200000
+        while sum(event['kind'] == 'program' and event['node'] == 1
+                  for event in sim.trace) < 2:
+            assert sim.now < deadline
+            sim.advance(1000)
+        sim.expect(1, 'fw_address', 512)
+        sim.check('event_count', 1, 'program', 2)
+        sim.check('event_count', 1, 'erase', 1)
+        assert sim.flash(1, 0, 512) == image(205, 0x31)[:512]
+        sim.save(path)
+        before = sim.trace
+    data = json.loads(path.read_text())
+    assert data['flash_erase_us'] == 50000 and data['flash_program_us'] == 1000
+    assert data['library_sha256_by_role'] == [data['library_sha256']] * 2
+    assert replay(data) == before, 'flash-blackout trace did not replay exactly'
+    # Negative control: silently dropping recorded timing must be detectable,
+    # either by the retained progression assertions or the exact trace oracle.
+    no_blackout = dict(data, flash_erase_us=0, flash_program_us=0)
+    try:
+        wrong_trace = replay(no_blackout)
+    except AssertionError:
+        pass
+    else:
+        assert wrong_trace != before, 'the flash timing seam had no observable effect'
 
 
 def main():
@@ -85,6 +116,7 @@ def main():
         except AssertionError as e:assert '2 seconds' in str(e)
         else:raise AssertionError('blocking wait must report its virtual-time bound')
     path=ROOT/'build/tests/replay-contract.json'
+    check_batch_flash_replay(path.with_name('batch-flash-replay-contract.json'))
     with Simulation(seed=73) as s:
         attach(s);s.do(1,'report',1,0,'0001020000');s.advance(5000)
         s.expect(0,'x',16001)
@@ -138,5 +170,5 @@ def main():
     except AssertionError as e:assert str(e)==data['failure']
     else:raise AssertionError('minimized failure vanished')
     path.with_suffix('.min.json').write_text(json.dumps(small,indent=2)+'\n')
-    print(f'harness: CLI interleaving selection, named task/core mapping, isolated globals/reset, callback failures, bounded waits, exact replay, ddmin {len(data["steps"])} -> {len(small["steps"])} steps passed')
+    print(f'harness: CLI interleaving selection, named task/core mapping, pre-launch initialization, isolated globals/reset, callback failures, bounded waits, exact flash-blackout replay, ddmin {len(data["steps"])} -> {len(small["steps"])} steps passed')
 if __name__=='__main__':main()

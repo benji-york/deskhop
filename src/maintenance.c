@@ -34,6 +34,7 @@ static maintenance_start_t safety_locked(uint64_t now_us) {
     if (global_state.reboot_requested)
         return MAINTENANCE_REBOOT_PENDING;
     if (global_state.fw.upgrade_in_progress || global_state.fw.image_dirty
+        || global_state.batch.tx.active
         || (global_state.maintenance_source_seen
             && !expired(now_us, global_state.maintenance_source_last_us,
                         MAINTENANCE_SOURCE_LEASE_US)))

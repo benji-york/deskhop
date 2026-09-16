@@ -8,6 +8,33 @@ README.
 
 Snapshot: 2026-09-15
 
+## Current publication: main matches accepted v0.106
+
+Benji confirmed "looks good" after the requested physical input checks and
+authorized committing, merging and pushing. `main` now includes the operationally
+accepted v0.105 batch implementation plus the version-only v0.106 bump actually
+running on both Picos, and the hardware-exercised pinned stock-picotool updater.
+The source firmware is unchanged from the frozen v0.106 candidate. No extra
+flash accompanies publication. Batch use/speedup remains unproven; this merge
+does not convert successful deployment into a performance claim.
+
+The detailed current evidence is in
+[the v0.106 hardware record](docs/testing/batched-transfer-hardware-v106.md).
+Clean integration validation passed all 42 fast-tier steps (118 updater tests
+included) and a fresh ARM build. Rebuilt BIN and UF2 match the installed frozen
+v0.106 candidate byte-for-byte. The host fix is `b1d1c8b`; the accepted version
+bump/hardware record is `40d4c8a`.
+Earlier deployment/publication sections below are historical; their then-current
+version, acceptance and branch statements do not override this section.
+
+Still outside this integration: unfinished configuration-validation changes
+in its worktree; broader reboot/power-loss safety work; newer upstream PRs
+#369, #364 and later #359 keyboard-collection changes; and proposed batch-mode,
+negotiation/retry/fallback diagnostics. The old upstream replay/selective
+branches are superseded alternatives, not additional fixes to merge. Seventy
+untracked ` 2` copies match historical `03d85db` blobs exactly and remain
+untouched; they are not unique work and were excluded from validation/publication.
+
 ## Latest upgrade: pinned updater succeeded; both Picos verified on v0.106
 
 Benji subsequently authorized integrating the successful no-flash procedure
@@ -156,7 +183,7 @@ progress and a frozen same-core status snapshot. It does not prove every page
 used batching or that no fallback occurred. No additional serial observer is
 needed. Keep `main` at v0.104 pending hardware results and user input acceptance.
 
-## Publication boundary: main is v0.104; the devices remain on v0.105
+## Historical publication boundary: main was v0.104; devices ran v0.105
 
 Benji requested merging only physically tested changes and explicitly limited
 `main` to v0.104. The completed dependency chain through `2509929` is included:

@@ -21,6 +21,7 @@
  void     enter_firmware_recovery(void);
  void     firmware_sync_init(void);
  void     firmware_update_lock(void);
+ bool     firmware_update_try_lock(void);
  void     firmware_update_unlock(void);
  bool     firmware_image_is_valid(uint16_t, uint32_t, bool);
  void     read_flash_bytes(const uint8_t *, void *, size_t);
