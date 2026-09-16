@@ -8,9 +8,11 @@ the received/programmed image; the host also retains independent readback and
 fresh checks on both Picos.
 
 `main` intentionally retains v0.104 firmware. Both physical Picos currently run
-verified v0.105 from `codex/batched-firmware-transfer`, whose new batch path
-still awaits a physical new/new transfer test. Publishing `main` does not
-downgrade the devices, and the normal updater refuses an older candidate.
+verified v0.106: the v0.105 batch implementation with only a version bump to
+exercise a new/new transfer. Automatic propagation worked, but its measured
+speed does not establish batch use or acceleration; batching remains unmerged.
+Publishing `main` does not downgrade the devices, and the normal updater refuses
+an older candidate.
 
 ## Stock-picotool invocation and hardware evidence
 
@@ -20,6 +22,43 @@ Every stock picotool child receives `LIBUSB_DEBUG=4`; this is a supported libusb
 diagnostic setting, not a custom tool or driver. Only this override is journaled,
 not ambient environment values. Output remains in bounded-command log files.
 Failures still stop without automatic retries and clean up the serial context.
+
+The updater now issues one identity command (`info -a --ser`) and
+binds that identity to the current disk-free ROM USB session. Subsequent
+save/load/reboot commands use stock picotool's `--bus` and `--address`, avoiding
+another flash-UID helper execution before each command. The selector comes
+from the identity command's libusb debug output, not a guessed bus number or
+the nonunique RP2040 ROM serial. Missing or ambiguous output fails closed.
+Stock `info -a --ser` itself invokes the UID helper for selection and for its
+device-information output; "one command" does not mean one helper invocation.
+
+IORegistry identity, session, location, USB address and VID/PID must match
+before and after the UID check, before every ROM operation, and after each
+read/write. The binding is discarded on any operation failure and on reboot;
+it cannot be silently refreshed or reused. `rom-session.json` records the
+original binding, not a reusable configuration. There are no new options or
+custom picotool dependencies. Keep cables connected and other USB tools idle:
+these checks observe enumeration changes but do not hold an atomic USB handle
+across separate picotool processes.
+
+This procedure passed one no-flash hardware experiment: full v0.105 readback in
+0.557 seconds, normal reboot in 0.011 seconds, and separate successful both-board
+verification without a power cycle. The original run's final `UNVERIFIED busy`
+verdict remains recorded. Evidence:
+`build/updater/runs/bus-address-once-20260916/` and
+`build/updater/runs/20260916T010755Z-uqvk8ve1/`. The extra identity observations
+also change timing, so this is not proof of a complete or isolated causal fix.
+The maintained implementation has since completed a full physical upgrade:
+`build/updater/runs/20260916T011723Z-s6a3wjja/`. Firmware backup took 0.559 seconds,
+verified load 3.948 seconds and exact independent readback 0.558 seconds; saved
+settings were unchanged. Normal reboot and automatic B propagation succeeded,
+without a power cycle. The first full-image check passed on both boards, but
+the later negative test returned A `UNVERIFIED busy`; the original run remains
+failed at diagnostics. Separate read-only run
+`build/updater/runs/20260916T011840Z-krk7l5zw/` passed all fresh both-board checks
+in 5.860 seconds, CRC `68eba065`, boot CRC `2cd31c9d`. Benji subsequently confirmed
+"looks good" after the requested input checks. All 118 host updater tests pass. This successful upgrade does
+not establish reliability across every intermittent USB failure.
 
 CDC retention alone did not resolve the earlier timeout. The combined stock-tool
 invocation succeeded in a no-flash v0.104 validation and the subsequent physical
@@ -73,7 +112,9 @@ SHA-256 validation, not file permissions alone, protects their integrity.
 - Python 3.10+, Make, CMake, a native C compiler, Node.js for existing tests,
   an ARM GNU toolchain, and populated repository SDK/library directories.
 - For actual device operations: macOS and an installed official `picotool`
-  supporting UID selection, save/load/verify and normal application reboot.
+   supporting UID and bus/address selection, save/load/verify and normal
+   application reboot. Its libusb debug output must identify the opened
+   bus/address; unfamiliar output is refused rather than guessed.
 - No packages are downloaded, no privileged command is run, and no software is
   needed on the other Mac. Python host tools use the standard library only.
 - Put build tools on `PATH`, or supply `TOOLCHAIN_DIR=/path/to/arm/bin`.
@@ -114,7 +155,8 @@ are not silently repaired. Review the evidence instead of blindly retrying.
 2. Send the local `bootloader A` or `bootloader B` command exactly once, retaining
    DTR/the serial connection through its complete response, ROM operations and
    normal application reboot; close it before fresh application diagnostics.
-   Confirm the selected flash UID and **disk-free PICOBOOT only**.
+   Confirm the selected flash UID and **disk-free PICOBOOT only**, then pin
+   that connection for all subsequent ROM commands.
 3. Back up the full 256 KiB firmware slot and all 4,096 saved-settings bytes.
    Validate the old image and version, then load the UF2 with picotool verification.
 4. Independently read the complete firmware slot and saved settings. Require an
@@ -191,13 +233,13 @@ workflow against controlled device doubles. It does not execute RP2040 ROM or
 prove physical USB timing. The firmware's existing native/simulator tests also
 run during preparation; the extended tier remains available.
 
-The new host workflow's **read-only diagnostic path has passed on hardware**:
-on 2026-09-15 the pair was already current at v0.104, so no rewrite was attempted.
-An initial conservative `UNVERIFIED busy` on A stopped the first run; a separate
-fresh verification completed all checks on both boards in 5.617 seconds. See
-the runbook's first-live-run record for evidence. Serial bootloader entry,
-upload, reboot and propagation through this new host workflow still need physical
-acceptance. The deployed v0.104 firmware remains untouched.
+The host workflow has exercised serial bootloader entry, backup, verified load,
+independent readback, unchanged settings, reboot and legacy propagation on
+hardware. Both boards currently have verified v0.106 images. The pinned-selector
+implementation has completed the physical upgrade above. B's receiving samples
+show about 7.4 kB/s, which does not prove use of the accelerated batch path;
+that feature's acceptance remains pending. See the runbook for each preserved
+result, the separate diagnostic verification, and the batching evidence limit.
 
 The improvement is eliminating manual pauses between already-tested steps and
 reusing unchanged prepared images. Previous retained evidence shows roughly

@@ -74,6 +74,34 @@ def boot_state(text, required):
             'Refusing non-disk-free ROM mode: PICOBOOT must be the sole USB interface.')
 
 
+def usb_pin(text):
+    """Identify one disk-free ROM connection, not the nonunique ROM serial."""
+    boot_state(text, True)
+    # Only device properties count; children repeat location/VID/PID fields.
+    root = text.split('\n  +-o', 1)[0]
+    ids = re.findall(r'^\+-o RP2 Boot@[^\n]*\bid (0x[0-9a-f]+),', root, re.M)
+    require(len(ids) == 1, 'Cannot pin the sole ROM registry identity.')
+    pin = {'registry_id': ids[0]}
+    for key in ('sessionID', 'locationID', 'USB Address', 'idVendor', 'idProduct'):
+        values = re.findall(r'^\s*\|?\s*"' + re.escape(key) + r'" = (\d+)\s*$', root, re.M)
+        require(len(values) == 1, f'Ambiguous/missing USB property: {key}.')
+        pin[key] = int(values[0])
+    require(pin['idVendor'] == 0x2e8a and pin['idProduct'] == 3, 'Unexpected ROM VID/PID.')
+    require(pin['sessionID'] > 0 and pin['locationID'] > 0
+            and 1 <= pin['USB Address'] <= 127, 'Invalid USB connection identity.')
+    return pin
+
+
+def usb_selector(identity_output, pin):
+    """Bind the UID check's actual libusb selection to the observed connection."""
+    opened = set(re.findall(r'\[libusb_open\]\s+open (\d+)\.(\d+)\s*$', identity_output, re.M))
+    require(len(opened) == 1, 'UID check did not open exactly one USB address.')
+    bus, address = map(int, next(iter(opened)))
+    require(1 <= bus <= 255 and address == pin['USB Address'],
+            'libusb selector does not match the pinned ROM device.')
+    return ['--bus', str(bus), '--address', str(address)]
+
+
 class MacBackend:
     def __init__(self, evidence, port, picotool='picotool'):
         require(sys.platform == 'darwin', 'The USB/media safety backend currently supports macOS only.')
@@ -83,6 +111,8 @@ class MacBackend:
         require(self.picotool, 'picotool not found. Set PICOTOOL or --picotool to its executable path.')
         self.commands, self.events = [], []
         self.serial_number = 0
+        self.rom_session = None
+        self._identity_attempted = False
 
     def run(self, name, argv, timeout=20):
         start = time.monotonic()
@@ -134,24 +164,69 @@ class MacBackend:
             time.sleep(0.1)
 
     def identity(self, uid):
-        output = self.run('identity', [self.picotool, 'info', '-a', '--ser', uid])
-        require(re.search(r'flash id:\s+0x' + re.escape(uid) + r'\b', output), 'PICOBOOT flash UID differs.')
-        require(re.search(r'name:\s+deskhop\b', output), 'Selected flash does not identify as DeskHop.')
+        try:
+            require(not self._identity_attempted, 'ROM identity is checked once; no automatic re-identification.')
+            self._identity_attempted = True
+            require(re.fullmatch(r'[0-9A-F]{16}', uid) is not None, 'Invalid physical flash UID.')
+            before = self.observe_pin()
+            output = self.run('identity', [self.picotool, 'info', '-a', '--ser', uid])
+            require(re.findall(r'flash id:\s+0x([0-9A-Fa-f]+)\b', output) == [uid],
+                    'PICOBOOT flash UID differs or is ambiguous.')
+            require(re.findall(r'^\s*name:\s+(\S+)', output, re.M) == ['deskhop'],
+                    'Selected flash does not identify as DeskHop.')
+            selector = usb_selector(output, before)
+            require(self.observe_pin() == before, 'ROM device changed during UID check.')
+            session = {'uid': uid, 'pin': before, 'selector': selector}
+            write_json(self.evidence / 'rom-session.json', session)
+            self.rom_session = session
+        except BaseException:
+            self.rom_session = None
+            raise
+
+    def observe_pin(self):
+        return usb_pin(self.run('pin-usb',
+            ['ioreg', '-p', 'IOService', '-r', '-n', 'RP2 Boot', '-l', '-w', '0'], 5))
+
+    def guard_session(self, uid):
+        require(self.rom_session is not None, 'No valid pinned ROM session; stop and inspect.')
+        require(uid == self.rom_session['uid'], 'Requested UID differs from the pinned ROM session.')
+        require(self.observe_pin() == self.rom_session['pin'],
+                'ROM connection changed; selector expired. Stop and inspect.')
+        return list(self.rom_session['selector'])
+
+    @contextmanager
+    def rom_operation(self, uid, *, reboot=False):
+        # These observations detect enumeration changes; they are not an atomic
+        # USB handle. Keep cables/other USB tools untouched during deployment.
+        try:
+            selector = self.guard_session(uid)
+            yield selector
+            if not reboot:
+                self.guard_session(uid)
+        except BaseException:
+            self.rom_session = None
+            raise
+        finally:
+            if reboot:
+                self.rom_session = None  # Even an uncertain reboot expires it.
 
     def save(self, label, start, end, uid):
-        path = self.evidence / (label + '.bin')
-        require(not path.exists(), 'Never overwrite a previous backup/readback.')
-        self.run(label, [self.picotool, 'save', '-r', hex(start), hex(end), str(path), '--ser', uid])
-        data = path.read_bytes()
-        require(len(data) == end - start, f'{label}: short flash read.')
+        with self.rom_operation(uid) as selector:
+            path = self.evidence / (label + '.bin')
+            require(not path.exists(), 'Never overwrite a previous backup/readback.')
+            self.run(label, [self.picotool, 'save', '-r', hex(start), hex(end), str(path), *selector])
+            data = path.read_bytes()
+            require(len(data) == end - start, f'{label}: short flash read.')
         return data
 
     def load(self, uf2, uid):
-        self.run('load-verify', [self.picotool, 'load', '-v', str(uf2), '--ser', uid], 30)
+        with self.rom_operation(uid) as selector:
+            self.run('load-verify', [self.picotool, 'load', '-v', str(uf2), *selector], 30)
 
     def reboot(self, uid):
         # Normal application only. Never use reboot -u (enables ROM storage).
-        self.run('reboot-application', [self.picotool, 'reboot', '-a', '--ser', uid], 10)
+        with self.rom_operation(uid, reboot=True) as selector:
+            self.run('reboot-application', [self.picotool, 'reboot', '-a', *selector], 10)
 
     def wait_port(self, timeout=8):
         deadline = time.monotonic() + timeout

@@ -8,6 +8,154 @@ README.
 
 Snapshot: 2026-09-15
 
+## Latest upgrade: pinned updater succeeded; both Picos verified on v0.106
+
+Benji subsequently authorized integrating the successful no-flash procedure
+into the maintained updater, adding safety regression tests, and retrying the
+prepared v0.106 upgrade. This supersedes the earlier diagnostic-only boundary
+below. After deployment and verification, Benji confirmed "looks good" and
+authorized committing, merging and publishing the device-tested changes.
+The host change establishes physical identity with one command, binds the
+observed USB session, uses stock bus/address selection for later commands, checks the pin
+before every operation and after reads/writes, and expires it on failure or
+reboot. It preserves backups, independent readback, unchanged-settings checks,
+fresh both-board diagnostics, disk-free mode and the no-retry policy. All **118
+updater tests** pass, including 36 platform tests for malformed/ambiguous identity,
+changed connections, expired sessions, transport failures and no retries. An
+independent safety review found no blocker. The frozen version-only v0.106
+candidate remained unchanged; no firmware rebuild was needed for host edits.
+
+The authorized upgrade, `build/updater/runs/20260916T011723Z-s6a3wjja/`, completed
+one serial ROM entry, one identity command, firmware/settings backups, verified
+load, exact independent readback, unchanged settings and normal reboot. Every
+post-identity ROM command used pinned bus/address selection. Firmware backup
+took 0.559 seconds, load/verify 3.948 seconds, independent firmware readback
+0.558 seconds, and reboot 0.011 seconds. The normal application/peer-watch phase
+began 7.567 seconds after preflight. No power cycle, cable move or ROM retry was
+needed. A's settings SHA256 stayed
+`aa816af793193a7ce487d391b49bf45d514dde09bd77d28255eb782e82a85464`.
+
+B automatically propagated v0.106 and rebooted. The first full-slot scan
+passed on both boards, but A returned `UNVERIFIED busy` during the intentionally
+wrong-CRC scan (B correctly returned `FAIL crc_mismatch`). The original run
+therefore remains **failed at diagnostics**, elapsed 48.332 seconds, not
+relabeled as a fully successful run. Separate read-only verification in
+`build/updater/runs/20260916T011840Z-krk7l5zw/` passed in **5.860 seconds**:
+fresh correct/wrong/correct checks on both boards, full-slot CRC `68eba065`,
+metadata/boot CRC `2cd31c9d`, exact identities, stable boot sessions and advancing
+cores. It issued no flash or reboot. Current sessions are A `3ad7279fab2beea7`
+and B `3da3479a30e83d0f`. Benji confirmed "looks good" after the requested input
+checks. This is operational acceptance, not evidence of a batching speedup.
+
+**Batch acceleration is not yet demonstrated.** The 64 same-attempt receiving
+samples span 255,744 bytes in 34,478 ms (about 7.4 kB/s). None of their 2,016
+ordered sample pairs exceeds the conservative legacy bound below; even the
+largest margin is negative (-4,976 bytes). This is inconclusive about actual
+batch use or fallback, not positive evidence of either. B's complete settle
+phase took 37.347 seconds. Investigate negotiation and/or pacing before claiming
+a speedup. Benji has now authorized merging the operationally accepted v0.106
+implementation despite this explicitly documented performance uncertainty.
+The host fix is being committed separately before firmware integration.
+
+Read-only source review found no intentional version/role gate excluding this
+105-to-106 transfer. Possible silent fallback paths are an unanswered single
+capability probe after 100 ms or exhaustion of three page attempts. Normal
+queued UART traffic takes priority over batch data, and source lock/flash timing
+also affects throughput. These are hypotheses, not diagnosed causes. The next
+useful firmware test should expose batch mode, negotiation, page retries and
+fallback reason/counters in status; another uninstrumented version bump would
+not distinguish them. No such firmware change or further flash was performed.
+
+## Prior hardware diagnostic: pinned USB read and reboot succeeded once
+
+Benji approved one no-flash experiment using stock picotool: identify A by its
+physical flash UID, pin that ROM USB session, then select its bus/address for
+one full-slot read and one normal reboot. The one-shot helper is retained at
+`build/updater/probe_bus_address_once.py` (SHA256
+`6de617deba82b2031627bad10dc8cedb5e2f14b011e0dc50398acb47939a911d`).
+This is an experiment, not a change to the maintained updater. It retains CDC,
+child-only `LIBUSB_DEBUG=4`, identity/media checks and the deployment lock.
+
+Evidence: `build/updater/runs/bus-address-once-20260916/`. After one
+`info -a --ser E6654854574C3E30`, stock picotool read all 262,144 firmware bytes
+using `--bus 2 --address 5` in **0.557 seconds**. The read exactly matches frozen
+v0.105, SHA256
+`f4ac4870a80e0b7fc405cfe03bde67c4a117e75154e6710e12592f28b8443580`.
+Normal reboot with the same selector succeeded in **0.011 seconds**. Registry
+ID `0x100010224`, session `2306720922114`, location `34734080` and USB address
+`5` remained unchanged in all four pin snapshots. These values apply only to
+this USB session and must never be reused as persistent board identities.
+There was no load, firmware/settings write, ROM-command retry or power cycle.
+
+The original experiment remains marked failed because its final recovery
+verification returned A `UNVERIFIED busy`, not a checksum mismatch; B passed.
+A separate read-only verification,
+`build/updater/runs/20260916T010755Z-uqvk8ve1/`, completed in **5.821 seconds**.
+Both v0.105 images passed fresh correct/wrong/correct full-slot checks with CRC
+`e4843d6a`, metadata CRC `6bffee14`, exact identities and advancing cores.
+A's boot session changed to `e5a19899118972cf`; B's remained
+`bdc0c71e9600a24b`. Both applications are restored and firmware-verified;
+physical input acceptance remains separate.
+
+This is promising evidence for identifying once and pinning the USB session,
+not proof of a reliable fix. The probe also inserted identity/media checks:
+identity completion to read start was about 87 ms, versus about 1 ms in the
+failed attempt below. Thus this experiment does not isolate selector choice
+from timing effects. Pins are checked observations, not an atomic held USB
+handle; changed enumeration must abort. No production updater modification
+or further flash is implied by the experiment's approval. Safely integrating
+and testing session selection would precede a separately authorized upgrade.
+The v0.106 candidate has **not** been installed, physical batching remains
+untested, and published `main` remains limited to v0.104.
+
+## Previous hardware test: backup timeout; unchanged v0.105 recovered and verified
+
+Benji requested testing v0.105's batch path after publishing only v0.104.
+Fresh read-only verification of both v0.105 images passed in
+`build/updater/runs/20260916T004627Z-vpogrmr5/` (5.907 seconds). An isolated
+worktree, `/private/tmp/deskhop-v105-hwtest.gUovwq`, on
+`codex/test-v105-batch` changes only the version from 105 to 106 relative to the
+batching branch. This makes the native newer-version rule trigger propagation;
+it adds no feature, instrumentation, downgrade or safety bypass. Fast validation
+and ARM build passed. The frozen candidate is
+`build/releases/deskhop-v0.106-m7cxjizq/manifest.json`, full-slot CRC `68eba065`.
+
+The authorized test attempt, `build/updater/runs/20260916T004919Z-9jsqm65k/`,
+accepted one serial `bootloader A`, observed disk-free ROM and independently
+matched A's physical UID. Its first backup then timed out after 10.074 seconds,
+exit 157 (`RP2040 unknown error`), despite retaining CDC and child-only
+`LIBUSB_DEBUG=4`. Total run time was 10.746 seconds. The journal records
+`write_started=false`, `reboot_requested=false`, and failure at `backing_up`.
+No firmware/settings write, load, propagation or retry occurred.
+
+After failure A remained in disk-free ROM and `/dev/cu.usbmodem21203` was absent;
+read-only USB inspection confirmed one vendor interface and active/nonbusy Mac
+media clients. No automatic software restoration or flash retry was attempted.
+Neither Pico was upgraded to v0.106, and the batch feature has still not been
+exercised on hardware. **The stock-debug invocation is not a reliable remedy
+for the intermittent ROM transfer timeout.**
+
+Benji subsequently power-cycled and reconnected both sides. Initial read-only
+recovery run `build/updater/runs/20260916T005106Z-r9_fwn_7/` stopped with B
+`UNVERIFIED busy`, not a checksum mismatch. A separate fresh read-only run,
+`build/updater/runs/20260916T005207Z-6rnyatsw/`, passed in 5.844 seconds: both
+v0.105 images still match full-slot CRC `e4843d6a`, metadata CRC `6bffee14`,
+correct/wrong/correct expectations, exact identities and progressing cores.
+No firmware write or reboot was issued in either recovery check. New boot
+sessions are A `614c4ce949545922` and B `bdc0c71e9600a24b`. Recovery is now
+firmware-verified; physical input acceptance remains separate. Do not blindly
+repeat the unchanged failed upgrade sequence.
+
+For a future successful run, retain B's pre-reboot status samples from the
+updater journal. With matching boot session, update attempt, peer source,
+target version and receiving phase, an interval satisfying
+`delta_received > 16 * (delta_uptime_ms + 2) + 512` exceeds the legacy protocol's
+maximum progress and proves actual batch use. This follows from one four-byte
+request per 250-microsecond updater task, no scheduler catch-up, page-rounded
+progress and a frozen same-core status snapshot. It does not prove every page
+used batching or that no fallback occurred. No additional serial observer is
+needed. Keep `main` at v0.104 pending hardware results and user input acceptance.
+
 ## Publication boundary: main is v0.104; the devices remain on v0.105
 
 Benji requested merging only physically tested changes and explicitly limited

@@ -27,7 +27,14 @@ MEDIA = """+-o IOMediaBSDClient  <class IOMediaBSDClient, id 0x100000001, regist
     { "IOClass" = "AppleAPFSVolumeBSDClient" }
 """
 BOOT = """+-o RP2 Boot@02120000  <class IOUSBHostDevice, id 0x100000010, registered, matched, active, busy 0 (13 ms), retain 34>
-  | { "USB Product Name" = "RP2 Boot" }
+  | {
+  |   "USB Product Name" = "RP2 Boot"
+  |   "sessionID" = 123456
+  |   "locationID" = 34734080
+  |   "USB Address" = 5
+  |   "idVendor" = 11914
+  |   "idProduct" = 3
+  | }
   +-o AppleUSBHostCompositeDevice  <class AppleUSBHostCompositeDevice, id 0x100000011, !registered, !matched, active, busy 0, retain 4>
   |   { "bDeviceClass" = 0 }
   +-o IOUSBHostInterface@0  <class IOUSBHostInterface, id 0x100000012, registered, matched, active, busy 0 (4 ms), retain 7>
@@ -39,7 +46,11 @@ BOOT = """+-o RP2 Boot@02120000  <class IOUSBHostDevice, id 0x100000010, registe
   +-o ExampleApp  <class AppleUSBHostDeviceUserClient, id 0x100000013, !registered, !matched, active, busy 0, retain 7>
       { "IOUserClientDefaultLocking" = Yes }
 """
-IDENTITY = f"Program Information\n name: deskhop\nDevice Information\n type: RP2040\n flash id: 0x{UID}\n"
+IDENTITY = ("libusb: debug [libusb_open] open 2.5\n"
+            f"Program Information\n name: deskhop\nDevice Information\n type: RP2040\n flash id: 0x{UID}\n")
+PIN = {"registry_id": "0x100000010", "sessionID": 123456, "locationID": 34734080,
+       "USB Address": 5, "idVendor": 11914, "idProduct": 3}
+SELECTOR = ["--bus", "2", "--address", "5"]
 
 
 class PlatformParserTests(unittest.TestCase):
@@ -82,6 +93,55 @@ class PlatformParserTests(unittest.TestCase):
             with self.subTest(state=state), self.assertRaises(platform.DeploymentError):
                 platform.boot_state(data, True)
 
+    def test_usb_pin_reads_only_root_device_properties(self):
+        self.assertEqual(platform.usb_pin(BOOT), PIN)
+        child_properties = BOOT.replace('"bDeviceClass" = 0',
+                                        '"bDeviceClass" = 0, "sessionID" = 999, "USB Address" = 99')
+        self.assertEqual(platform.usb_pin(child_properties), PIN)
+
+    def test_usb_pin_requires_single_well_formed_root_properties(self):
+        for key, value in PIN.items():
+            if key == "registry_id":
+                continue
+            field = f'"{key}" = {value}'
+            for replacement in ("", field + "\n  | " + field,
+                                f'"{key}" = garbage', f'"{key}" = -1',
+                                f'"{key}" = {value}oops', f'"{key}" = {value}.5'):
+                with self.subTest(key=key, replacement=replacement), \
+                        self.assertRaises(platform.DeploymentError):
+                    platform.usb_pin(BOOT.replace(field, replacement))
+
+    def test_usb_pin_rejects_invalid_connection_identity_and_rom_state(self):
+        invalid = [BOOT.replace("id 0x100000010", "no registry id"), BOOT + BOOT,
+                   BOOT.replace('"bInterfaceClass" = 255', '"bInterfaceClass" = 8'),
+                   BOOT + '"bInterfaceClass" = 255\n',
+                   BOOT.replace('"idVendor" = 11914', '"idVendor" = 11915'),
+                   BOOT.replace('"idProduct" = 3', '"idProduct" = 4')]
+        for key in ("sessionID", "locationID", "USB Address"):
+            invalid.append(BOOT.replace(f'"{key}" = {PIN[key]}', f'"{key}" = 0'))
+        invalid.append(BOOT.replace('"USB Address" = 5', '"USB Address" = 128'))
+        for data in invalid:
+            with self.subTest(data=data[:160]), self.assertRaises(platform.DeploymentError):
+                platform.usb_pin(data)
+
+    def test_usb_pin_cannot_fill_missing_root_property_from_child(self):
+        data = BOOT.replace('"sessionID" = 123456', "")
+        data = data.replace('"bDeviceClass" = 0', '"bDeviceClass" = 0, "sessionID" = 123456')
+        with self.assertRaises(platform.DeploymentError):
+            platform.usb_pin(data)
+
+    def test_usb_selector_requires_unique_matching_open_address(self):
+        self.assertEqual(platform.usb_selector(IDENTITY, PIN), SELECTOR)
+        self.assertEqual(platform.usb_selector(IDENTITY + IDENTITY, PIN), SELECTOR)
+        for output in ("", IDENTITY.replace("open 2.5", "open 2.6"),
+                       IDENTITY + "[libusb_open] open 3.5\n",
+                       IDENTITY.replace("open 2.5", "open 0.5"),
+                       IDENTITY.replace("open 2.5", "open 256.5"),
+                       IDENTITY.replace("open 2.5", "open 2.5oops"),
+                       IDENTITY.replace("open 2.5", "open 2.5.6")):
+            with self.subTest(output=output[:70]), self.assertRaises(platform.DeploymentError):
+                platform.usb_selector(output, PIN)
+
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
@@ -104,9 +164,28 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(env["LIBUSB_DEBUG"], "4")
             else:
                 self.assertIsNone(env)
+                stdout.write(BOOT.encode() if argv[0] == "ioreg" else output)
+                return subprocess.CompletedProcess(argv, 0)
             stdout.write(output)
             return subprocess.CompletedProcess(argv, returncode)
         return run
+
+    def bind(self):
+        with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(IDENTITY.encode())):
+            self.backend.identity(UID)
+
+    @staticmethod
+    def picotool_commands(run):
+        return [call.args[0] for call in run.call_args_list if call.args[0][0] == PICOTOOL]
+
+    def last_record(self, name):
+        return [record for record in json.loads((self.evidence / "commands.json").read_text())
+                if record["name"] == name][-1]
+
+    def new_backend(self, name):
+        evidence = self.evidence / name
+        evidence.mkdir()
+        return platform.MacBackend(evidence, PORT)
 
     def test_only_mac_explicit_callout_port_and_installed_picotool(self):
         for port in ("", "auto", "/dev/tty.usbmodem12345", "/dev/cu.a/b", "cu.usbmodem12345"):
@@ -120,26 +199,41 @@ class BackendTests(unittest.TestCase):
     def test_identity_uses_uid_filter_and_verifies_flash_identity(self):
         with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(IDENTITY.encode())) as run:
             self.backend.identity(UID)
-        self.assertEqual(run.call_args.args[0], [PICOTOOL, "info", "-a", "--ser", UID])
-        for output in (IDENTITY.replace(UID, "8877665544332211"), IDENTITY.replace("deskhop", "other")):
+        self.assertEqual(self.picotool_commands(run), [[PICOTOOL, "info", "-a", "--ser", UID]])
+        self.assertEqual(self.backend.rom_session, {"uid": UID, "pin": PIN, "selector": SELECTOR})
+        self.assertEqual(json.loads((self.evidence / "rom-session.json").read_text()), self.backend.rom_session)
+        for index, output in enumerate((IDENTITY.replace(UID, "8877665544332211"),
+                                        IDENTITY.replace("deskhop", "other"),
+                                        IDENTITY + "[libusb_open] open 3.5\n")):
+            backend = self.new_backend(f"bad-identity-{index}")
             with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(output.encode())):
                 with self.assertRaises(platform.DeploymentError):
-                    self.backend.identity(UID)
+                    backend.identity(UID)
+            self.assertIsNone(backend.rom_session)
+            with patch.object(platform.subprocess, "run") as retry:
+                with self.assertRaises(platform.DeploymentError):
+                    backend.identity(UID)
+            retry.assert_not_called()
 
-    def test_load_is_verified_uid_targeted_and_reboot_never_enters_rom_storage(self):
+    def test_load_and_reboot_use_bound_usb_selector_not_repeated_uid_lookup(self):
+        self.bind()
         path = self.evidence / "candidate.uf2"
         with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess()) as run:
             self.backend.load(path, UID)
             self.backend.reboot(UID)
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(commands, [[PICOTOOL, "load", "-v", str(path), "--ser", UID],
-                                    [PICOTOOL, "reboot", "-a", "--ser", UID]])
+        commands = self.picotool_commands(run)
+        self.assertEqual(commands, [[PICOTOOL, "load", "-v", str(path), *SELECTOR],
+                                    [PICOTOOL, "reboot", "-a", *SELECTOR]])
         self.assertFalse(any("-u" in command for command in commands))
+        self.assertIsNone(self.backend.rom_session)
 
-    def test_save_uses_exact_range_and_uid_and_will_not_overwrite(self):
+    def test_save_uses_exact_range_and_usb_selector_and_will_not_overwrite(self):
+        self.bind()
         def save(argv, *, stdout, stderr, timeout, env):
+            if argv[0] != PICOTOOL:
+                return self.fake_subprocess()(argv, stdout=stdout, stderr=stderr, timeout=timeout, env=env)
             self.assertEqual(argv[:5], [PICOTOOL, "save", "-r", "0x101ff000", "0x10200000"])
-            self.assertEqual(argv[-2:], ["--ser", UID])
+            self.assertEqual(argv[-4:], SELECTOR)
             self.assertEqual(env["LIBUSB_DEBUG"], "4")
             Path(argv[5]).write_bytes(b"\xFF" * 4096)
             return subprocess.CompletedProcess(argv, 0)
@@ -148,34 +242,44 @@ class BackendTests(unittest.TestCase):
             with self.assertRaisesRegex(platform.DeploymentError, "overwrite"):
                 self.backend.save("settings-before", 0x101FF000, 0x10200000, UID)
         self.assertEqual(result, b"\xFF" * 4096)
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(len(self.picotool_commands(run)), 1)
+        self.assertIsNone(self.backend.rom_session)
 
     def test_short_read_aborts(self):
+        self.bind()
         def short(argv, *, stdout, stderr, timeout, env):
+            if argv[0] != PICOTOOL:
+                return self.fake_subprocess()(argv, stdout=stdout, stderr=stderr, timeout=timeout, env=env)
             self.assertEqual(env["LIBUSB_DEBUG"], "4")
             Path(argv[5]).write_bytes(b"\xFF")
             return subprocess.CompletedProcess(argv, 0)
         with patch.object(platform.subprocess, "run", side_effect=short):
             with self.assertRaisesRegex(platform.DeploymentError, "short"):
                 self.backend.save("settings-before", 0x101FF000, 0x10200000, UID)
+        self.assertIsNone(self.backend.rom_session)
 
     def test_failure_is_journaled_without_retry(self):
+        self.bind()
         with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(b"failed\n", 7)) as run:
             with self.assertRaisesRegex(platform.DeploymentError, "No automatic retry"):
                 self.backend.reboot(UID)
-        self.assertEqual(run.call_count, 1)
-        record = json.loads((self.evidence / "commands.json").read_text())[0]
+        self.assertEqual(len(self.picotool_commands(run)), 1)
+        record = self.last_record("reboot-application")
         self.assertEqual(record["returncode"], 7)
         self.assertIn("DeploymentError", record["error"])
         self.assertIn("seconds", record)
         self.assertEqual(record["environment_overrides"], {"LIBUSB_DEBUG": "4"})
-        self.assertEqual((self.evidence / "001-reboot-application.log").read_bytes(), b"failed\n")
+        logs = list(self.evidence.glob("*-reboot-application.log"))
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].read_bytes(), b"failed\n")
+        self.assertIsNone(self.backend.rom_session)
 
     def test_debug_environment_is_private_to_picotool_and_debug_output_is_retained(self):
         debug = "libusb: debug [libusb_get_device_list] enumerate USB devices\n"
         output = (debug + IDENTITY + "libusb: debug [libusb_exit] complete\n").encode()
         for inherited_debug in (None, "1"):
             with self.subTest(inherited_debug=inherited_debug), patch.dict(platform.os.environ):
+                backend = self.new_backend(f"env-{inherited_debug}")
                 platform.os.environ["DESKHOP_TEST_SECRET"] = "synthetic-secret-not-for-journaling"
                 if inherited_debug is None:
                     platform.os.environ.pop("LIBUSB_DEBUG", None)
@@ -183,17 +287,20 @@ class BackendTests(unittest.TestCase):
                     platform.os.environ["LIBUSB_DEBUG"] = inherited_debug
                 parent_environment = dict(platform.os.environ)
                 with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(output)) as run:
-                    self.backend.identity(UID)
-                environment = run.call_args.kwargs["env"]
+                    backend.identity(UID)
+                identity_call = [call for call in run.call_args_list if call.args[0][0] == PICOTOOL][0]
+                environment = identity_call.kwargs["env"]
                 self.assertIsNot(environment, platform.os.environ)
                 self.assertEqual(environment, dict(parent_environment, LIBUSB_DEBUG="4"))
                 self.assertEqual(dict(platform.os.environ), parent_environment)
-                journal_text = (self.evidence / "commands.json").read_text()
-                record = json.loads(journal_text)[-1]
+                journal_text = (backend.evidence / "commands.json").read_text()
+                record = [entry for entry in json.loads(journal_text) if entry["name"] == "identity"][0]
                 self.assertEqual(record["environment_overrides"], {"LIBUSB_DEBUG": "4"})
                 self.assertNotIn("DESKHOP_TEST_SECRET", journal_text)
                 self.assertNotIn("synthetic-secret-not-for-journaling", journal_text)
-                self.assertEqual((self.evidence / f'{len(self.backend.commands):03d}-identity.log').read_bytes(), output)
+                logs = list(backend.evidence.glob("*-identity.log"))
+                self.assertEqual(len(logs), 1)
+                self.assertEqual(logs[0].read_bytes(), output)
 
     def test_non_picotool_commands_do_not_override_or_journal_environment(self):
         with patch.dict(platform.os.environ, {"LIBUSB_DEBUG": "2"}):
@@ -207,21 +314,26 @@ class BackendTests(unittest.TestCase):
                 self.assertNotIn("environment_overrides", record)
 
     def test_timeout_is_journaled_without_retry(self):
-        with patch.object(platform.subprocess, "run", side_effect=subprocess.TimeoutExpired("picotool", 30)) as run:
+        self.bind()
+        def timeout(argv, **kwargs):
+            if argv[0] == PICOTOOL:
+                raise subprocess.TimeoutExpired("picotool", 30)
+            return self.fake_subprocess()(argv, **kwargs)
+        with patch.object(platform.subprocess, "run", side_effect=timeout) as run:
             with self.assertRaises(subprocess.TimeoutExpired):
                 self.backend.load(self.evidence / "candidate.uf2", UID)
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args.kwargs["env"]["LIBUSB_DEBUG"], "4")
-        record = json.loads((self.evidence / "commands.json").read_text())[0]
+        self.assertEqual(len(self.picotool_commands(run)), 1)
+        record = self.last_record("load-verify")
         self.assertIn("TimeoutExpired", record["error"])
         self.assertNotIn("returncode", record)
         self.assertEqual(record["environment_overrides"], {"LIBUSB_DEBUG": "4"})
+        self.assertIsNone(self.backend.rom_session)
 
     def test_command_log_is_not_overwritten(self):
         (self.evidence / "001-identity.log").write_text("prior evidence")
         with patch.object(platform.subprocess, "run") as run:
             with self.assertRaises(FileExistsError):
-                self.backend.identity(UID)
+                self.backend.run("identity", [PICOTOOL, "info", "-a", "--ser", UID])
         run.assert_not_called()
         self.assertEqual((self.evidence / "001-identity.log").read_text(), "prior evidence")
 
@@ -229,6 +341,142 @@ class BackendTests(unittest.TestCase):
         with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(b"x" * (4 * 1024 * 1024 + 1))):
             with self.assertRaisesRegex(platform.DeploymentError, "Excessive output"):
                 self.backend.identity(UID)
+        self.assertIsNone(self.backend.rom_session)
+
+    def test_unbound_operations_never_open_usb(self):
+        with patch.object(platform.subprocess, "run") as run:
+            for operation in (lambda: self.backend.save("unbound", 0, 4, UID),
+                              lambda: self.backend.load(self.evidence / "candidate.uf2", UID),
+                              lambda: self.backend.reboot(UID)):
+                with self.assertRaises(platform.DeploymentError):
+                    operation()
+        run.assert_not_called()
+
+    def test_bound_uid_mismatch_rejects_operation_and_consumes_session(self):
+        for name in ("save", "load", "reboot"):
+            with self.subTest(operation=name):
+                backend = self.new_backend(f"wrong-uid-{name}")
+                with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(IDENTITY.encode())):
+                    backend.identity(UID)
+                with patch.object(platform.subprocess, "run") as run:
+                    wrong = "8877665544332211"
+                    with self.assertRaises(platform.DeploymentError):
+                        if name == "save":
+                            backend.save("wrong-uid", 0, 4, wrong)
+                        elif name == "load":
+                            backend.load(self.evidence / "candidate.uf2", wrong)
+                        else:
+                            backend.reboot(wrong)
+                run.assert_not_called()
+                self.assertIsNone(backend.rom_session)
+
+    def test_changed_pin_during_identity_cannot_bind_or_retry(self):
+        for field, value in PIN.items():
+            changed = (BOOT.replace(value, "0x100000099") if field == "registry_id" else
+                       BOOT.replace(f'"{field}" = {value}', f'"{field}" = {value + 1}'))
+            backend = self.new_backend(f"identity-change-{field.replace(' ', '-')}")
+            with self.subTest(field=field), patch.object(backend, "run", side_effect=[BOOT, IDENTITY, changed]):
+                with self.assertRaises(platform.DeploymentError):
+                    backend.identity(UID)
+            self.assertIsNone(backend.rom_session)
+            with patch.object(backend, "run") as retry:
+                with self.assertRaises(platform.DeploymentError):
+                    backend.identity(UID)
+            retry.assert_not_called()
+
+    def test_repeated_identity_is_refused_without_second_picotool_call(self):
+        self.bind()
+        with patch.object(platform.subprocess, "run") as run:
+            with self.assertRaises(platform.DeploymentError):
+                self.backend.identity(UID)
+        run.assert_not_called()
+        self.assertIsNone(self.backend.rom_session)
+
+    def test_changed_or_missing_session_blocks_each_operation_before_usb(self):
+        changes = ["", BOOT + BOOT,
+                   BOOT.replace("0x100000010", "0x100000099"),
+                   BOOT.replace('"sessionID" = 123456', '"sessionID" = 123457'),
+                   BOOT.replace('"locationID" = 34734080', '"locationID" = 34734081'),
+                   BOOT.replace('"USB Address" = 5', '"USB Address" = 6')]
+        for operation in ("save", "load", "reboot"):
+            for index, changed in enumerate(changes):
+                with self.subTest(operation=operation, change=index):
+                    backend = self.new_backend(f"guard-{operation}-{index}")
+                    with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(IDENTITY.encode())):
+                        backend.identity(UID)
+                    with patch.object(backend, "run", return_value=changed) as run:
+                        with self.assertRaises(platform.DeploymentError):
+                            if operation == "save":
+                                backend.save("read", 0, 4, UID)
+                            elif operation == "load":
+                                backend.load(self.evidence / "candidate.uf2", UID)
+                            else:
+                                backend.reboot(UID)
+                    self.assertTrue(run.called)
+                    self.assertFalse(any(call.args[1][0] == PICOTOOL for call in run.call_args_list))
+                    self.assertIsNone(backend.rom_session)
+                    with patch.object(backend, "run") as retry:
+                        with self.assertRaises(platform.DeploymentError):
+                            backend.reboot(UID)
+                        with self.assertRaises(platform.DeploymentError):
+                            backend.identity(UID)
+                    retry.assert_not_called()
+
+    def test_post_operation_pin_change_invalidates_read_and_write(self):
+        for operation in ("save", "load"):
+            with self.subTest(operation=operation):
+                backend = self.new_backend(f"post-{operation}")
+                with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(IDENTITY.encode())):
+                    backend.identity(UID)
+                observations = iter((BOOT, BOOT.replace('"sessionID" = 123456', '"sessionID" = 123457')))
+                def run(name, argv, timeout=20):
+                    if argv[0] == "ioreg":
+                        return next(observations)
+                    if operation == "save":
+                        Path(argv[5]).write_bytes(b"read")
+                    return "ok"
+                with patch.object(backend, "run", side_effect=run) as calls:
+                    with self.assertRaises(platform.DeploymentError):
+                        if operation == "save":
+                            backend.save("read", 0, 4, UID)
+                        else:
+                            backend.load(self.evidence / "candidate.uf2", UID)
+                self.assertEqual(sum(call.args[1][0] == PICOTOOL for call in calls.call_args_list), 1)
+                self.assertIsNone(backend.rom_session)
+
+    def test_reboot_consumes_session_even_if_command_fails(self):
+        for status in (0, 7):
+            with self.subTest(status=status):
+                backend = self.new_backend(f"reboot-{status}")
+                with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(IDENTITY.encode())):
+                    backend.identity(UID)
+                with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(returncode=status)) as run:
+                    if status:
+                        with self.assertRaises(platform.DeploymentError):
+                            backend.reboot(UID)
+                    else:
+                        backend.reboot(UID)
+                self.assertEqual(len(self.picotool_commands(run)), 1)
+                self.assertIsNone(backend.rom_session)
+                with patch.object(platform.subprocess, "run") as retry:
+                    with self.assertRaises(platform.DeploymentError):
+                        backend.reboot(UID)
+                    with self.assertRaises(platform.DeploymentError):
+                        backend.identity(UID)
+                retry.assert_not_called()
+
+    def test_identity_command_failure_cannot_be_retried(self):
+        with patch.object(platform.subprocess, "run", side_effect=self.fake_subprocess(returncode=7)) as run:
+            with self.assertRaises(platform.DeploymentError):
+                self.backend.identity(UID)
+        self.assertEqual(len(self.picotool_commands(run)), 1)
+        self.assertIsNone(self.backend.rom_session)
+        with patch.object(platform.subprocess, "run") as retry:
+            with self.assertRaises(platform.DeploymentError):
+                self.backend.identity(UID)
+            with self.assertRaises(platform.DeploymentError):
+                self.backend.load(self.evidence / "candidate.uf2", UID)
+        retry.assert_not_called()
 
     def test_health_requires_same_media_identities(self):
         with patch.object(self.backend, "run", side_effect=[MEDIA, BOOT]):
