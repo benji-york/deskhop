@@ -51,6 +51,24 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(['plan', '--manifest', str(self.manifest), '--profile', str(self.profile)]), 1)
             backend.assert_not_called()
 
+    def test_verify_prints_read_only_plan_and_never_runs_flash_workflow(self):
+        output = io.StringIO()
+        with patch.object(cli, 'ROOT', self.root), \
+             patch.object(cli, 'load_candidate', return_value=self.candidate), \
+             patch.object(cli, 'stage_images', return_value=self.candidate), \
+             patch.object(cli, 'MacBackend'), patch.object(cli, 'Updater') as updater, \
+             contextlib.redirect_stdout(output):
+            result = cli.main(['verify', '--manifest', str(self.manifest),
+                               '--profile', str(self.profile),
+                               '--evidence-dir', str(self.root / 'runs')])
+        self.assertEqual(result, 0)
+        updater.return_value.verify_only.assert_called_once_with()
+        updater.return_value.run.assert_not_called()
+        self.assertIn('Plan: read-only', output.getvalue())
+        self.assertIn('No bootloader entry, firmware/settings write, or reboot', output.getvalue())
+        self.assertNotIn('→ serial bootloader entry', output.getvalue())
+        self.assertNotIn('→ firmware/settings backups', output.getvalue())
+
     def test_pointer_resolves_relative_to_pointer_not_cwd(self):
         pointer = self.root / 'nested/latest.json'
         pointer.parent.mkdir()

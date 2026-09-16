@@ -1,9 +1,12 @@
 # Upstream bug-fix integration for v0.107
 
-Status: implementation and hardware-free validation complete; frozen candidate
-ready for device testing. No hardware has been flashed, and `main` and the two
-devices remain at accepted v0.106. Main merge and push are deferred until
-physical acceptance.
+Status: implementation and hardware-free validation complete. The authorized
+flash attempt on 2026-09-16 failed during the initial backup, before any firmware
+write. Both Picos have now recovered on v0.106 and passed a fresh full-slot CRC
+scan. The complete correct/wrong/correct verification sequence still fails on
+A's intermittent post-scan `busy` result; no further flash was attempted.
+Main merge and push are deferred until physical acceptance of a successful
+future deployment.
 
 ## Scope and provenance
 
@@ -119,6 +122,61 @@ Subsequent documentation-only results do not alter the firmware or test inputs.
 - Config-page timers shown in seconds; save/readback retains the intended
   durations, with `0` still unlimited for the maximum-time setting.
 - Keyboard/trackball enumeration after normal reconnect/reboot.
+
+## Hardware attempt: stopped before writing, 2026-09-16
+
+Benji authorized flashing the exact frozen candidate. The maintained updater
+was run once from the canonical checkout with an explicit manifest and stock
+picotool v2.3.1. Preflight freshly identified both Picos on v0.106, with advancing
+cores and idle update state. Serial bootloader entry, disk-free ROM identity and
+USB-session pinning succeeded for A (`E6654854574C3E30`).
+
+The first firmware backup command (`save -r 0x10000000 0x10040000`, pinned to
+bus 2/address 5) timed out after 10.127 seconds, exit 157; libusb reported a
+timed-out bulk IN transfer and picotool reported RP2040 `unknown error`.
+`write_started` and `reboot_requested` are both false. No firmware/settings write,
+load, normal reboot, retry, or propagation occurred. The old serial port
+`/dev/cu.usbmodem21203` is absent. This reproduces the intermittent ROM backup
+failure despite CDC retention, debug logging and the pinned selector; the prior
+successful upgrade did not establish that it was eliminated.
+
+Evidence: `/Users/benji/Documents/ChatGPT/DeskHop/build/updater/runs/20260916T144538Z-wt0lug3l/`.
+The failed result is retained unchanged. Requested next step is a manual power
+cycle of both computer-facing USB connections, followed by fresh read-only
+verification against accepted v0.106 before considering another flash attempt.
+Recovery evidence follows; v0.107 is not installed.
+
+### Recovery: images match; complete verification blocked by busy recheck
+
+After Benji's `go`, read-only verification confirmed both new boot sessions,
+v0.106/boot CRC `2cd31c9d`, idle update state and advancing cores. First run
+`build/updater/runs/20260916T144742Z-mkmywcjh/` stopped with A `UNVERIFIED busy`
+and B PASS. One separate fresh read-only run,
+`build/updater/runs/20260916T144841Z-8bmnj2nl/`, produced:
+
+1. Correct expected CRC: both PASS, all 262,144 bytes, CRC `68eba065`.
+2. Deliberately incorrect expected CRC: both expected `FAIL crc_mismatch`,
+   observed image CRC still `68eba065`.
+3. Correct expected CRC again: B PASS; A `UNVERIFIED busy` after all 262,144 bytes.
+
+Both run journals remain failed; they are not relabeled successful or spliced
+into a successful sequence. The first scan of the second run establishes fresh
+image-integrity evidence for both boards, but the complete diagnostic contract
+was not satisfied. Neither run wrote firmware or settings or requested a reboot.
+Stable sessions were A `fd1ab1023eb4e4a0`, B `4541c124b9a0fc24`.
+
+Read-only code review explains the full-byte-count busy verdict: normal scan
+steps defer a transient BUSY, but post-completion `recheck()` in
+`src/diagnostic_verify.c` converts a failed nonblocking `try_finish()` into
+terminal `VERIFY_SCAN_BUSY`. The row-print path in `src/console.c` also calls
+this recheck. `verification_io()` in `src/utils.c` returns BUSY if the firmware
+update lock or flash lock cannot be acquired; ordinary runtime paths can hold
+those locks without writing flash. A later recheck cannot recover the result
+because it is no longer COMPLETE. This is a diagnostic-availability defect,
+not a demonstrated CRC mismatch, and is separate from the ROM USB backup timeout.
+A future fix should defer BUSY under a bounded deadline while retaining the
+generation/metadata safeguards and add final-stage contention tests. No fix or
+further hardware attempt was made in this recovery turn.
 
 The host updater and UART-v1 framing remain unchanged. A future explicitly
 authorized flash must retain backups, independent readback, unchanged-settings

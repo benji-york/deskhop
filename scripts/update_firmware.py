@@ -125,11 +125,15 @@ def read_profile(args):
     return validate_profile(profile)
 
 
-def describe(candidate, profile, already_bootloader=False):
+def describe(candidate, profile, already_bootloader=False, *, verify_only=False):
     target = profile['target']
     print(f"Candidate: v{candidate['build']} | CRC32 {candidate['slot_crc']} | BIN SHA256 {candidate['bin_sha256']}")
     print(f"Manifest: {candidate['manifest_path']}")
     print(f"USB target: {target} ({profile['uids'][target]}), console {profile['port']}")
+    if verify_only:
+        print('Plan: read-only media/identity checks → both-board fresh CRC/core/history verification.')
+        print('No bootloader entry, firmware/settings write, or reboot will be requested.')
+        return
     print('Plan: media/identity checks → ' + ('inspect existing disk-free ROM' if already_bootloader else 'serial bootloader entry')
           + ' → firmware/settings backups → load + independent readback → normal reboot\n'
           '      → bounded peer propagation → both-board fresh CRC/core/history verification.')
@@ -153,7 +157,7 @@ def stage_images(candidate, directory):
 def operate(args):
     candidate = load_candidate(manifest_path(args.manifest))
     profile = read_profile(args)
-    describe(candidate, profile, args.already_bootloader)
+    describe(candidate, profile, args.already_bootloader, verify_only=args.command == 'verify')
     if args.command == 'plan':
         print('Preview only: no USB inspection, serial port, or picotool was opened.')
         return

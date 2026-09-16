@@ -400,7 +400,11 @@ void sim_verify_assess(uint16_t version, uint32_t crc) {
 }
 void sim_verify_recheck(void) {
 #if SIM_HAS_DIAGNOSTIC_VERIFY
+#if SIM_HAS_VERIFY_RECHECK_PENDING
+    assert(diagnostic_verify_recheck_local(&verify_result));
+#else
     diagnostic_verify_recheck_local(&verify_result);
+#endif
 #endif
 }
 void sim_verify_mutate(uint32_t offset, uint8_t keep_bits) {

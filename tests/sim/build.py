@@ -59,6 +59,8 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
     # real queue/protocol code only when the selected source tree owns it.
     if (source_root/'src/diagnostic_verify.c').exists():
         flags += ['-DSIM_HAS_DIAGNOSTIC_VERIFY=1']
+        if 'bool diagnostic_verify_recheck_local' in (source_root/'src/include/diagnostic_verify.h').read_text():
+            flags += ['-DSIM_HAS_VERIFY_RECHECK_PENDING=1']
     if (source_root/'src/diagnostic_runtime.c').exists():
         flags += ['-DSIM_HAS_DIAGNOSTIC_RUNTIME=1']
     if (source_root/'src/diagnostic_peer.c').exists():

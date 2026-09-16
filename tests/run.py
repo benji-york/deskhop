@@ -47,6 +47,10 @@ def main():
                       ('peer_verify','peer_verify')]:
         dependencies = ['src/history.c'] if name == 'peer_history' else []
         compile_test(name,[f'tests/test_{name}.c',f'src/{unit}.c',*dependencies])
+    compile_test('diagnostic_verify',['tests/test_diagnostic_verify.c','src/peer_verify.c',
+                 'pico-sdk/src/common/pico_util/queue.c'],
+                 ['-Wno-unused-parameter','-Wno-sign-compare','-Itests/sim/include',
+                  '-Ipico-sdk/src/common/pico_util/include','-Ipico-sdk/lib/tinyusb/src'])
     node=os.environ.get('NODE') or shutil.which('node') or str(pathlib.Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')
     run('WebConfig auto-start',[node,'tests/test_webconfig_autostart.js'])
     run('WebConfig Bootloader button',[node,'tests/test_webconfig_bootloader.js'])

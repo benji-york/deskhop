@@ -576,20 +576,22 @@ static void poll_verify(uint64_t now_us) {
     }
 }
 
-static void append_verify_board(unsigned index, uint64_t now_us) {
+static bool append_verify_board(unsigned index, uint64_t now_us) {
     verify_result_t *result = &console.verify_results[index];
     char board = index ? (console.board == 'A' ? 'B' : 'A') : console.board;
-    if (!index && result->transport == VERIFY_TRANSPORT_OK)
-        diagnostic_verify_recheck_local(result);
+    bool expired = now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US;
+    if (!expired && !index && result->transport == VERIFY_TRANSPORT_OK
+        && !diagnostic_verify_recheck_local(result))
+        return false;
     verify_assessment_t assessment = verification_assess(result, console.verify_version, console.verify_crc);
-    if (now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US)
+    if (expired)
         assessment = (verify_assessment_t){VERIFY_UNVERIFIED, VERIFY_REASON_EXPIRED};
     console.verify_assessments[index] = assessment;
     appendf("board=%c result=%s reason=%s\r\n", board, verify_verdict_name(assessment.verdict),
             verify_reason_name(assessment.reason));
     if (result->transport != VERIFY_TRANSPORT_OK) {
         appendf("board=%c evidence=unavailable\r\n", board);
-        return;
+        return true;
     }
     const verify_snapshot_t *snapshot = &result->snapshot;
     char uid[17];
@@ -620,22 +622,24 @@ static void append_verify_board(unsigned index, uint64_t now_us) {
                 (unsigned long)snapshot->start.core_ticks[core], (unsigned long)snapshot->end.core_ticks[core],
                 (unsigned long)snapshot->end.core_age_ms[core],
                 (unsigned)!!((snapshot->start.core_valid & snapshot->end.core_valid) & (1u << core)));
+    return true;
 }
 
 static void emit_verify_tick(uint64_t now_us) {
     for (unsigned i = 0; i < 2; ++i) {
         if (!console.verify_emitted[i]) {
             if (console.verify_ready[i]) {
-                append_verify_board(i, now_us);
-                console.verify_emitted[i] = true;
+                console.verify_emitted[i] = append_verify_board(i, now_us);
             }
             return;
         }
     }
     /* Board rows describe their scan snapshots. Before the final verdict,
      * discard local PASS if a change became known while those rows drained. */
-    if (console.verify_assessments[0].verdict == VERIFY_PASS) {
-        diagnostic_verify_recheck_local(&console.verify_results[0]);
+    bool expired = now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US;
+    if (!expired && console.verify_assessments[0].verdict == VERIFY_PASS) {
+        if (!diagnostic_verify_recheck_local(&console.verify_results[0]))
+            return;
         console.verify_assessments[0] = verification_assess(&console.verify_results[0],
                                                          console.verify_version, console.verify_crc);
     }
@@ -645,7 +649,6 @@ static void emit_verify_tick(uint64_t now_us) {
         if (verdict == VERIFY_FAIL || (verdict == VERIFY_UNVERIFIED && overall == VERIFY_PASS))
             overall = verdict;
     }
-    bool expired = now_us - console.query_started_us >= CONSOLE_VERIFY_TIMEOUT_US;
     if (overall == VERIFY_PASS && expired)
         overall = VERIFY_UNVERIFIED;
     const char *reason = overall == VERIFY_PASS ? "both_match" : overall == VERIFY_FAIL ? "board_failure"

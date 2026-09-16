@@ -16,6 +16,7 @@ static peer_status_snapshot_t identity;
 static request_t local_request;
 static bool local_pending, local_result_pending, peer_result_pending;
 static verify_result_t local_result, peer_result;
+static uint64_t local_result_requested_us;
 static uint64_t last_scan_tick_us;
 static bool scan_tick_seen;
 static struct {
@@ -125,11 +126,15 @@ static void scan_task(uint64_t now_us) {
     }
 }
 
-static void recheck(verify_snapshot_t *snapshot) {
+/* One nonblocking attempt. BUSY is a pending freshness check, not a completed
+ * result: leave the scan evidence unchanged and let the caller yield. */
+static bool recheck(verify_snapshot_t *snapshot) {
     if (snapshot->outcome != VERIFY_SCAN_COMPLETE)
-        return;
+        return true;
     firmware_metadata_t metadata;
     firmware_verify_io_t status = firmware_verify_try_finish(snapshot->generation_start, &metadata);
+    if (status == FIRMWARE_VERIFY_BUSY)
+        return false;
     if (status != FIRMWARE_VERIFY_OK) {
         snapshot->outcome = io_outcome(status);
     } else if (metadata.magic != snapshot->metadata_magic
@@ -138,11 +143,23 @@ static void recheck(verify_snapshot_t *snapshot) {
                || metadata.checksum != snapshot->metadata_crc32) {
         snapshot->outcome = VERIFY_SCAN_CHANGED;
     }
+    return true;
 }
 
-void diagnostic_verify_recheck_local(verify_result_t *result) {
+static bool recheck_before_deadline(verify_snapshot_t *snapshot, uint64_t now_us,
+                                    uint64_t requested_us) {
+    if (snapshot->outcome == VERIFY_SCAN_COMPLETE
+        && now_us - requested_us >= VERIFY_TIMEOUT_US) {
+        snapshot->outcome = VERIFY_SCAN_TIMEOUT;
+        return true;
+    }
+    return recheck(snapshot);
+}
+
+bool diagnostic_verify_recheck_local(verify_result_t *result) {
     if (!result->remote && result->transport == VERIFY_TRANSPORT_OK)
-        recheck(&result->snapshot);
+        return recheck(&result->snapshot);
+    return true;
 }
 
 void diagnostic_verify_shutdown(void) {
@@ -196,10 +213,13 @@ static bool acquire(void *context, uint32_t token, uint64_t requested_us) {
 }
 
 static bool poll(void *context, uint32_t token, verify_snapshot_t *snapshot) {
-    (void)context;
     if (scanner.owner != SCAN_REMOTE || scanner.token != token || !scanner.ready)
         return false;
-    recheck(&scanner.snapshot);
+    if (!recheck_before_deadline(&scanner.snapshot, *(const uint64_t *)context,
+                                scanner.requested_us))
+        return false;
+    /* Peer transport freezes this scan snapshot here. It is not a remote
+     * freshness lease while its protected response chunks subsequently drain. */
     *snapshot = scanner.snapshot;
     scanner.owner = SCAN_FREE;
     return true;
@@ -214,7 +234,12 @@ static void cancel(void *context, uint32_t token) {
 void diagnostic_verify_task(uint64_t now_us) {
     if (!initialized)
         return;
-    if (local_result_pending && queue_try_add(&results, &local_result))
+    /* Backpressure may retain a result after scanning. Recheck at the actual
+     * publication attempt, not only when the scanner releases ownership. */
+    if (local_result_pending
+        && (local_result.transport != VERIFY_TRANSPORT_OK
+            || recheck_before_deadline(&local_result.snapshot, now_us, local_result_requested_us))
+        && queue_try_add(&results, &local_result))
         local_result_pending = false;
     if (peer_result_pending && queue_try_add(&results, &peer_result))
         peer_result_pending = false;
@@ -229,11 +254,12 @@ void diagnostic_verify_task(uint64_t now_us) {
         }
     }
     scan_task(now_us);
-    if (scanner.owner == SCAN_LOCAL && scanner.ready && !local_result_pending) {
-        recheck(&scanner.snapshot);
+    if (scanner.owner == SCAN_LOCAL && scanner.ready && !local_result_pending
+        && recheck_before_deadline(&scanner.snapshot, now_us, scanner.requested_us)) {
         local_result = (verify_result_t){.token = scanner.token, .transport = VERIFY_TRANSPORT_OK,
                                           .snapshot = scanner.snapshot};
         local_result_pending = true;
+        local_result_requested_us = scanner.requested_us;
         scanner.owner = SCAN_FREE;
     }
     /* Give a waiting peer first opportunity after a local scan releases the
@@ -251,6 +277,7 @@ void diagnostic_verify_task(uint64_t now_us) {
         local_result = (verify_result_t){.token = local_request.token,
                                          .transport = VERIFY_TRANSPORT_TIMEOUT};
         local_result_pending = true;
+        local_result_requested_us = local_request.requested_us;
         local_pending = false;
     }
 }

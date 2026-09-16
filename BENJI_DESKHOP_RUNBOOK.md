@@ -8,6 +8,21 @@ README.
 
 Snapshot: 2026-09-16
 
+## Current work: verification contention repair for v0.108
+
+`codex/upgrade-reliability-v0.108` extends the uninstalled v0.107 upstream
+integration with bounded asynchronous retries of the post-scan freshness check.
+Transient lock contention must defer a result, not permanently turn it into
+`UNVERIFIED busy`; real image changes and expired deadlines still fail closed.
+The source investigation also separates this firmware bug from the earlier ROM
+USB backup timeout. No hardware access, flash, main merge or push accompanies
+this repair. Both devices and `main` remain v0.106; the old frozen v0.107 image
+is retained as historical evidence, not replaced or relabeled.
+
+See [the v0.108 repair record](docs/testing/verification-contention-v108.md)
+and [the ROM backup investigation](docs/testing/rom-backup-timeout-investigation.md)
+for validation, boundaries and the next proposed hardware experiment.
+
 ## Pending integration: upstream fixes for v0.107
 
 `codex/upstream-fixes-v0.107` is a separate candidate based on accepted `main`
@@ -19,8 +34,12 @@ exact timer conversion are adapted to this fork. The custom hotkeys, keyboard
 LED indication, zoom assist, keep-awake controls, UART framing and updater are
 retained. Existing timer durations are not migrated or rewritten.
 
-This is not a new hardware-accepted publication: `main` and both Picos remain
-on v0.106. No flash, main merge or push has been performed for this candidate.
+This is not a new hardware-accepted publication: `main` and both stored images
+remain v0.106. The authorized flash attempt failed before writing, during the
+first ROM backup read. After a power cycle both applications returned and passed
+a fresh full-slot CRC scan, but the complete verification sequence remains
+blocked by A's intermittent post-scan `busy` verdict.
+No firmware write, retry, main merge or push has been performed for this candidate.
 The integration scope, test evidence, protocol limits and required physical
 acceptance checks are recorded in
 [the v0.107 integration record](docs/testing/upstream-fixes-v107.md).
@@ -28,6 +47,21 @@ All 55 deep-tier steps and the ARM build pass. Frozen candidate:
 `build/releases/deskhop-v0.107-607q82je/manifest.json`, full-slot CRC `6579b48f`.
 Use this explicit manifest for a subsequently authorized flash; the canonical
 checkout's earlier `latest.json` pointer is not this candidate.
+
+Failed attempt: `build/updater/runs/20260916T144538Z-wt0lug3l/`, first backup
+timeout after 10.127 seconds (picotool exit 157). Identity/session pinning passed;
+`write_started=false`, `reboot_requested=false`. CDC retention, libusb debug and
+pinned selection did not eliminate the intermittent ROM read failure.
+
+Recovery checks `20260916T144742Z-mkmywcjh` and `20260916T144841Z-8bmnj2nl`
+under `build/updater/runs/` issued no write/reboot. The second run passed both
+v0.106 images against CRC `68eba065`, then both negative controls, but A's final
+correct-CRC scan returned `UNVERIFIED busy`; both journals remain failed. Both
+applications have stable new boot sessions and advancing cores. Source review
+identified a post-completion nonblocking-lock recheck that latches transient
+BUSY as a terminal verification failure. This is distinct from the ROM backup
+timeout. No further flash or verification loop was attempted; v0.107 remains
+uninstalled. See the detailed integration record above before further writes.
 
 ## Current publication: main matches accepted v0.106
 

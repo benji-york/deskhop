@@ -97,6 +97,8 @@ static bool verify_accept = true, verify_auto = true;
 static uint32_t verify_token;
 static uint64_t verify_requested_at;
 static verify_scan_outcome_t verify_recheck_outcome = VERIFY_SCAN_COMPLETE;
+static bool verify_recheck_busy;
+static unsigned verify_busy_remaining;
 static void verify_publish(unsigned index, uint32_t token) {
     CHECK(verify_queued < 4);
     verify_result_t result = verify_fixture[index];
@@ -125,16 +127,25 @@ bool diagnostic_verify_poll(verify_result_t *result) {
     --verify_queued;
     return true;
 }
-void diagnostic_verify_recheck_local(verify_result_t *result) {
+bool diagnostic_verify_recheck_local(verify_result_t *result) {
     CHECK(!result->remote);
     ++verify_rechecks;
+    if (result->transport != VERIFY_TRANSPORT_OK || result->snapshot.outcome != VERIFY_SCAN_COMPLETE)
+        return true;
+    if (verify_recheck_busy || verify_busy_remaining) {
+        if (verify_busy_remaining) --verify_busy_remaining;
+        return false;
+    }
     if (verify_recheck_outcome != VERIFY_SCAN_COMPLETE)
         result->snapshot.outcome = verify_recheck_outcome;
+    return true;
 }
 static void verify_fixtures(void) {
     CHECK(!verify_queued);
     verify_auto = verify_accept = true;
     verify_recheck_outcome = VERIFY_SCAN_COMPLETE;
+    verify_recheck_busy = false;
+    verify_busy_remaining = 0;
     for (unsigned i = 0; i < 2; ++i) {
         verify_fixture[i] = (verify_result_t){.remote = i != 0, .transport = VERIFY_TRANSPORT_OK,
             .snapshot = {.role = i, .major = 0, .minor = 101,
@@ -526,11 +537,13 @@ static void console_tick(void) {
     unsigned reads_before = history_reads;
     unsigned history_polls_before = history_peer_polls;
     unsigned verify_polls_before = verify_polls;
+    unsigned verify_rechecks_before = verify_rechecks;
     unsigned maintenance_polls_before = maintenance_polls;
     console_task(console_now_us);
     CHECK(history_reads - reads_before <= 1);
     CHECK(history_peer_polls - history_polls_before <= 1);
     CHECK(verify_polls - verify_polls_before <= 1);
+    CHECK(verify_rechecks - verify_rechecks_before <= 1);
     CHECK(maintenance_polls - maintenance_polls_before <= 1);
     if (connected) {
         uint32_t rx_after = tud_cdc_available();
@@ -956,11 +969,101 @@ static void cdc_verify_parser_and_results(void) {
     verify_fixtures();
 }
 
+static void cdc_verify_busy_deferrals(void) {
+    /* Independently stall the local row and the final verdict, after any PASS
+     * rows have drained. One lock miss must yield without caching a verdict. */
+    for (unsigned footer = 0; footer < 2; ++footer) {
+        for (unsigned outcome = 0; outcome < 4; ++outcome) {
+            verify_fixtures();
+            verify_auto = false;
+            cdc_capture_clear();
+            cdc_send("verify 0.101 12345678\n");
+            if (footer) {
+                verify_publish(0, verify_token);
+                console_drain();
+                CHECK(strstr(cdc_bytes, "board=A result=PASS") != NULL);
+            }
+            verify_recheck_busy = true;
+            if (!footer) verify_publish(0, verify_token);
+            verify_publish(1, verify_token);
+            unsigned rechecks_before = verify_rechecks;
+            console_pump(64);
+            CHECK(verify_rechecks > rechecks_before);
+            CHECK(occurrences("END verify") == 0);
+            CHECK(occurrences("board=A result=") == footer);
+            CHECK(occurrences("board=B result=") == footer);
+
+            /* HID still moves through the real USB stack while CDC is waiting
+             * on the guard. No flash lock or busy retry loop is held here. */
+            uint8_t keys[6] = {HID_KEY_F};
+            CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+            host_count = 0;
+            complete(0x81, NULL, 0);
+            CHECK(host_count == 9 && host_bytes[3] == HID_KEY_F);
+
+            if (outcome == 3) {
+                console_now_us = verify_requested_at + 3500000 - 1;
+                console_pump(8);
+                CHECK(occurrences("END verify") == 0);
+                console_now_us++;
+                rechecks_before = verify_rechecks;
+                console_drain();
+                CHECK(verify_rechecks == rechecks_before); // no try after expiry
+                verify_frame("UNVERIFIED");
+                CHECK(strstr(cdc_bytes, "\r\nresult=UNVERIFIED reason=expired") != NULL);
+            } else {
+                verify_recheck_busy = false;
+                verify_busy_remaining = 3; // multiple transient collisions
+                verify_recheck_outcome = outcome == 1 ? VERIFY_SCAN_CHANGED
+                                        : outcome == 2 ? VERIFY_SCAN_UPDATE_ACTIVE
+                                                       : VERIFY_SCAN_COMPLETE;
+                console_drain();
+                CHECK(verify_busy_remaining == 0);
+                verify_frame(outcome == 0 ? "PASS" : "UNVERIFIED");
+                if (outcome && !footer)
+                    CHECK(strstr(cdc_bytes, outcome == 1
+                        ? "board=A result=UNVERIFIED reason=image_changed"
+                        : "board=A result=UNVERIFIED reason=update_active") != NULL);
+            }
+            CHECK(occurrences("END verify") == 1);
+        }
+    }
+
+    /* Disconnect while a completed local scan awaits freshness. A new console
+     * query must reject the old token and wait for its own two results. */
+    verify_fixtures();
+    verify_auto = false;
+    verify_recheck_busy = true;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    verify_publish(0, verify_token);
+    console_pump(32);
+    CHECK(occurrences("board=A result=") == 0 && occurrences("END verify") == 0);
+    uint32_t abandoned = verify_token;
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    console_drain();
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    console_drain();
+    verify_recheck_busy = false;
+    cdc_capture_clear();
+    cdc_send("verify 0.101 12345678\n");
+    CHECK(verify_token != abandoned);
+    verify_publish(0, abandoned);
+    verify_publish(1, abandoned);
+    console_pump(16);
+    CHECK(occurrences("board=A result=") == 0);
+    verify_publish(0, verify_token);
+    verify_publish(1, verify_token);
+    console_drain();
+    verify_frame("PASS");
+    verify_fixtures();
+}
+
 static void cdc_verify_backpressure_freshness_and_reconnect(void) {
     /* A local change after its PASS row must invalidate the final verdict.
      * The already-sent rows retain their scan evidence, including the peer's. */
     const verify_scan_outcome_t late_guard[] = {
-        VERIFY_SCAN_CHANGED, VERIFY_SCAN_BUSY, VERIFY_SCAN_UPDATE_ACTIVE,
+        VERIFY_SCAN_CHANGED, VERIFY_SCAN_UPDATE_ACTIVE,
     };
     for (unsigned fault = 0; fault < sizeof(late_guard) / sizeof(late_guard[0]); ++fault) {
         verify_fixtures();
@@ -2028,6 +2131,8 @@ int main(void) {
     cdc_verify_parser_and_results();
     scenario = "CDC verification freshness, backpressure and reconnect";
     cdc_verify_backpressure_freshness_and_reconnect();
+    scenario = "CDC verification bounded BUSY deferrals";
+    cdc_verify_busy_deferrals();
     scenario = "CDC history counts and ring wrap";
     cdc_history_count_and_wrap();
     scenario = "CDC history event fields";
