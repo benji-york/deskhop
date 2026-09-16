@@ -21,6 +21,7 @@ static uint32_t seed = 1, replay_seed = 1;
 static FILE *trace;
 static unsigned trace_step;
 static bool config_set_on_copy, config_set_pending;
+static bool batch_flash_order;
 static unsigned config_set_invoked;
 static bool config_set_active;
 static jmp_buf config_set_blocked;
@@ -190,6 +191,17 @@ static void before_flash(uint32_t offset, size_t length) {
     CHECK(lock_depth[2] == 1 && lock_owner[2] == current_core);
     CHECK(interrupts[current_core]);
     CHECK(offset <= STORAGE_SIZE && length <= STORAGE_SIZE - offset);
+    if (batch_flash_order && global_state.batch.mode == FW_BATCH_PAGES
+        && global_state.fw.source == FW_UPDATE_SOURCE_PULL) {
+        /* A complete page burst exceeds the RX ring. The source must not see
+           the next request while this receiver is unavailable inside NOR I/O. */
+        for (unsigned i = 0; i < global_state.uart_tx_queue.used; ++i) {
+            uart_packet_t queued;
+            memcpy(&queued, global_state.uart_tx_queue.bytes[i], sizeof(queued));
+            CHECK(queued.type != FW_BATCH_PAGE_REQUEST_MSG
+                  || queued.data32[1] != global_state.fw.address);
+        }
+    }
     ++active_operation;
     event("flash-operation", offset);
 }
@@ -242,9 +254,25 @@ void queue_packet_blocking(const uint8_t *data, enum packet_type_e type, int len
     memcpy(packet.data, data, (size_t)length);
     CHECK(queue_try_add(uart_sink, &packet));
 }
+bool queue_packet_try(const uint8_t *data, enum packet_type_e type, int length) {
+    CHECK(length >= 0 && (size_t)length <= sizeof(((uart_packet_t *)0)->data));
+    uart_packet_t packet = {.type = type};
+    memcpy(packet.data, data, (size_t)length);
+    bool admitted = queue_try_add(uart_sink, &packet);
+    if (admitted && batch_flash_order && uart_sink == &global_state.uart_tx_queue
+        && type == FW_BATCH_PAGE_REQUEST_MSG && packet.data32[1] != 0) {
+        /* Observe program completion, not merely entry to its callback. This
+           also catches prefetch if a concurrent UART drain hid the queue item. */
+        unsigned previous = packet.data32[1] / FLASH_PAGE_SIZE - 1;
+        CHECK(previous < STAGING_PAGES_CNT && page_programs[previous] == 1);
+        event("batch-next-page-admitted-after-program", packet.data32[1]);
+    }
+    return admitted;
+}
 
 static void fresh(const char *name) {
     scenario = name;
+    batch_flash_order = false;
     config_set_on_copy = config_set_pending = config_set_active = false;
     config_set_invoked = 0;
     event("scenario-start", 0);
@@ -369,6 +397,303 @@ static void expect_completed_history(diagnostic_update_source_t source,
                        quarter * STAGING_IMAGE_SIZE / 4);
     expect_history(5, HISTORY_UPDATE_PHASE, DIAGNOSTIC_UPDATE_VALIDATING, source, target);
     expect_history(6, HISTORY_UPDATE_PHASE, phase, source, target);
+}
+
+/* Drive the production burst negotiator/source/receiver/task, not just its
+ * pure collector. Storage and queue admission remain the observable oracles. */
+static uart_packet_t pop_batch_packet(queue_t *queue, enum packet_type_e type) {
+    uart_packet_t packet;
+    CHECK(queue_try_remove(queue, &packet));
+    CHECK(packet.type == type);
+    return packet;
+}
+static void batch_receive(uart_packet_t packet) {
+    owner(1);
+    firmware_batch_packet(&packet, &global_state);
+    CHECK(!lock_depth[1] && !lock_depth[2]);
+}
+static void batch_source_request(uart_packet_t packet) {
+    owner(1);
+    storage_flash = image;
+    uart_sink = &source_state.uart_tx_queue;
+    firmware_batch_packet(&packet, &source_state);
+    storage_flash = receiver_flash;
+    uart_sink = &global_state.uart_tx_queue;
+    CHECK(!lock_depth[1] && !lock_depth[2]);
+}
+static uart_packet_t batch_start(uint32_t crc) {
+    batch_flash_order = true;
+    firmware_batch_init(&global_state, UINT64_C(0x123400));
+    firmware_batch_init(&source_state, UINT64_C(0x987600));
+    source_state._running_fw = (firmware_metadata_t){
+        .magic = FIRMWARE_METADATA_MAGIC, .version = 193, .checksum = crc,
+    };
+    heartbeat(193, crc, true);
+    upgrade_tick();
+    CHECK(!programs && !erases && global_state.batch.mode == FW_BATCH_WAIT_CAPS);
+    batch_source_request(pop_batch_packet(&global_state.uart_tx_queue, FW_BATCH_CAPS_REQUEST_MSG));
+    batch_receive(pop_batch_packet(&source_state.uart_tx_queue, FW_BATCH_CAPS_RESPONSE_MSG));
+    CHECK(global_state.batch.mode == FW_BATCH_PAGES);
+    upgrade_tick();
+    CHECK(!programs && !erases && global_state.fw.request_pending);
+    return pop_batch_packet(&global_state.uart_tx_queue, FW_BATCH_PAGE_REQUEST_MSG);
+}
+static void batch_source_page(uart_packet_t request, uart_packet_t packets[FW_BATCH_WORDS + 1]) {
+    batch_source_request(request);
+    CHECK(source_state.batch.tx.active);
+    owner(0);
+    for (unsigned word = 0; word <= FW_BATCH_WORDS; ++word) {
+        CHECK(firmware_batch_next_tx(&source_state, &packets[word]));
+        CHECK(packets[word].type == (word == FW_BATCH_WORDS ? FW_BATCH_PAGE_END_MSG : FW_BATCH_PAGE_DATA_MSG));
+        CHECK(!lock_depth[1] && !lock_depth[2] && !interrupts[current_core]);
+    }
+    uart_packet_t unused;
+    CHECK(!firmware_batch_next_tx(&source_state, &unused));
+    CHECK(!source_state.uart_tx_queue.used); /* A page never floods ordinary TX. */
+}
+static uart_packet_t batch_retry(void) {
+    now += FW_UPDATE_RESPONSE_TIMEOUT_US;
+    upgrade_tick();
+    return pop_batch_packet(&global_state.uart_tx_queue, FW_BATCH_PAGE_REQUEST_MSG);
+}
+static void batch_expect_uncommitted(uint32_t address, uint32_t checksum, unsigned committed) {
+    CHECK(global_state.fw.address == address && global_state.fw.checksum == checksum);
+    CHECK(global_state.fw.request_pending && !global_state.fw.byte_done);
+    CHECK(programs == committed && !resets && !global_state.reboot_requested);
+}
+
+static void batch_complete_unique_page(void) {
+    fresh("batch_only_64_unique_words_plus_valid_crc_can_commit");
+    uint32_t crc = make_image(image, 193, 0xb1);
+    uart_packet_t request = batch_start(crc), packets[FW_BATCH_WORDS + 1];
+    CHECK(request.data32[1] == 0);
+    batch_source_page(request, packets);
+    CHECK(packets[FW_BATCH_WORDS].data32[1] == oracle_crc32(image, FLASH_PAGE_SIZE));
+    /* END may arrive first. Repeated words are not distinct progress. */
+    batch_receive(packets[FW_BATCH_WORDS]);
+    unsigned order[FW_BATCH_WORDS];
+    for (unsigned i = 0; i < FW_BATCH_WORDS; ++i) order[i] = i;
+    for (unsigned i = FW_BATCH_WORDS - 1; i; --i) {
+        unsigned j = random32() % (i + 1), old = order[i]; order[i] = order[j]; order[j] = old;
+    }
+    for (unsigned i = 0; i < FW_BATCH_WORDS - 1; ++i) {
+        batch_receive(packets[order[i]]);
+        batch_receive(packets[order[i]]);
+        upgrade_tick();
+        batch_expect_uncommitted(0, UINT32_MAX, 0);
+        CHECK(!erases);
+    }
+    batch_receive(packets[order[FW_BATCH_WORDS - 1]]);
+    CHECK(global_state.fw.address == FLASH_PAGE_SIZE && global_state.fw.byte_done);
+    CHECK(global_state.fw.checksum == ~oracle_crc32(image, FLASH_PAGE_SIZE));
+    CHECK(!programs && !erases); /* Receiver assembles; task owns NOR commit. */
+    global_state.uart_tx_queue.capacity = 0;
+    upgrade_tick();
+    /* Batch mode commits before attempting to enqueue the next request. Full
+       ordinary TX must neither postpone this write nor make retry repeat it. */
+    CHECK(programs == 1 && erases == 1 && page_programs[0] == 1);
+    CHECK(memcmp(storage_flash, image, FLASH_PAGE_SIZE) == 0);
+    fw_upgrade_state_t saved = global_state.fw;
+    for (unsigned retry = 0; retry < 4; ++retry) {
+        upgrade_tick();
+        expect_no_change(saved);
+        CHECK(programs == 1 && erases == 1 && page_programs[0] == 1);
+    }
+    global_state.uart_tx_queue.capacity = 256;
+    upgrade_tick();
+    CHECK(programs == 1 && erases == 1 && page_programs[0] == 1);
+    CHECK(memcmp(storage_flash, image, FLASH_PAGE_SIZE) == 0);
+    uart_packet_t next = pop_batch_packet(&global_state.uart_tx_queue, FW_BATCH_PAGE_REQUEST_MSG);
+    CHECK(next.data32[1] == FLASH_PAGE_SIZE && next.data32[0] != request.data32[0]);
+    saved = global_state.fw;
+    for (unsigned i = 0; i <= FW_BATCH_WORDS; ++i) batch_receive(packets[i]);
+    upgrade_tick();
+    expect_no_change(saved); /* Late whole page must not replay checksum/write. */
+    CHECK(programs == 1 && page_programs[0] == 1);
+}
+
+static void batch_invalid_pages_and_fallback(void) {
+    for (unsigned fault = 0; fault < 4; ++fault) {
+        fresh("batch_partial_corrupt_conflicting_and_missing_end_retry");
+        uint32_t crc = make_image(image, 193, (uint8_t)(0xb2 + fault));
+        uart_packet_t old_request = batch_start(crc), packets[FW_BATCH_WORDS + 1];
+        batch_source_page(old_request, packets);
+        for (unsigned i = 0; i < FW_BATCH_WORDS; ++i) {
+            if (fault == 0 && i == 17) continue;
+            batch_receive(packets[i]);
+            if (fault == 2 && i == 0) {
+                uart_packet_t conflict = packets[i];
+                conflict.data[4] ^= 1;
+                batch_receive(conflict);
+            }
+        }
+        if (fault != 3) {
+            uart_packet_t end = packets[FW_BATCH_WORDS];
+            if (fault == 1) end.data32[1] ^= 1;
+            batch_receive(end);
+        }
+        upgrade_tick();
+        batch_expect_uncommitted(0, UINT32_MAX, 0);
+        CHECK(!erases);
+        uart_packet_t retry = batch_retry();
+        CHECK(retry.data32[0] != old_request.data32[0] && retry.data32[1] == 0);
+        for (unsigned i = 0; i <= FW_BATCH_WORDS; ++i) batch_receive(packets[i]);
+        batch_expect_uncommitted(0, UINT32_MAX, 0);
+        batch_source_page(retry, packets);
+        for (unsigned i = 0; i <= FW_BATCH_WORDS; ++i) batch_receive(packets[i]);
+        upgrade_tick();
+        CHECK(programs == 1 && erases == 1 && page_programs[0] == 1);
+        CHECK(memcmp(storage_flash, image, FLASH_PAGE_SIZE) == 0);
+    }
+
+    fresh("batch_retry_exhaustion_restarts_only_uncommitted_page_as_words");
+    uint32_t crc = make_image(image, 193, 0xb7);
+    uart_packet_t request = batch_start(crc), packets[FW_BATCH_WORDS + 1];
+    batch_source_page(request, packets);
+    for (unsigned i = 0; i <= FW_BATCH_WORDS; ++i) batch_receive(packets[i]);
+    upgrade_tick();
+    CHECK(programs == 1);
+    request = pop_batch_packet(&global_state.uart_tx_queue, FW_BATCH_PAGE_REQUEST_MSG);
+    CHECK(request.data32[1] == FLASH_PAGE_SIZE);
+    batch_source_page(request, packets);
+    batch_receive(packets[0]);
+    request = batch_retry();
+    CHECK(request.data32[1] == FLASH_PAGE_SIZE);
+    request = batch_retry();
+    CHECK(request.data32[1] == FLASH_PAGE_SIZE);
+    /* Every retry has its own collector. Leave the final one partly filled
+       with page 1 when fallback hits a full ordinary TX queue. */
+    batch_source_page(request, packets);
+    batch_receive(packets[0]);
+    CHECK(memcmp(global_state.page_buffer, image + FLASH_PAGE_SIZE, 4) == 0);
+    global_state.uart_tx_queue.capacity = 0;
+    now += FW_UPDATE_RESPONSE_TIMEOUT_US;
+    upgrade_tick();
+    CHECK(global_state.batch.mode == FW_BATCH_LEGACY && programs == 1);
+    CHECK(!global_state.fw.byte_done && !global_state.fw.request_pending);
+    CHECK(memcmp(storage_flash, image, FLASH_PAGE_SIZE) == 0);
+    upgrade_tick();
+    CHECK(programs == 1 && page_programs[0] == 1);
+    CHECK(memcmp(storage_flash, image, FLASH_PAGE_SIZE) == 0);
+    global_state.uart_tx_queue.capacity = 256;
+    upgrade_tick();
+    CHECK(programs == 1 && page_programs[0] == 1);
+    CHECK(memcmp(storage_flash, image, FLASH_PAGE_SIZE) == 0);
+    for (unsigned word = 0; word < FW_BATCH_WORDS; ++word) {
+        request = pop_request();
+        CHECK(request.data32[0] == FLASH_PAGE_SIZE + word * 4);
+        /* A late batch frame must not contaminate the legacy page buffer. */
+        fw_upgrade_state_t saved = global_state.fw;
+        batch_receive(packets[word]);
+        expect_no_change(saved);
+        response(request.data32[0], image);
+        upgrade_tick();
+    }
+    CHECK(programs == 2 && page_programs[0] == 1 && page_programs[1] == 1);
+    CHECK(memcmp(storage_flash, image, 2 * FLASH_PAGE_SIZE) == 0);
+}
+
+static void actual_batch_transfer(unsigned failure) {
+    fresh(failure == 0 ? "batch_full_image_preserves_settings" : "batch_full_image_crc_or_metadata_failure");
+    uint32_t crc = make_image(image, 193, 0xb8);
+    config_t settings = global_state.config;
+    uint8_t config_sector[FLASH_SECTOR_SIZE];
+    for (unsigned i = 0; i < sizeof(config_sector); ++i) config_sector[i] = (uint8_t)(i ^ 0x5a);
+    memcpy(storage_flash + STORAGE_CONFIG_OFFSET, config_sector, sizeof(config_sector));
+    /* Each individual page remains valid; only final validation rejects these. */
+    if (failure == 1) image[33001] ^= 0x20;
+    if (failure == 2) image[STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE] ^= 1;
+    if (failure == 3) image[STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE + offsetof(firmware_metadata_t, version)] ^= 1;
+    uart_packet_t request = batch_start(crc), packets[FW_BATCH_WORDS + 1];
+    for (unsigned page = 0; page < STAGING_PAGES_CNT; ++page) {
+        CHECK(request.data32[1] == page * FLASH_PAGE_SIZE);
+        batch_source_page(request, packets);
+        for (unsigned i = 0; i < FW_BATCH_WORDS; ++i) batch_receive(packets[i]);
+        CHECK(global_state.fw.address == page * FLASH_PAGE_SIZE);
+        CHECK(programs == page); /* 64 DATA frames alone cannot commit. */
+        batch_receive(packets[FW_BATCH_WORDS]);
+        CHECK(global_state.fw.address == (page + 1) * FLASH_PAGE_SIZE);
+        CHECK(programs == page);
+        fw_upgrade_state_t completed = global_state.fw;
+        batch_receive(packets[FW_BATCH_WORDS]);
+        expect_no_change(completed);
+        now += 100;
+        upgrade_tick();
+        CHECK(programs == page + 1 && page_programs[page] == 1);
+        if (page + 1 < STAGING_PAGES_CNT)
+            request = pop_batch_packet(&global_state.uart_tx_queue, FW_BATCH_PAGE_REQUEST_MSG);
+    }
+    CHECK(!global_state.uart_tx_queue.used && !global_state.fw.upgrade_in_progress);
+    CHECK(memcmp(&settings, &global_state.config, sizeof(settings)) == 0);
+    CHECK(memcmp(storage_flash + STORAGE_CONFIG_OFFSET, config_sector, sizeof(config_sector)) == 0);
+    CHECK(!sector_erases[STORAGE_CONFIG_OFFSET / FLASH_SECTOR_SIZE]);
+    for (unsigned i = 0; i < STAGING_PAGES_CNT; ++i) CHECK(page_programs[i] == 1);
+    if (failure) {
+        CHECK(resets == 1 && reset_disable_mask == 0 && global_state.fw.image_dirty);
+        CHECK(!global_state.reboot_requested);
+        for (unsigned i = 0; i < FLASH_SECTOR_SIZE; ++i) CHECK(storage_flash[i] == 0xff);
+    } else {
+        CHECK(!resets && global_state.reboot_requested && !global_state.fw.image_dirty);
+        CHECK(global_state._running_fw.version == 193 && global_state._running_fw.checksum == crc);
+        CHECK(memcmp(storage_flash, image, STAGING_IMAGE_SIZE) == 0);
+        CHECK(erases == STAGING_IMAGE_SIZE / FLASH_SECTOR_SIZE);
+    }
+    expect_completed_history(DIAGNOSTIC_SOURCE_PEER, 193, failure != 0);
+}
+
+static void batch_source_ownership(void) {
+    for (unsigned condition = 0; condition < 5; ++condition) {
+        fresh("batch_source_refuses_conflicting_ownership_and_cancels_burst");
+        uint32_t crc = make_image(image, 193, 0xbc);
+        uart_packet_t request = batch_start(crc);
+        source_state.fw.upgrade_in_progress = condition < 2;
+        source_state.fw.source = condition == 0 ? FW_UPDATE_SOURCE_DROP
+                                : condition == 1 ? FW_UPDATE_SOURCE_PULL : FW_UPDATE_SOURCE_NONE;
+        source_state.fw.image_dirty = condition == 2;
+        source_state.maintenance_reserved = condition == 3;
+        source_state.reboot_requested = condition == 4;
+        batch_source_request(request);
+        CHECK(!source_state.batch.tx.active && !source_state.uart_tx_queue.used);
+        uart_packet_t caps = {.type = FW_BATCH_CAPS_REQUEST_MSG};
+        CHECK(fw_batch_caps_encode_request(request.data32[0] + FW_BATCH_WORDS, 193, caps.data));
+        batch_source_request(caps);
+        CHECK(!source_state.uart_tx_queue.used);
+        source_state.fw = (fw_upgrade_state_t){0};
+        source_state.maintenance_reserved = source_state.reboot_requested = false;
+        batch_source_request(request);
+        CHECK(source_state.batch.tx.active);
+        source_state.fw.upgrade_in_progress = condition < 2;
+        source_state.fw.image_dirty = condition == 2;
+        source_state.maintenance_reserved = condition == 3;
+        source_state.reboot_requested = condition == 4;
+        uart_packet_t next;
+        owner(0);
+        CHECK(!firmware_batch_next_tx(&source_state, &next));
+        CHECK(!source_state.batch.tx.active && !source_state.batch.source_enabled);
+        CHECK(!programs && !erases);
+    }
+}
+
+static void batch_receiver_ownership(void) {
+    for (unsigned condition = 0; condition < 4; ++condition) {
+        fresh("batch_receiver_rejects_late_burst_after_owner_change");
+        uint32_t crc = make_image(image, 193, 0xbd);
+        uart_packet_t request = batch_start(crc), packets[FW_BATCH_WORDS + 1];
+        batch_source_page(request, packets);
+        batch_receive(packets[0]);
+        if (condition == 0) host_block(31, image);
+        if (condition == 1) global_state.fw.source = FW_UPDATE_SOURCE_PULL_PAUSED;
+        if (condition == 2) global_state.maintenance_reserved = true;
+        if (condition == 3) global_state.reboot_requested = true;
+        fw_upgrade_state_t saved = global_state.fw;
+        uint8_t page[FLASH_PAGE_SIZE];
+        memcpy(page, global_state.page_buffer, sizeof(page));
+        unsigned old_programs = programs, old_erases = erases;
+        for (unsigned i = 0; i <= FW_BATCH_WORDS; ++i) batch_receive(packets[i]);
+        expect_no_change(saved);
+        CHECK(memcmp(page, global_state.page_buffer, sizeof(page)) == 0);
+        CHECK(programs == old_programs && erases == old_erases);
+    }
 }
 
 static void uf2_reordering_and_duplicate(void) {
@@ -1074,6 +1399,11 @@ int main(int argc, char **argv) {
     peer_update_source_transitions();
     host_peer_config_serializations();
     source_reads_and_metadata();
+    batch_complete_unique_page();
+    batch_invalid_pages_and_fallback();
+    batch_source_ownership();
+    batch_receiver_ownership();
+    for (unsigned failure = 0; failure < 4; ++failure) actual_batch_transfer(failure);
     config_persistence_and_migration();
     config_set_during_save();
     power_cut_observation();
@@ -1083,6 +1413,6 @@ int main(int argc, char **argv) {
     verify_nonblocking_and_bounds();
     verify_flash_mutation_generations();
     if (trace) fclose(trace);
-    printf("storage production-boundary tests passed (seed=%u; 2 full peer images, shuffled UF2, 6 serializations, 8 power cuts)\n", replay_seed);
+    printf("storage production-boundary tests passed (seed=%u; 2 word/4 batch images, batch faults/ownership/fallback, shuffled UF2, 6 serializations, 8 power cuts)\n", replay_seed);
     return 0;
 }

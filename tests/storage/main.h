@@ -13,6 +13,7 @@ typedef struct { unsigned used, capacity; uint8_t bytes[256][32]; } queue_t;
 #include "structs.h"
 #include "config.h"
 #include "firmware.h"
+#include "firmware_batch.h"
 #include "handlers.h"
 #include "mouse.h"
 #include "tasks.h"

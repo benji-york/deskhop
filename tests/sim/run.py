@@ -18,8 +18,9 @@ from test_keyboard_reliability import SCENARIOS as KEYBOARD_RELIABILITY
 from test_uart_integrity import SCENARIOS as UART_INTEGRITY, BACKGROUND_FALSE as UART_BACKGROUND_FALSE
 from test_webconfig_bootloader import SCENARIOS as WEB_CONFIG_BOOTLOADER, BACKGROUND_FALSE as BOOTLOADER_BACKGROUND_FALSE
 from test_serial_bootloader import SCENARIOS as SERIAL_BOOTLOADER, BACKGROUND_FALSE as SERIAL_BOOTLOADER_BACKGROUND_FALSE
-BACKGROUND_FALSE = BEHAVIOR_BACKGROUND_FALSE | MOUSE_BACKGROUND_FALSE | UART_BACKGROUND_FALSE | BOOTLOADER_BACKGROUND_FALSE | SERIAL_BOOTLOADER_BACKGROUND_FALSE
-SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,**PEER_STATUS,**PEER_HISTORY,**VERIFICATION,**KEYBOARD_RELIABILITY,**UART_INTEGRITY,**WEB_CONFIG_BOOTLOADER,**SERIAL_BOOTLOADER,'generated':scenario_generated}
+from test_fw_batch import SCENARIOS as FW_BATCH, BACKGROUND_FALSE as FW_BATCH_BACKGROUND_FALSE
+BACKGROUND_FALSE = BEHAVIOR_BACKGROUND_FALSE | MOUSE_BACKGROUND_FALSE | UART_BACKGROUND_FALSE | BOOTLOADER_BACKGROUND_FALSE | SERIAL_BOOTLOADER_BACKGROUND_FALSE | FW_BATCH_BACKGROUND_FALSE
+SCENARIOS={**TRANSPORT,**BEHAVIORS,**MOUSE_BUTTONS,**MOUSE_EXTRA,**SELECTION,**PEER_STATUS,**PEER_HISTORY,**VERIFICATION,**KEYBOARD_RELIABILITY,**UART_INTEGRITY,**WEB_CONFIG_BOOTLOADER,**SERIAL_BOOTLOADER,**FW_BATCH,'generated':scenario_generated}
 
 def run_case(name,seed,library=None,artifact_dir=None,core_order=None,expected_gap=False):
     fn=KNOWN_GAPS[name] if expected_gap else SCENARIOS[name]
@@ -42,7 +43,9 @@ def run_case(name,seed,library=None,artifact_dir=None,core_order=None,expected_g
 
 def replay(data,library=None,steps=None):
     with Simulation(data['seed'],library,quantum=data.get('quantum',250),
-                    background=data.get('background',True),core_order=data.get('core_order')) as s:
+                    background=data.get('background',True),core_order=data.get('core_order'),
+                    flash_erase_us=data.get('flash_erase_us',0),
+                    flash_program_us=data.get('flash_program_us',0)) as s:
         s.replay(data['steps'] if steps is None else steps)
         return s.trace
 

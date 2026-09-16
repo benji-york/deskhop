@@ -39,7 +39,7 @@ def main():
         run('ARM firmware',['cmake','--build','build/arm-validation','--parallel','4'],env,600)
         return
     run('host updater contracts',[sys.executable,'-m','unittest','discover','-s','tests/updater','-v'])
-    for name,unit in [('zoom_tracker','zoom_tracker'),('fw_update','fw_update'),
+    for name,unit in [('zoom_tracker','zoom_tracker'),('fw_update','fw_update'),('fw_batch','fw_batch'),
                       ('screensaver_policy','screensaver_policy'),('reboot_hotkey','reboot_hotkey'),
                       ('config_migration','config_migration'),('selection','selection'),
                       ('peer_status','peer_status'),('history','history'),
@@ -67,13 +67,15 @@ def main():
     build(BUILD/'sim/node.so')
     native=build(BUILD/'sim/native-boundaries',executable=ROOT/'tests/sim/test_native_boundaries.c',sanitize=True)
     run('production native boundary properties',[native])
-    run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'])
+    run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'],timeout=300)
     run('simulator contract checks',[sys.executable,'tests/sim/test_harness.py'])
     if a.tier=='deep':
         run('bounded core order exploration',[sys.executable,'tests/sim/run.py','--scenario','backpressure','--interleavings'])
         run('peer query core order exploration',[sys.executable,'tests/sim/run.py','--scenario','peer_status_roundtrip','--interleavings'])
         run('verification core order exploration',[sys.executable,'tests/sim/run.py','--scenario','verify_concurrent','--interleavings'])
         run('peer history core order exploration',[sys.executable,'tests/sim/run.py','--scenario','peer_history_roundtrip','--interleavings'])
+        run('batch transfer core order exploration',[sys.executable,'tests/sim/run.py','--scenario','batch_core_schedule','--interleavings'])
+        run('mixed-version firmware transfer',[sys.executable,'tests/sim/test_fw_batch.py','--mixed-versions'],timeout=300)
         run('generated end-to-end inputs',[sys.executable,'tests/sim/run.py','--scenario','generated','--seeds','32'],timeout=180)
         run('storage source mutations',[sys.executable,'tests/storage/mutations.py'])
         run('paired source mutations',[sys.executable,'tests/sim/mutations.py'],timeout=180)

@@ -246,6 +246,7 @@ void initial_setup(device_t *state) {
     /* Capture identity before any peer update can replace flash metadata.
      * A random session distinguishes warm resets as well as power cycles. */
     uint64_t boot_session = get_rand_64();
+    firmware_batch_init(state, boot_session);
     maintenance_init(state->board_role, boot_session);
     keyboard_sync_init(boot_session);
     pico_unique_board_id_t physical_id;

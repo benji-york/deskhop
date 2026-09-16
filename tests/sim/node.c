@@ -192,6 +192,9 @@ void sim_init(uint8_t role, event_cb_t cb) {
     queue_init(&global_state.uart_tx_queue,sizeof(uart_packet_t),UART_QUEUE_LENGTH);
     queue_init(&global_state.hid_queue_out,sizeof(hid_generic_pkt_t),HID_QUEUE_LENGTH);
     firmware_sync_init(); rx_hw.transfer_count=DMA_RX_BUFFER_SIZE;
+#if SIM_HAS_FW_BATCH
+    firmware_batch_init(&global_state, role + 1);
+#endif
 #if SIM_HAS_MAINTENANCE
     maintenance_start_result = 0;
     maintenance_poll_ready = false;
@@ -351,6 +354,30 @@ void sim_verify_prepare(void) {
     for (unsigned i=0;i<8;++i) fixture.board_id[i]=global_state.board_role*16+i;
     diagnostic_peer_init(&fixture);
 #endif
+}
+/* Independent fixture images for the real updater. This does not implement
+ * transfer, program, metadata validation, or reboot: those stay production C.
+ * The configuration sentinel makes accidental writes beyond the slot visible. */
+void sim_fw_prepare(uint16_t version, uint8_t salt) {
+    assert(version >= 100);
+    for (unsigned i = 0; i < STAGING_IMAGE_SIZE; ++i)
+        sim_flash[i] = (uint8_t)((i * 73u + i / 127u) ^ salt);
+    firmware_metadata_t metadata = {.magic=FIRMWARE_METADATA_MAGIC, .version=version,
+        .checksum=calc_crc32(sim_flash, STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE)};
+    memcpy(sim_flash + STAGING_IMAGE_SIZE - FLASH_SECTOR_SIZE, &metadata, sizeof(metadata));
+    memset(sim_flash + sizeof(sim_flash) - FLASH_SECTOR_SIZE, 0xa5, FLASH_SECTOR_SIZE);
+    global_state._running_fw = metadata;
+#if SIM_HAS_DIAGNOSTIC_PEER
+    peer_status_snapshot_t fixture = {.role=global_state.board_role,
+        .major=(version - 100) / 1000, .minor=(version - 100) % 1000,
+        .boot_session=global_state.board_role + 1, .image_crc_at_boot=metadata.checksum};
+    for (unsigned i=0;i<8;++i) fixture.board_id[i]=global_state.board_role*16+i;
+    diagnostic_peer_init(&fixture);
+#endif
+}
+void sim_flash_read(uint32_t offset, uint8_t *out, uint32_t length) {
+    assert(out && offset <= sizeof(sim_flash) && length <= sizeof(sim_flash) - offset);
+    memcpy(out, sim_flash + offset, length);
 }
 void sim_verify_request(uint32_t token) {
 #if SIM_HAS_DIAGNOSTIC_VERIFY

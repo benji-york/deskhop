@@ -53,20 +53,28 @@ KINDS={1:'usb',2:'uart_tx',3:'led',4:'watchdog',5:'reset',6:'yield',7:'erase',8:
 CALLBACK=C.CFUNCTYPE(None,C.c_int,C.c_int,C.c_int,C.c_void_p,C.c_int)
 
 class Simulation:
-    def __init__(self, seed=1, library=None, quantum=250, background=True, core_order=None):
+    def __init__(self, seed=1, library=None, quantum=250, background=True, core_order=None,
+                 flash_erase_us=0, flash_program_us=0):
         self.seed=seed; self.quantum=quantum; self.background=background; self.core_order=core_order
+        if not 0 <= flash_erase_us <= 100000 or not 0 <= flash_program_us <= 100000:
+            raise ValueError('modeled flash duration must be between 0 and 100000 us')
+        self.flash_erase_us=flash_erase_us; self.flash_program_us=flash_program_us
         self.rng=random.Random(seed); self.now=0; self.serial=itertools.count()
         self.events=[]; self.trace=[]; self.steps=[]; self.active=[]; self.error=None
         self.link=[{'delay':0,'drop':0,'xor':0,'xor_at':3,'bit_flips':[],
                     'truncate':0,'duplicate':False,'delete_byte':None,
-                    'duplicate_byte':None,'delay_byte':None} for _ in range(2)]
+                    'duplicate_byte':None,'delay_byte':None,
+                    'drop_types':[],'drop_type_count':0} for _ in range(2)]
         self.pause_until={}; self.callbacks=[]; self.nodes=[]; self.task_ids=[]; self.schedule_count=0
         self.checkpoint_actions=[]
         self.tmp=tempfile.TemporaryDirectory(prefix='deskhop-sim-')
-        library=pathlib.Path(library or ROOT/'build/tests/sim/node.so')
-        self.library_sha256=hashlib.sha256(library.read_bytes()).hexdigest()
+        libraries = list(library) if isinstance(library, (list, tuple)) else [library, library]
+        if len(libraries) != 2: raise ValueError('exactly two role libraries are required')
+        libraries = [pathlib.Path(item or ROOT/'build/tests/sim/node.so') for item in libraries]
+        self.library_sha256=hashlib.sha256(libraries[0].read_bytes()).hexdigest()
+        self.library_sha256_by_role=[hashlib.sha256(item.read_bytes()).hexdigest() for item in libraries]
         for role in range(2):
-            path=pathlib.Path(self.tmp.name)/f'node-{role}.so'; shutil.copyfile(library,path)
+            path=pathlib.Path(self.tmp.name)/f'node-{role}.so'; shutil.copyfile(libraries[role],path)
             lib=C.CDLL(str(path), mode=C.RTLD_LOCAL)
             signatures={
                 'sim_init':([C.c_uint8,CALLBACK],None),'sim_destroy':([],None),
@@ -98,6 +106,8 @@ class Simulation:
                 'sim_verify_assess':([C.c_uint16,C.c_uint32],None),
                 'sim_verify_mutate':([C.c_uint32,C.c_uint8],None),
                 'sim_verify_update_state':([C.c_uint],None),
+                'sim_fw_prepare':([C.c_uint16,C.c_uint8],None),
+                'sim_flash_read':([C.c_uint32,C.c_void_p,C.c_uint32],None),
                 'queue_packet_try':([C.c_void_p,C.c_int,C.c_int],C.c_bool),
             }
             for name,(args,ret) in signatures.items():
@@ -147,6 +157,14 @@ class Simulation:
         if kind!=9: self.trace.append(item)
         if kind==2:
             fault=self.link[node]; payload=bytearray.fromhex(data)
+            # Selective loss preserves unrelated HID/control traffic. The
+            # selector reads the modeled v1 type position, not firmware state.
+            packet_type = (((payload[5] & 15) << 4) | (payload[6] & 15)) \
+                if len(payload) == 32 and payload[0] == 0x7e else None
+            if packet_type in fault['drop_types'] and fault['drop_type_count']:
+                fault['drop_type_count']-=1
+                self.trace.append(dict(item,kind='fault_drop_type',a=packet_type))
+                return
             if fault['drop']:
                 fault['drop']-=1; self.trace.append(dict(item,kind='fault_drop')); return
             if fault['xor']:
@@ -188,6 +206,18 @@ class Simulation:
                 fault['duplicate']=False
         elif kind==11:
             self.error='firmware blocking wait exceeded 2 seconds of virtual time'
+        elif kind in (7, 8):
+            duration = self.flash_erase_us if kind == 7 else self.flash_program_us
+            if duration:
+                # A conservative local firmware blackout, not a cycle-accurate
+                # SPI model: peer task cores and both UART DMA receivers keep
+                # running. Defer both local task cores because this harness's
+                # spinlocks cannot suspend a reentrant blocking acquisition on
+                # the sibling core while the original C flash call is active.
+                end = self.now + duration
+                blocked = set(self.active) | {(node, 0), (node, 1)}
+                while self._one(until=end, blocked=blocked): pass
+                self._time(end)
         elif kind==6:
             if not self._one(until=self.now+250,blocked=set(self.active)):
                 self._time(self.now+250)
@@ -236,6 +266,11 @@ class Simulation:
                 and (report_id is None or x['b']==report_id)]
     def descriptor(self,node,type,index=0):
         out=C.create_string_buffer(1024); n=self.nodes[node].sim_descriptor(type,index,out);return out.raw[:n]
+    def flash(self,node,offset=0,length=262144):
+        if offset < 0 or length < 0 or offset + length > 2*1024*1024:
+            raise ValueError('flash read outside modeled device')
+        out=C.create_string_buffer(length); self.nodes[node].sim_flash_read(offset,out,length)
+        return out.raw
     def task_id(self,node,task):
         """Resolve a stable task name, or validate an image-local numeric index."""
         if isinstance(task,str):return self.task_ids[node][task]
@@ -312,7 +347,9 @@ class Simulation:
     def save(self,path,reason=''):
         pathlib.Path(path).parent.mkdir(parents=True,exist_ok=True)
         pathlib.Path(path).write_text(json.dumps({'schema':1,'seed':self.seed,'quantum':self.quantum,
-            'background':self.background,'core_order':self.core_order,'library_sha256':self.library_sha256,'steps':self.steps,'failure':reason,'trace':self.trace},indent=2)+'\n')
+            'background':self.background,'core_order':self.core_order,'library_sha256':self.library_sha256,
+            'flash_erase_us':self.flash_erase_us,'flash_program_us':self.flash_program_us,
+            'library_sha256_by_role':self.library_sha256_by_role,'steps':self.steps,'failure':reason,'trace':self.trace},indent=2)+'\n')
     def replay(self,steps):
         for s in steps:
             op=s['op']; args=s['args']
