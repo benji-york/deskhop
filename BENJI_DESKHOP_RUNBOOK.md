@@ -55,6 +55,15 @@ was performed to test it. Future firmware changes still require updating the
 helper's expected build. No custom LaunchAgent or root daemon was installed.
 Evidence: `build/tests/clipboard-permanent-install.json`.
 
+Build or update the installed helper from the repository root with
+`make helper-app` or `make install-helper-app`. The install target builds first,
+verifies a staged bundle, quits a running copy normally, replaces it in
+`~/Applications`, then restarts it with its saved preferences. A stopped helper
+stays stopped. `HELPER_INSTALL_DIR=/Applications` selects another writable
+location. Existing login registration is preserved; the target does not enable
+it for a new user or change firmware. Both commands have been exercised, and
+the installed helper reconnected with Launch at login still checked.
+
 ## Historical v0.117 incident: input restored after B power cycle
 
 The user confirms normal input returned after power cycling only B. A read-only

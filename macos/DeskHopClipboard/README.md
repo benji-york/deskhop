@@ -11,10 +11,10 @@ and remaining hardware acceptance.
 
 ## Build and package
 
-With Xcode Command Line Tools installed, from the repository root:
+With Xcode Command Line Tools and Python 3 installed, from the repository root:
 
 ```sh
-python3 scripts/build_clipboard_app.py
+make helper-app
 ```
 
 This builds both architectures, runs offline Swift tests, builds the bundled
@@ -24,6 +24,24 @@ mode, and creates:
 
 * `build/clipboard-app/DeskHop Clipboard.app`
 * `build/clipboard-app/DeskHop-Clipboard-0.1.0.zip`, including `INSTALL.txt`
+
+To build and install in your user's Applications folder:
+
+```sh
+make install-helper-app
+```
+
+This also builds first, then installs `~/Applications/DeskHop Clipboard.app`.
+It verifies the staged app before replacing an existing copy. A running helper
+quits normally to release its serial port, then restarts from the installed copy.
+If it cannot quit, installation stops without replacing it. A stopped helper
+stays stopped; open it from Applications when ready. Saved connection settings
+and the existing Launch at login choice are preserved. Installation does not
+enable login startup for a new user or flash DeskHop firmware.
+
+Choose another destination with `make install-helper-app HELPER_INSTALL_DIR=/Applications`
+(the directory must be writable). Python can be selected with `PYTHON=python3`.
+The underlying build command remains `python3 scripts/build_clipboard_app.py`.
 
 Python is a build tool only. The shipped app and reader are Swift executables;
 there is no Python, Zig, shell script, third-party framework or downloaded
@@ -37,7 +55,7 @@ Apple's supported tooling before making a new ZIP. Signing alone is not
 notarization. No certificate or Apple account is selected automatically:
 
 ```sh
-python3 scripts/build_clipboard_app.py --identity 'Developer ID Application: YOUR IDENTITY'
+make helper-app HELPER_SIGN_IDENTITY='Developer ID Application: YOUR IDENTITY'
 ```
 
 Downloaded unnotarized apps may be rejected by Gatekeeper. Do not disable
@@ -48,8 +66,9 @@ signed/notarized release have different acceptance paths. See Apple's
 
 ## Use and startup
 
-After separately approved firmware deployment, drag the app into `/Applications`
-or your user's `~/Applications`, then open it on each Mac that should supply text. The first launch is paused
+After firmware deployment, run `make install-helper-app`, or drag the packaged
+app into `/Applications` or your user's `~/Applications`, then open it on each
+Mac that should supply text. The first launch is paused
 and displays settings. Enter the verified local `/dev/cu.*` serial port, physical
 16-hex-digit board ID and exact installed firmware version (0.115 or later).
 Choose **Connect / Resume**. Port discovery does not silently select a device.
@@ -83,7 +102,7 @@ Apple's macOS 13+ user-session login-item API. The app reads its current status
 on launch/menu open; it does not silently re-register a disabled item. A pending
 approval is shown with an **Open Login Items** action. Enablement is refused from
 a build folder or installer: move the app to Applications first. No root daemon,
-handwritten LaunchAgent, helper installer or privileged operation is used.
+handwritten LaunchAgent, privileged helper or privileged operation is used.
 
 An explicit Connect choice is remembered for later app launches; an explicit
 Pause is also remembered, so login startup does not undo Pause. Quit releases

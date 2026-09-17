@@ -1,7 +1,15 @@
 DeskHop Clipboard — macOS 13 Ventura or later, Apple Silicon and Intel
 
-DEVELOPMENT CANDIDATE: based on v0.113; clipboard firmware has not
-been deployed or hardware-accepted. This archive installs no firmware.
+LOCAL DEVELOPMENT BUILD: v0.118 has completed one physical A-to-B paste.
+See docs/testing/clipboard-deployment.md for remaining hardware acceptance.
+This archive installs no firmware.
+
+From a source checkout on macOS with Xcode Command Line Tools and Python 3:
+  make helper-app          builds the universal app and ZIP
+  make install-helper-app  builds and installs in ~/Applications
+Installation restarts a running helper and preserves preferences and the existing
+Launch at login choice. A stopped helper stays stopped. An alternate writable
+destination can be selected with HELPER_INSTALL_DIR=/Applications.
 
 1. Extract the ZIP and drag DeskHop Clipboard.app into Applications on each Mac
    whose clipboard should be available to the other Mac. A receiver needs no app. No Python, terminal process or

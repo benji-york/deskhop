@@ -86,8 +86,10 @@ There is one request at a time. Pressing the shortcut again cannot queue work.
 
 The shipping helper is the all-Swift **DeskHop Clipboard** menu-bar app for
 macOS 13+ (Apple Silicon and Intel). Build with
-`python3 scripts/build_clipboard_app.py`; the output is a universal `.app` and
-ZIP under `build/clipboard-app/`. Python is needed only to build, not run it.
+`make helper-app`; the output is a universal `.app` and ZIP under
+`build/clipboard-app/`. `make install-helper-app` builds and installs it in
+`~/Applications`, restarting a running copy and preserving settings/login startup.
+Python is needed only to build, not run it.
 See the [native app guide](../macos/DeskHopClipboard/README.md) for packaging,
 installation, signing/notarization and offline fixture preview instructions.
 

@@ -9,6 +9,8 @@ TEST_TIER ?= fast
 VERIFY_MODE ?= normal
 JOBS ?= 4
 ROLLOUT_TIMEOUT ?= 90
+HELPER_INSTALL_DIR ?= $(HOME)/Applications
+HELPER_SIGN_IDENTITY ?= -
 
 # A caller-selected frozen manifest must not trigger a different build.
 ifeq ($(origin MANIFEST),undefined)
@@ -20,7 +22,7 @@ UPDATER = $(PYTHON) scripts/update_firmware.py
 PREPARE_ARGS = --build-dir "$(BUILD_DIR)" --release-dir "$(RELEASE_DIR)" --tier "$(TEST_TIER)" --jobs "$(JOBS)" $(if $(TOOLCHAIN_DIR),--toolchain-dir "$(TOOLCHAIN_DIR)") $(if $(FORCE),--force)
 DEVICE_ARGS = --manifest "$(MANIFEST)" --profile "$(PROFILE)" --picotool "$(PICOTOOL)" --rollout-timeout "$(ROLLOUT_TIMEOUT)" --verification-mode "$(VERIFY_MODE)" $(if $(PORT),--port "$(PORT)") $(if $(TARGET),--target "$(TARGET)")
 
-.PHONY: help test test-updater release flash-plan flash flash-bootloader verify
+.PHONY: help test test-updater release flash-plan flash flash-bootloader verify helper-app install-helper-app
 help:
 	@echo 'DeskHop: make release | flash-plan | flash | flash-bootloader | verify | test | test-updater'
 	@echo 'Default is help; release/flash-plan/test never access hardware. flash writes hardware.'
@@ -28,6 +30,12 @@ help:
 	@echo 'MANIFEST=... selects a frozen candidate without rebuilding; TEST_TIER=deep extends validation.'
 	@echo 'VERIFY_MODE=normal (default) checks each Pico once; thorough retains extra upgrade/read-only diagnostics.'
 	@echo 'See docs/updater.md for safety, prerequisites, evidence and recovery.'
+	@echo 'macOS helper: make helper-app | install-helper-app (builds first; defaults to ~/Applications)'
+	@echo 'Helper options: HELPER_INSTALL_DIR=... HELPER_SIGN_IDENTITY=... (default: ad-hoc signing)'
+helper-app:
+	$(PYTHON) scripts/build_clipboard_app.py --identity "$(HELPER_SIGN_IDENTITY)"
+install-helper-app: helper-app
+	xcrun swift -module-cache-path build/clipboard-module-cache macos/DeskHopClipboard/Tools/install.swift "build/clipboard-app/DeskHop Clipboard.app" "$(HELPER_INSTALL_DIR)"
 test:
 	$(PYTHON) tests/run.py "$(TEST_TIER)"
 test-updater:
