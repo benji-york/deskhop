@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "console.h"
+#include "clipboard_cdc.h"
+#include "clipboard_diagnostics.h"
 #include "diagnostic_history.h"
 #include "diagnostic_peer.h"
 #include "diagnostic_peer_history.h"
 #include "diagnostic_runtime.h"
+#include "diagnostic_transport.h"
 #include "diagnostic_verify.h"
 #include "maintenance.h"
 #include "tusb.h"
@@ -38,7 +41,7 @@ static struct {
     char board, board_id[17];
     uint64_t boot_session;
     uint32_t image_crc_at_boot;
-    bool connected, previous_cr;
+    bool connected, previous_cr, clipboard_mode;
     bool peer_waiting, peer_ready;
     bool history_active, history_metadata_sent;
     unsigned history_count, history_captured, history_local_next, history_peer_next;
@@ -53,6 +56,7 @@ static struct {
     bool config_request;
     uint8_t bootloader_target;
     uint64_t now_us, bootloader_started_us;
+    uint64_t link_due_us, link_until_us;
     uint16_t verify_version;
     uint32_t verify_crc;
     verify_result_t verify_results[2];
@@ -70,6 +74,8 @@ static void release_history_peer(void) {
 }
 
 void console_disconnect(void) {
+    clipboard_cdc_close(console.now_us);
+    console.clipboard_mode = false;
     if (console.bootloader_active)
         maintenance_cancel(console.query_token, console.now_us);
     console.bootloader_active = console.bootloader_reply = false;
@@ -82,6 +88,7 @@ void console_disconnect(void) {
     console.peer_waiting = console.peer_ready = false;
     console.history_active = false;
     console.verify_active = false;
+    console.link_until_us = 0;
     release_history_peer();
     /* TinyUSB resets CDC endpoints BEFORE the unmount callback. read_flush()
      * rearms OUT, so it must never run after that reset (ep_out is then zero).
@@ -220,6 +227,36 @@ static void append_observation(char board, const diagnostic_peer_observation_t *
     appendf("board=%c observation boot=%s progress=%s update=%s\r\n", board,
             peer_boot_name(observation->boot), progress_name(observation->progress),
             execution_name(observation->update));
+}
+
+static void append_local(uint64_t now_us) {
+    /* Startup identity describes the executing image, never an incoming update. */
+    appendf("board=%c\r\nboard_id=%s\r\nbuild=%s\r\n"
+            "image_crc_at_boot=%08lx\r\nboot_session=%08lx%08lx\r\nuptime_ms=%llu\r\n\r\n",
+            console.board, console.board_id, build, (unsigned long)console.image_crc_at_boot,
+            (unsigned long)(console.boot_session >> 32),
+            (unsigned long)(uint32_t)console.boot_session, (unsigned long long)(now_us / 1000));
+    const diagnostic_runtime_snapshot_t runtime = diagnostic_runtime_snapshot();
+    append_runtime(console.board, &runtime);
+}
+
+/* One short, local line for a screen user to transcribe. Values are read
+ * sequentially; an unusual live snapshot needs a second observation. */
+static unsigned dma_flags(const diagnostic_dma_snapshot_t *dma) {
+    return (dma->control & 1u) | ((dma->control >> 23) & 2u)
+        | ((dma->control & 0xe0000000u) ? 4u : 0u)
+        | (dma->abort_pending ? 8u : 0u) | (!dma->remaining ? 16u : 0u)
+        | (dma->dreq ? 32u : 0u) | (!dma->reload ? 64u : 0u);
+}
+static void link_snapshot(void) {
+    const diagnostic_transport_snapshot_t s = diagnostic_transport_snapshot();
+    const diagnostic_runtime_snapshot_t r = diagnostic_runtime_snapshot();
+    appendf("%c %s C=%lu/%lu U=%lx/%lx/%lx D=%02x/%02x/%02x R=%lu/%lu P=%lu/%lu\r\n",
+            console.board, build, (unsigned long)r.core_age_ms[0], (unsigned long)r.core_age_ms[1],
+            (unsigned long)s.flags, (unsigned long)s.errors, (unsigned long)s.dma_enabled,
+            dma_flags(&s.dma[0]), dma_flags(&s.dma[1]), dma_flags(&s.dma[2]),
+            (unsigned long)s.dma[0].remaining, (unsigned long)s.dma[0].dreq,
+            (unsigned long)s.phase_before, (unsigned long)s.phase_after);
 }
 
 static void append_peer(void) {
@@ -416,6 +453,16 @@ static void append_history_row(const peer_history_snapshot_t *snapshot, unsigned
         appendf("peer_progress peer=%c progress=%s build=", output_name(event.a), progress_name(event.b));
         append_version(event.value);
         break;
+    case HISTORY_CLIPBOARD: {
+#define CLIP_DIAG_NAME(name, text) text,
+        static const char *const phases[] = {CLIPBOARD_DIAGNOSTIC_PHASES(CLIP_DIAG_NAME)};
+        static const char *const reasons[] = {CLIPBOARD_DIAGNOSTIC_REASONS(CLIP_DIAG_NAME)};
+#undef CLIP_DIAG_NAME
+        appendf("clipboard phase=%s reason=%s",
+                event.a < sizeof(phases) / sizeof(phases[0]) ? phases[event.a] : "invalid",
+                event.b < sizeof(reasons) / sizeof(reasons[0]) ? reasons[event.b] : "invalid");
+        break;
+    }
     case HISTORY_TRANSFER_SOURCE:
     case HISTORY_TRANSFER_TIMING:
     case HISTORY_TRANSFER_COUNT: {
@@ -773,39 +820,53 @@ static void command(uint64_t now_us) {
         append("BEGIN help\r\n"
                "DeskHop console - diagnostics and disruptive maintenance.\r\n"
                "\r\n"
-               "  help                  Show help.\r\n"
-               "  status                Show build, core and update state.\r\n"
-               "  history [count]       Show recent events (default 16; 1..64 per board).\r\n"
-               "  verify <build> <crc32> Check both firmware images.\r\n"
-               "  bootloader A|B        DISRUPTIVE: selected board enters disk-free USB ROM.\r\n"
-               "  config                DISRUPTIVE: connected board enters configuration mode.\r\n"
+               "  help  Show help.\r\n"
+               "  status  Build, cores, update.\r\n"
+               "  link [watch]  Local UART/DMA; watch 60s, Ctrl-C stops.\r\n"
+               "  history [count]  Recent events (default 16; 1..64 per board).\r\n"
+               "  verify <build> <crc32>  Check images.\r\n"
+               "  bootloader A|B DISRUPTIVE: selected board enters disk-free USB ROM.\r\n"
+               "  config DISRUPTIVE: connected board enters configuration mode.\r\n"
+               "  clipboard <session>   Local binary clipboard helper; close to release port.\r\n"
                "\r\n"
-               "Diagnostics are read-only and query both boards with bounded peer timeouts.\r\n"
+               "Diagnostics are read-only. Status/history/verify query both boards\r\n"
+               "with bounded peer timeouts; link is local only.\r\n"
                "Bootloader requires physical A or B; no default/both. Upload with picotool\r\n"
                "on the target's USB-connected computer; peer acceptance is not boot proof.\r\n"
-               "Core counts mark diagnostic task checkpoints.\r\n"
-               "Peer confirmation is historical/version-only; progress compares status queries.\r\n"
-               "History/observations are in RAM until reboot; event ages align approximately.\r\n"
+               "Core counts are checkpoints; peer progress compares status queries.\r\n"
+               "History is volatile; event ages align approximately.\r\n"
                "GAP means unavailable capture data or older peer support.\r\n"
                "Verify CRC: full 256KiB firmware including metadata; configuration excluded.\r\n"
                "PASS describes a fresh scan; rerun verify after changes.\r\n"
-               "Status image CRC is boot metadata only; it is not the verify CRC.\r\n"
+               "Status image CRC is boot metadata only.\r\n"
                "END help\r\n");
+    } else if (strncmp(console.line, "clipboard", 9) == 0) {
+        uint64_t session = 0;
+        bool valid = console.line_used == 26 && console.line[9] == ' ';
+        for (unsigned i = 10; valid && i < 26; ++i) {
+            unsigned c = (unsigned char)console.line[i];
+            if (c >= '0' && c <= '9') c -= '0';
+            else if (c >= 'a' && c <= 'f') c = c - 'a' + 10;
+            else { valid = false; break; }
+            session = (session << 4) | c;
+        }
+        if (valid && session
+            && clipboard_cdc_open(session, console.boot_session, now_us)) {
+            console.clipboard_mode = true;
+            console.line_used = 0;
+            console.line_error = LINE_OK;
+            return; /* Binary HELLO follows the command echo, with no prompt. */
+        }
+        append("ERROR clipboard unavailable\r\n");
+    } else if (strcmp(console.line, "link") == 0) {
+        link_snapshot();
+    } else if (strcmp(console.line, "link watch") == 0) {
+        link_snapshot();
+        console.link_until_us = now_us + UINT64_C(60000000);
+        console.link_due_us = now_us + UINT64_C(1000000);
     } else if (strcmp(console.line, "status") == 0) {
-        /* Identity is captured before USB/core 1 start. In particular, do not
-         * read _running_fw, which the peer updater changes BEFORE reboot. */
-        appendf("BEGIN status\r\n"
-                             "board=%c\r\nboard_id=%s\r\nbuild=%s\r\n"
-                             "image_crc_at_boot=%08lx\r\n"
-                             "boot_session=%08lx%08lx\r\nuptime_ms=%llu\r\n"
-                             "\r\n",
-                             console.board, console.board_id, build,
-                             (unsigned long)console.image_crc_at_boot,
-                             (unsigned long)(console.boot_session >> 32),
-                             (unsigned long)(uint32_t)console.boot_session,
-                             (unsigned long long)(now_us / 1000));
-        const diagnostic_runtime_snapshot_t runtime = diagnostic_runtime_snapshot();
-        append_runtime(console.board, &runtime);
+        append("BEGIN status\r\n");
+        append_local(now_us);
         if (++console.query_token == 0)
             ++console.query_token;
         console.query_started_us = now_us;
@@ -848,7 +909,8 @@ static void command(uint64_t now_us) {
     }
     console.line_used = 0;
     console.line_error = LINE_OK;
-    if (!console.peer_waiting && !console.history_active && !console.verify_active && !console.bootloader_active)
+    if (!console.peer_waiting && !console.history_active && !console.verify_active
+        && !console.bootloader_active && !console.link_until_us)
         append(prompt);
 }
 
@@ -884,6 +946,27 @@ void console_task(uint64_t now_us) {
         append(prompt);
     }
 
+    if (console.clipboard_mode) {
+        /* Mode remains latched after an error: never interpret binary text as
+         * console commands. DTR close/reopen is the sole way back to diagnostics.
+         * No clipboard byte is echoed or passed to the text line parser. */
+        if (console.tx_used) { transmit(); return; }
+        bool alive = clipboard_cdc_alive(now_us);
+        for (unsigned i = 0; i < CONSOLE_RX_BUDGET; ++i) {
+            int value = tud_cdc_read_char();
+            if (value < 0) break;
+            if (alive) clipboard_cdc_receive((uint8_t)value, now_us);
+        }
+        size_t length;
+        const uint8_t *bytes = clipboard_cdc_output(&length, now_us);
+        unsigned available = tud_cdc_write_available();
+        if (length > available) length = available;
+        if (length > CONSOLE_TX_BUDGET) length = CONSOLE_TX_BUDGET;
+        if (length) clipboard_cdc_consumed(tud_cdc_write(bytes, (uint32_t)length));
+        tud_cdc_write_flush();
+        return;
+    }
+
     /* The result queue crosses cores. Consume at most one per tick, including
        late replies from a disconnected terminal; only this query can finish. */
     peer_status_result_t result;
@@ -902,6 +985,31 @@ void console_task(uint64_t now_us) {
     transmit();
     if (console.tx_used)
         return;
+
+    if (console.link_until_us) {
+        /* Human-operated observation survives loss of the DeskHop keyboard:
+         * after starting watch, the terminal needs no more key input. Never
+         * queue old samples or query the peer; slow readers get fresh samples
+         * at most once per second. All other firmware tasks continue. */
+        for (unsigned i = 0; i < CONSOLE_RX_BUDGET; ++i) {
+            int value = tud_cdc_read_char();
+            if (value < 0) break;
+            if (value == 3) {
+                console.link_until_us = 0;
+                append("^C\r\n");
+                append(prompt);
+                return;
+            }
+        }
+        if (now_us >= console.link_until_us) {
+            console.link_until_us = 0;
+            append(prompt);
+        } else if (now_us >= console.link_due_us) {
+            link_snapshot();
+            console.link_due_us = now_us + UINT64_C(1000000);
+        }
+        return;
+    }
 
     if (console.bootloader_active) {
         if (console.bootloader_reply && console.bootloader_drained) {

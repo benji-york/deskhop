@@ -308,7 +308,12 @@ SECTIONS
     /* Check if data + heap + stack exceeds RAM limit */
     ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed")
 
+    /* SDK queues allocate at startup, after the linker RAM report. Current
+     * ARM queue payloads total 11741 bytes including sentinel slots; reserve
+     * 12 KiB for queues/allocator and at least 4 KiB further heap headroom.
+     * Stacks live in SCRATCH_X/Y. Recount on queue/schema changes. */
+    ASSERT(__StackLimit - __end__ >= 16k, "insufficient queue/runtime heap reserve")
+
     ASSERT( __binary_info_header_end - __logical_binary_start <= 256, "Binary info must be in first 256 bytes of the binary")
     /* todo assert on extra code */
 }
-

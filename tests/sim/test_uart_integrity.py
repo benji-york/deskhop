@@ -57,9 +57,13 @@ TX = 'process_uart_tx_task'
 POINTER = bytes.fromhex('003e003e00000000')
 
 
-def inject(s, raw, *, node=0, passes=2):
+def inject(s, raw, *, node=0, passes=None):
     raw = raw.hex() if isinstance(raw, bytes) else raw
     s.do(node, 'raw', raw)
+    if passes is None:
+        # Production scans at most 32 junk bytes per turn. Include one turn
+        # for a retained prefix; explicit one-dispatch order tests stay exact.
+        passes = (len(raw) // 2 + 31) // 32 + 1
     for _ in range(passes):
         s.do(node, 'task', RX)
 
@@ -226,10 +230,17 @@ def scenario_uart_framing_resync(s):
         s.expect(0, 'y', 12345)
         sentinel(s)
         inject(s, original[:cut])
-        s.advance(500000)
+        # The privacy deadline is absolute from the first observed prefix.
+        # A valid tail must arrive before its 50 ms expiry.
+        s.advance(49999)
         inject(s, original[cut:])
         s.expect(0, 'x', 15872)
         safe(s)
+        sentinel(s)
+        inject(s, original[:cut])
+        s.advance(50000)
+        inject(s, original[cut:])
+        unchanged(s)
     # Concatenation dispatches one accepted record per task, preserving order.
     sentinel(s)
     inject(s, original + recovery + original, passes=1)

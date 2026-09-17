@@ -1,0 +1,42 @@
+DeskHop Clipboard — macOS 13 Ventura or later, Apple Silicon and Intel
+
+DEVELOPMENT CANDIDATE: based on v0.113; clipboard firmware has not
+been deployed or hardware-accepted. This archive installs no firmware.
+
+1. Extract the ZIP and drag DeskHop Clipboard.app into Applications on each Mac
+   whose clipboard should be available to the other Mac. A receiver needs no app. No Python, terminal process or
+   separate runtime is needed to run the app.
+2. Open the app. In its settings, enter this Mac's explicit /dev/cu.* serial port,
+   physical 16-hex-digit board ID and exact installed supported firmware version.
+   Use the existing DeskHop diagnostic status information to obtain these values.
+3. Choose Connect / Resume. The menu-bar keyboard icon shows connection status.
+   Copy on a Mac with its helper connected, switch to the other Mac and press/release the DeskHop clipboard
+   shortcut (proposed Sofle Layer 3 V / bare F23). The selected Mac receives keyboard events.
+   The keyboard can connect to either Pico. If the opposite helper is stopped or
+   paused, nothing is typed. Both helpers allow both directions.
+4. Optional: choose Launch at login. This is off until you explicitly choose it.
+   macOS may require approval in System Settings > General > Login Items.
+   Your Connect choice is remembered for the next app launch. Pause is also
+   remembered, so a paused app remains paused at login.
+5. Choose Pause & release serial port before diagnostics, configuration or the
+   updater. Wait until the status says the port is released. Quit also releases
+   the port. Resume after maintenance with the exact new firmware version.
+
+Limits: entire supported text must be 1–1024 bytes. U.S. ANSI printable ASCII,
+LF and TAB only; unsupported/oversized values are rejected in full. No clipboard
+polling, cache, content display or content logs. Use Caps off and a compatible
+input source/remapper. Firmware v0.117 defaults to Caps off when no host LED report
+arrives; reported Caps on still blocks typing. An unreported Caps-on state may
+change letter case. Older v0.115–116 requires a fresh Caps-off LED report.
+Typing is about 100 characters/sec; tabs and newlines behave as real Tab and Return keys.
+
+The default source build is ad-hoc signed for local development, NOT Developer
+ID-signed or notarized. This archive is not a public trusted distribution.
+Downloaded unnotarized builds may be rejected by Gatekeeper. Do not disable
+Gatekeeper or remove quarantine. Use a properly Developer ID-signed and notarized
+release for distribution, or build the reviewed source locally. Login registration
+and actual hardware/clipboard behavior require separate user-approved acceptance.
+
+To remove: uncheck Launch at login, Quit, then move the app to Trash. There are
+no root daemons or handwritten LaunchAgent files. Settings store only the port,
+board ID, expected version and paused/resume preference, never clipboard text.

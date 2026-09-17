@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 TINYUSB = ROOT / "pico-sdk/lib/tinyusb/src"
-APP_SOURCES = [ROOT / "src/usb_descriptors.c", ROOT / "src/usb.c", ROOT / "src/console.c", ROOT / "src/history.c", ROOT / "src/verification.c"]
+APP_SOURCES = [ROOT / "src/usb_descriptors.c", ROOT / "src/usb.c", ROOT / "src/console.c", ROOT / "src/clipboard_cdc.c", ROOT / "src/history.c", ROOT / "src/verification.c"]
 STACK_SOURCES = [TINYUSB / source for source in ["tusb.c", "common/tusb_fifo.c", "device/usbd.c", "device/usbd_control.c", "class/hid/hid_device.c", "class/msc/msc_device.c", "class/cdc/cdc_device.c"]]
 SOURCES = [ROOT / "tests/usb_stack/test_usb_stack.c", *APP_SOURCES, *STACK_SOURCES]
 

@@ -24,6 +24,7 @@ typedef enum {
     HISTORY_TRANSFER_SOURCE,
     HISTORY_TRANSFER_TIMING,
     HISTORY_TRANSFER_COUNT,
+    HISTORY_CLIPBOARD,
 } history_type_t;
 
 /* Source observations, not receiver commit or delivery acknowledgements.

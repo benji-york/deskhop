@@ -6,9 +6,151 @@ the coupled Sofle/QMK firmware, how to build and deploy both, and the failure
 modes already diagnosed. It is intentionally more specific than the upstream
 README.
 
-Snapshot: 2026-09-16
+Snapshot: 2026-09-17
 
-## Separate task: one-way clipboard typing (requirements, not deployed)
+## Current deployment: v0.118; A-to-B paste confirmed
+
+Both boards now run image-verified v0.118 (slot CRC `cbe34825`) after all 74
+deep checks and the ARM build passed. Deployment completed in 24.718675 seconds;
+both cores progress on both boards, and A's saved settings are unchanged. This
+adds `link` and a bounded `link watch` for independent USB observation; it does
+not fix or reproduce the input-loss incident below. A's command was checked
+three times: fresh cores, no UART receive errors, RX DMA active, cleanup idle.
+Evidence: `build/updater/runs/20260917T154452Z-sb68kj2w/result.json` and
+`build/tests/link-v118-live-20260917T154538Z/`.
+
+The user cannot run code/helper software on Mac B, but can use built-in `screen`
+and transcribe one short line. B's port is `/dev/cu.usbmodem1203`. They have
+opened `screen /dev/cu.usbmodem1203 115200` and reported
+`C=0/0 U=197/0/3 D=03/31/31 P=0/0` from `link` (R was not transcribed).
+The user confirmed the controlled `hello`/L3-V paste into blank TextEdit on B
+worked. Metadata history confirms trigger, admission, helper request/result,
+payload readiness, release, typing and completion. Both boards retained their
+boots, both cores were fresh, and neither history had overwritten entries or
+clipboard rejection/cancellation. Evidence:
+`build/tests/clipboard-v118-trial-20260917T155400Z/`.
+The helper was briefly stopped for that capture and restored on A; PID 35710
+owns the port and its sample shows `Session.run()`/`SerialTransport.read` after
+the handshake: `build/tests/clipboard-app-v118-restored.sample.txt`.
+This verifies one A-to-B paste, not reverse-direction hardware acceptance or
+long-term reliability. The earlier v0.117 freeze remains unexplained.
+That trial added no new QMK flash, OS helper installation or login item. The helper
+read the user-triggered clipboard; the diagnostic capture contains no text.
+See [the compact field legend](docs/diagnostics.md) and
+[the deployment record](docs/testing/clipboard-deployment.md).
+
+### Permanent helper installation
+
+At the user's request, the existing verified helper is now installed at
+`/Users/benji/Applications/DeskHop Clipboard.app`. The build-folder instance was
+quit and replaced by the installed instance (PID 37733 at verification). The
+installed executable, reader and Info.plist match the tested build, and its
+strict deep code-signature verification passed. It launched without arguments,
+loaded the saved A port/board ID/build `0.118` and resume preference, and owns
+`/dev/cu.usbmodem21203`. The UI confirms it is connected and listening.
+
+The app's **Launch at login** checkbox is enabled through `SMAppService.mainApp`,
+with no pending approval shown. This is user-session startup; no logout/reboot
+was performed to test it. Future firmware changes still require updating the
+helper's expected build. No custom LaunchAgent or root daemon was installed.
+Evidence: `build/tests/clipboard-permanent-install.json`.
+
+## Historical v0.117 incident: input restored after B power cycle
+
+The user confirms normal input returned after power cycling only B. A read-only
+capture shows both exact board identities on v0.117, fresh checkpoints on both
+cores and idle updaters. A retains boot `f271f9ee6cf3a917`; B has new boot
+`cdf2839c7cc4f189`. Recovery evidence:
+`build/tests/clipboard-v117-recovery-20260917T150357Z/`.
+
+During the failure A remained responsive while B was unreachable over the link.
+A's full retained history shows the F23 request and a deadline cancellation,
+but no grant or helper read. Evidence: `build/tests/clipboard-crash-v117/` and
+the deployment record. The root cause is still unknown; B's old volatile history
+was lost at power cycle. The helper was stopped during recovery. An independent
+way to observe B and bounded UART/DMA diagnostics were required before another
+trial; v0.118 supplies that path, with the successful trial recorded above.
+Version 0.117 is not physically accepted for clipboard use despite passing image
+verification. Ordinary input recovery is confirmed separately.
+
+## Historical clipboard deployments and pending keyboard startup check
+
+Benji authorized running the app and flashing. Both boards ran v0.117 and
+passed fresh full-slot CRC `ffde8f66`, exact identity, progressing-core and idle
+updater checks. A's saved settings are unchanged. The native menu-bar app was
+connected to A but was stopped after the incident above; Launch at login
+remains unregistered. The Sofle
+Layer 3 V firmware was written to both user-selected Sofle halves on 2026-09-17.
+The first re-enumerated normally. The second returned Sofle VID/PID and product
+name, but its configured USB/HID interfaces did not appear. The user deferred
+the requested keyboard power cycle/reconnect until later; its startup and
+physical input/clipboard acceptance remain pending. No reflash is needed merely
+to complete that check.
+
+The v0.114 rollout exposed a DMA abort-counter bug, fixed in v0.115 after all
+73 deep validation steps and the ARM build passed. Both slow recovery transfers
+completed without a manual reset or power cycle. The original host runs remain
+failed at peer monitoring; separate read-only both-board verification passed in
+3.455363 seconds. Physical input and clipboard acceptance remain pending.
+See [the live deployment record](docs/testing/clipboard-deployment.md).
+
+The v0.116 log confirmed F23 admission on A and `led_unknown` rejection on B.
+The user cannot toggle their remapped Caps key; more fundamentally, an absent
+LED report does not mean Caps is on. Version 0.117 now assumes Caps off until a
+valid report from the current USB session says otherwise. Reported Caps on
+still blocks/cancels typing. Actual but unreported Caps on can alter letter case.
+All 61 fast release checks and 116 clipboard scenarios passed; both-board
+update/verification completed in 24.41706 seconds. The subsequent physical retry
+caused the incident above; the helper was stopped. No further QMK flash was needed.
+
+The v0.116 follow-up adds metadata-only clipboard stage/rejection events after
+that no-op report. All 73 deep steps pass, including 113 paired clipboard
+scenarios, and both-board deployment/verification completed in 23.964188 seconds.
+The helper is connected with the new version setting. The user has been asked
+to retry `hello`/L3-V with their Caps remapping unchanged; that subsequent history established the cause described above; physical
+clipboard acceptance remains pending the v0.117 retry.
+
+The user subsequently reported that Layer 3 V on B produces no text. A fresh
+event-log capture shows both v0.115 boards healthy, the keyboard interfaces
+mounted, synchronized output changes and no retained UART/descriptor errors.
+B had restarted about two minutes before that capture; its cause is unknown.
+The helper is reconnected. Current history does not record clipboard admission
+or rejection reasons, so the cause of the no-op is not yet established. A
+controlled ASCII retry with a fresh target Caps Lock report is pending.
+
+## Clipboard development candidate
+
+`codex/clipboard-keyboard` now includes published, accepted v0.113 commit
+`6ac4d6080dfcc39030c7232a3631fd8ec933a39c`. Version 0.118 adds bounded,
+on-demand clipboard typing from either Mac to the other, with full validation, physical-release gating,
+paced HID reports and cancellation. UART 56–61 retain confirmed configuration;
+clipboard uses 62. The guarded local `config` and `bootloader A|B` remain intact.
+
+The shipping helper is an all-Swift macOS 13+ menu-bar app with connection status,
+Pause/Resume, Quit and explicit Launch at login using `SMAppService.mainApp`.
+A universal `.app` and ZIP are built locally; no app installation or login-item
+registration is performed by the build. Either or both Macs may run the helper; only the source needs one.
+The Python CLI remains a development protocol reference, not an app dependency.
+
+The Sofle shortcut is Layer 3 V (bare F23, held until actual key release). Its
+patch is applied in the canonical QMK checkout and the same built UF2 was written
+to both user-selected halves. The second half's normal USB startup check awaits
+the user-deferred reconnect.
+Supported text is 1–1024 bytes of US ANSI printable ASCII plus LF/TAB. No real
+clipboard was read by the agent; the helper served the user's successful test.
+Hardware deployment and permanent helper installation are tracked above. The
+user subsequently authorized committing, merging and pushing both the DeskHop
+feature and its matching QMK shortcut. Combined validation and packaging evidence are in
+[the clipboard record](docs/testing/clipboard-keyboard.md). See the
+[workflow](docs/clipboard-keyboard.md), [native app](macos/DeskHopClipboard/README.md)
+and [QMK proposal](docs/clipboard-qmk.patch).
+
+## Clipboard task requirements and original scope
+
+Latest direction: make the feature symmetric. Pressing the shortcut while either
+Mac is selected requests the opposite Mac’s current text only while its helper
+is connected; otherwise it is a no-op. The keyboard may attach to either Pico.
+The original one-way setup below is a supported subset of this design.
 
 Benji requested a new task to implement fixed-size, on-demand text transfer from
 personal Mac A to work Mac B. A shortcut on B requests A's current clipboard;
@@ -23,15 +165,18 @@ a normal `.app` bundle and convenient packaging/install instructions, plus a
 user-visible **Launch at login** option using the supported macOS login-item
 mechanism. A user-session login item is appropriate for clipboard access; do not
 make a root/system boot daemon. Include connection status, Pause/Resume and Quit
-without displaying or logging clipboard contents. Building this capability is
-authorized; silently installing/enabling the login item or flashing the new
-feature is not. Pin the supported macOS version and document signing/notarization
+without displaying or logging clipboard contents. The later “run the app and
+flash” instruction authorizes this hardware deployment and normal app launch;
+the later “Make the helper permanent” request authorizes installing it in
+Applications and enabling its login item. Pin the
+supported macOS version and document signing/notarization
 limitations honestly; do not disable Gatekeeper or alter security settings.
 
 The new task was requested as `Implement one-way 1 KiB clipboard typing`, in its
 own worktree based on main. These requirements supersede the earlier exploratory
 discussion of a Zig CLI helper. Keep that feature on its own branch; integrate
-the published v0.113 baseline there without deploying the clipboard feature.
+the published v0.113 baseline there. The later deployment instruction supersedes
+the original development-only scope.
 
 ## Current accepted device release: v0.113 confirmed saves and serial config
 

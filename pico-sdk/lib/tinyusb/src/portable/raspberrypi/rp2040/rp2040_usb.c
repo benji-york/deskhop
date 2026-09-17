@@ -242,6 +242,12 @@ static uint16_t __tusb_irq_path_func(sync_ep_buffer)(struct hw_endpoint* ep, uin
     assert(buf_ctrl & USB_BUF_CTRL_FULL);
 
     unaligned_memcpy(ep->user_buf, ep->hw_data_buf + buf_id * 64, xferred_bytes);
+    #if CFG_TUD_RP2040_RX_WIPE
+    /* This completed receive bank is software-owned until rearm. Volatile
+     * byte stores preserve DPRAM's alignment/access requirements. */
+    volatile uint8_t *consumed = ep->hw_data_buf + buf_id * 64;
+    for (uint16_t i = 0; i < xferred_bytes; ++i) consumed[i] = 0;
+    #endif
     ep->xferred_len = (uint16_t) (ep->xferred_len + xferred_bytes);
     ep->user_buf += xferred_bytes;
   }

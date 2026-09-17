@@ -2,6 +2,7 @@
 """Execute vendored USB transfer/copy functions with deterministic bus responses."""
 import argparse
 import os
+import platform
 from pathlib import Path
 import re
 import shlex
@@ -58,6 +59,8 @@ def generated_headers(directory):
         "static uint16_t __tusb_irq_path_func(sync_ep_buffer)",
     ]]
     (directory / "dpram_production.h").write_text("\n".join(definitions))
+    (directory / "dpram_reset_production.h").write_text(extract(
+        RP / "dcd_rp2040.c", "static void __tusb_irq_path_func(reset_non_control_endpoints)"))
 
 
 def check_arm_byte_access(directory):
@@ -91,6 +94,20 @@ def build(directory):
     return binary
 
 
+def check_cdc_wipe(directory):
+    tinyusb = ROOT / "pico-sdk/lib/tinyusb/src"
+    binary = directory / "cdc-wipe-test"
+    subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-O2", "-g",
+                    "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                    "-ffunction-sections", "-fdata-sections",
+                    "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                    f"-I{ROOT / 'tests/usb_stack'}", f"-I{tinyusb}",
+                    str(HERE / "test_cdc_wipe.c"), str(tinyusb / "common/tusb_fifo.c"),
+                    "-Wl,-dead_strip" if platform.system() == "Darwin" else "-Wl,--gc-sections",
+                    "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+
 def check_mutations(directory):
     # Mutate only ephemeral extracted definitions, never the checkout.
     cases = [
@@ -100,6 +117,8 @@ def check_mutations(directory):
         ("SETUP retry becomes OUT", "pio_production.h", "ep->data_id = USB_PID_SETUP;", "ep->data_id = 0;"),
         ("failed SETUP counts bytes", "pio_production.h", "res = -1;\n    // data_id", "res = -1;\n    ep->actual_len = 8;\n    // data_id"),
         ("wrong DPRAM buffer", "dpram_production.h", "ep->hw_data_buf + buf_id * 64, ep->user_buf", "ep->hw_data_buf, ep->user_buf"),
+        ("missing DPRAM receive wipe", "dpram_production.h", "consumed[i] = 0;", "consumed[i] = consumed[i];"),
+        ("missing DPRAM reset wipe", "dpram_reset_production.h", "abandoned[i] = 0;", "abandoned[i] = abandoned[i];"),
     ]
     for name, header, before, after in cases:
         generated_headers(directory)
@@ -115,7 +134,7 @@ def check_mutations(directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mutations", action="store_true", help="also check six real-body regression mutations")
+    parser.add_argument("--mutations", action="store_true", help="also check eight real-body regression mutations")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="deskhop-upstream-usb-") as tmp:
         directory = Path(tmp)
@@ -123,6 +142,7 @@ def main():
         binary = build(directory)
         subprocess.run([str(binary)], check=True)
         check_arm_byte_access(directory)
+        check_cdc_wipe(directory)
         if args.mutations:
             check_mutations(directory)
 

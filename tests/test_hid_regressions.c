@@ -531,7 +531,31 @@ static void test_rejected_descriptor_cannot_fallback_to_keys(void) {
     assert(activity_count==0 && keyboard_count==0 && receive_count==1);
 }
 
+static void test_keyboard_source_publication_lock(void) {
+    extern unsigned hid_boundary_lock_entries, hid_boundary_lock_depth;
+    reset();
+    hid_keyboard_report_t held = {.modifier = KEYBOARD_MODIFIER_LEFTCTRL,
+                                  .keycode = {HID_KEY_D}};
+    unsigned before = hid_boundary_lock_entries;
+    update_kbd_state(&global_state, &held, MAX_DEVICES - 1);
+    assert(hid_boundary_lock_entries > before && hid_boundary_lock_depth == 0);
+    assert(memcmp(&global_state.local_kbd_states[MAX_DEVICES - 1], &held, sizeof(held)) == 0);
+    assert(global_state.max_kbd_idx == MAX_DEVICES - 1);
+    before = hid_boundary_lock_entries;
+    update_remote_kbd_state(&global_state, &held);
+    assert(hid_boundary_lock_entries > before && hid_boundary_lock_depth == 0);
+    assert(memcmp(&global_state.remote_kbd_state, &held, sizeof(held)) == 0);
+    before = hid_boundary_lock_entries;
+    release_all_keys(&global_state);
+    assert(hid_boundary_lock_entries > before && hid_boundary_lock_depth == 0);
+    hid_keyboard_report_t combined, empty = {0};
+    combine_kbd_states(&global_state, &combined);
+    assert(memcmp(&combined, &empty, sizeof(empty)) == 0);
+    assert(memcmp(&last_keyboard, &empty, sizeof(empty)) == 0);
+}
+
 int main(void) {
+    test_keyboard_source_publication_lock();
     test_independent_keyboard_collections();
     test_keyboard_collection_capacity();
     test_rejected_descriptor_cannot_fallback_to_keys();

@@ -1,5 +1,45 @@
 # Diagnostic console: incremental hardware validation
 
+## Local link snapshot (v0.118 deployed; both local consoles checked)
+
+`link` reads the USB-connected board only. `link watch` prints one fresh line
+per second for up to 60 seconds, without peer queries or clipboard requests.
+Ctrl-C stops the watch; disconnect also cancels it. Other input is ignored
+during watch. USB backpressure never queues a catch-up burst or blocks HID
+tasks. It is intended for `screen` on a Mac where installing/running a helper
+or copying a diagnostic log is not possible. Example (illustrative values):
+
+```text
+B 0.118 C=0/0 U=90/0/3 D=03/11/51 R=512/0 P=0/0
+```
+
+The user can transcribe just this line. `C` contains each core's checkpoint age
+in milliseconds (`4294967295` means unavailable). `U` contains UART flags,
+receive-error flags, and DMA-enable bits in hexadecimal. `D` contains RX,
+reload and TX DMA observations, each a hexadecimal bitmask: enable `01`, busy
+`02`, any bus error `04`, abort pending `08`, remaining count zero `10`, DREQ
+credits nonzero `20`, reload count zero `40`. `R` contains RX remaining count
+and DREQ credits in decimal. `P` contains receive-cleanup phase before/after
+the register reads: idle `0`, stopping reload channel `1`, stopping RX `2`,
+clearing consumed bytes `3`, restarting `4`.
+
+These are sequential observations, not an atomic snapshot or a health verdict.
+Changing RX counts alone do not prove delivery to a host; zero UART errors do
+not prove a working link. Repeat an unusual snapshot. The read path neither
+reads UART data/FIFO payloads nor clears errors, aborts DMA, takes the firmware
+lock, or sends a peer request. Phase markers add only aligned word stores to
+the existing cleanup path. No clipboard text, text length, content CRC,
+request identifiers or HID payload enters this output. This command cannot
+respond when the local USB/console core is itself unavailable.
+
+For Benji's current B port, use `screen /dev/cu.usbmodem1203 115200` after
+deployment, then type `link`. B's baseline and one successful A-to-B clipboard
+trial are recorded in [the deployment record](testing/clipboard-deployment.md).
+For a future diagnostic trial, start `link watch` before the shortcut so a
+DeskHop keyboard failure does not prevent observing B. Do not power-cycle a
+failed board until its available short diagnostic line has been recorded.
+This is diagnostic instrumentation, not a fix for the v0.117 input-loss incident.
+
 The agreed approach is six small firmware releases, with a hardware check after
 each. Keep both RP2040 cores and their existing responsibilities. Diagnostics
 use fixed memory and bounded work; input paths never format text or wait for a

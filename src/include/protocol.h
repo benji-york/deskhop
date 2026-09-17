@@ -74,6 +74,7 @@ enum packet_type_e {
     CONFIG_CONFIRM_EXEC_MSG = 59,
     CONFIG_CONFIRM_ACK_META_MSG = 60,
     CONFIG_CONFIRM_ACK_VALUE_MSG = 61,
+    CLIPBOARD_MSG = 62,
 };
 
 typedef enum {

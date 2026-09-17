@@ -15,6 +15,7 @@
 #include "hid_report.h"
 #include "diagnostic_history.h"
 #include "config_packet.h"
+#include "clipboard.h"
 
 _Static_assert(MAX_DEVICES <= CFG_TUH_DEVICE_MAX,
                "MAX_DEVICES must not exceed CFG_TUH_DEVICE_MAX");
@@ -102,7 +103,8 @@ void tud_hid_set_report_cb(uint8_t instance,
     }
 
     /* Only other set report we care about is LED state change, and that's exactly 1 byte long */
-    if (report_id != REPORT_ID_KEYBOARD || bufsize != 1 || report_type != HID_REPORT_TYPE_OUTPUT)
+    if (instance != ITF_NUM_HID || report_id != REPORT_ID_KEYBOARD || bufsize != 1
+        || report_type != HID_REPORT_TYPE_OUTPUT || !buffer)
         return;
 
     if (BOARD_ROLE >= NUM_SCREENS)
@@ -112,7 +114,10 @@ void tud_hid_set_report_cb(uint8_t instance,
 
     /* Cache the host's unmodified state. The focus indicator is applied when
        the selected output's LEDs are sent to the physical keyboard. */
+    firmware_update_lock();
     global_state.keyboard_leds_desired[BOARD_ROLE] = leds;
+    firmware_update_unlock();
+    clipboard_host_led_report(&global_state);
 
     /* If the board has a keyboard connected directly, restore those leds. */
     if (global_state.keyboard_connected && CURRENT_BOARD_IS_ACTIVE_OUTPUT)
@@ -124,6 +129,7 @@ void tud_hid_set_report_cb(uint8_t instance,
 
 /* Invoked when device is mounted */
 void tud_mount_cb(void) {
+    clipboard_usb_session_reset(&global_state);
     keyboard_host_reset(&global_state);
     global_state.tud_connected = true;
     diagnostic_history_record(HISTORY_USB_MOUNT, 0, 0, 0);
@@ -138,6 +144,7 @@ void tud_mount_cb(void) {
 void tud_umount_cb(void) {
     global_state.tud_connected = false;
     config_confirm_usb_disconnect();
+    clipboard_usb_session_reset(&global_state);
     keyboard_host_reset(&global_state);
     diagnostic_history_record(HISTORY_USB_UNMOUNT, 0, 0, 0);
 #if DH_CONSOLE && CFG_TUD_CDC
@@ -197,6 +204,9 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     bool contains_mouse = itf_protocol == HID_ITF_PROTOCOL_MOUSE
                           || iface->mouse.is_found;
 
+    if (contains_keyboard || contains_mouse)
+        clipboard_physical_disconnect(iface, &global_state);
+
     diagnostic_history_record(HISTORY_HID_UNMOUNT, dev_addr, instance,
                               itf_protocol | (contains_keyboard ? 256u : 0)
                               | (contains_mouse ? 512u : 0));
@@ -212,8 +222,10 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         /* Clear only this device. Keeping the other local and remote keyboard
            states avoids spuriously releasing their held keys. */
         uint8_t device_idx = get_device_index(dev_addr, instance, itf_protocol);
+        firmware_update_lock();
         memset(&global_state.local_kbd_states[device_idx], 0,
                sizeof(hid_keyboard_report_t));
+        firmware_update_unlock();
         reboot_hotkey_reset(&global_state.reboot_hotkey_sequence);
         memset(global_state.reboot_hotkey_source, 0,
                sizeof(global_state.reboot_hotkey_source));

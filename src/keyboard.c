@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "clipboard.h"
 
 /* ==================================================== *
  * Hotkeys to trigger actions via the keyboard.
@@ -176,17 +177,22 @@ void update_kbd_state(device_t *state, hid_keyboard_report_t *report, uint8_t de
     if (device_idx >= MAX_DEVICES)
         return;
 
-    /* Update the keyboard state for this device */
+    /* Core 0's clipboard release reconciliation reads this report under the
+     * same lock. Publish the entire physical contribution atomically. */
+    firmware_update_lock();
     memcpy(&state->local_kbd_states[device_idx], report, sizeof(hid_keyboard_report_t));
 
     /* Track the largest keyboard index we have */
     if (state->max_kbd_idx < device_idx)
         state->max_kbd_idx = device_idx;
+    firmware_update_unlock();
 }
 
 /* Update the struct storing the state of the keyboard(s) connected to the other board */
 void update_remote_kbd_state(device_t *state, hid_keyboard_report_t *report) {
+    firmware_update_lock();
     memcpy(&state->remote_kbd_state, report, sizeof(hid_keyboard_report_t));
+    firmware_update_unlock();
 }
 
 /* Add keys from source to destination, avoiding duplicates */
@@ -205,8 +211,10 @@ static void add_keys(hid_keyboard_report_t *dest, const hid_keyboard_report_t *s
 
 /* Release all keys */
 void release_all_keys(device_t *state) {
+    firmware_update_lock();
     memset(state->local_kbd_states, 0, sizeof(state->local_kbd_states));
     memset(&state->remote_kbd_state, 0, sizeof(hid_keyboard_report_t));
+    firmware_update_unlock();
     publish_local_modifiers(state);
     keyboard_sync_publish();
     
@@ -242,8 +250,14 @@ void process_kbd_queue_task(device_t *state) {
     if (!state->tud_connected)
         return;
     hid_keyboard_report_t waiting;
-    if (!queue_try_peek(&state->kbd_queue, &waiting))
+    if (!queue_try_peek(&state->kbd_queue, &waiting)) {
+        /* Ordinary physical input and its durable overflow tail take priority.
+         * Clipboard typing submits one paced report directly, never floods the
+         * coalescing queue. The runtime rechecks admission under its lock. */
+        if (!state->kbd_latest_pending)
+            clipboard_usb_task(state);
         return;
+    }
     if (tud_suspended())
         tud_remote_wakeup();
     if (!tud_hid_n_ready(ITF_NUM_HID))
@@ -299,6 +313,7 @@ void keyboard_host_reset(device_t *state) {
     state->peer_modifiers = 0;
     state->kbd_latest = (hid_keyboard_report_t){0};
     firmware_update_unlock();
+    clipboard_host_reset(state);
 }
 
 void keyboard_focus_changed(device_t *state) {
@@ -336,21 +351,57 @@ void send_system_control(uint8_t *raw_report, device_t *state) {
  * Parse and interpret the keys pressed on the keyboard
  * ==================================================== */
 
+/* The normal decoder intentionally tolerates truncated NKRO layouts. Such a
+ * partial snapshot must never establish actual trigger release for clipboard
+ * typing. Multiple keyboard report IDs also cannot share one release owner. */
+static bool clipboard_keyboard_snapshot_complete(uint8_t *raw_report, int length,
+                                                 hid_interface_t *iface) {
+    if (iface->protocol == HID_PROTOCOL_BOOT)
+        return length >= KBD_REPORT_LENGTH;
+    if (iface->num_keyboards > 1)
+        return false;
+    keyboard_t *keyboard = get_keyboard(iface, raw_report[0]);
+    if (!keyboard->is_nkro)
+        return true;
+    unsigned payload_bits = (unsigned)(length - iface->uses_report_id) * 8u;
+    for (unsigned i = 0; i < keyboard->nkro_count; ++i) {
+        if ((unsigned)keyboard->nkro[i].offset + keyboard->nkro[i].size > payload_bits)
+            return false;
+    }
+    return true;
+}
+
 void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_interface_t *iface) {
     hid_keyboard_report_t new_report = {0};
     hid_keyboard_report_t stored_report;
     device_t *state                  = &global_state;
     hotkey_combo_t *hotkey           = NULL;
 
-    if (length < KBD_REPORT_LENGTH || itf >= MAX_DEVICES)
+    if (itf >= MAX_DEVICES)
         return;
+    if (length < KBD_REPORT_LENGTH) {
+        clipboard_physical_unknown(iface, state);
+        return;
+    }
 
     /* No more keys accepted if we're about to reboot */
     if (global_state.reboot_requested)
         return;
 
-    if (extract_kbd_data(raw_report, length, itf, iface, &new_report) < 0)
+    if (extract_kbd_data(raw_report, length, itf, iface, &new_report) < 0) {
+        clipboard_physical_unknown(iface, state);
         return;
+    }
+
+    /* Observe physical state before consumed hotkeys replace stored state with
+     * all-up. This separate owner proves the initiating F23's actual release. */
+    bool clipboard_swallow = false;
+    if (clipboard_keyboard_snapshot_complete(raw_report, length, iface))
+        clipboard_swallow = clipboard_keyboard_raw(iface, &new_report, state);
+    else {
+        clipboard_keyboard_incomplete(iface, &new_report, state);
+        clipboard_physical_unknown(iface, state);
+    }
 
     reboot_hotkey_result_t reboot_result = reboot_hotkey_process_report(
         &state->reboot_hotkey_sequence,
@@ -368,7 +419,7 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
        Otherwise a report from another keyboard could recombine and leak the
        hidden Q or modifiers to the active computer before Q is released. */
     stored_report = new_report;
-    if (reboot_result == REBOOT_HOTKEY_SWALLOW
+    if (clipboard_swallow || reboot_result == REBOOT_HOTKEY_SWALLOW
         || reboot_result == REBOOT_HOTKEY_TRIGGER) {
         stored_report = (hid_keyboard_report_t){0};
     }
@@ -377,6 +428,11 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
     update_kbd_state(state, &stored_report, itf);
     publish_local_modifiers(state);
     record_local_activity(state, state->active_output);
+
+    if (clipboard_swallow) {
+        send_key(&stored_report, state);
+        return;
+    }
 
     if (reboot_result == REBOOT_HOTKEY_SWALLOW) {
         send_key(&stored_report, state);
@@ -452,6 +508,7 @@ void process_consumer_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
     }
 
     record_local_activity(state, state->active_output);
+    clipboard_remote_input(state);
     send_consumer_control(new_report, state);
 }
 
@@ -467,6 +524,7 @@ void process_system_report(uint8_t *raw_report, int length, uint8_t itf, hid_int
     device_t *state = &global_state;
 
     record_local_activity(state, state->active_output);
+    clipboard_remote_input(state);
     send_system_control(report_ptr, state);
 }
 

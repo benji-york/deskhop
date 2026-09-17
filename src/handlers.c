@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "diagnostic_history.h"
+#include "clipboard.h"
 
 /* =================================================== *
  * ============  Hotkey Handler Routines  ============ *
@@ -251,6 +252,9 @@ void config_enable_hotkey_handler(device_t *state, hid_keyboard_report_t *report
 
 /* Function handles received keypresses from the other board */
 void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
+    /* Lock-screen chords own this legacy channel. They also supersede any
+     * clipboard transaction; admission remains restricted in the receiver. */
+    clipboard_remote_input(state);
     keyboard_synthetic_receive(packet, state);
 }
 
@@ -258,6 +262,8 @@ void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
 static void handle_mouse_uart_report(uart_packet_t *packet, device_t *state, bool source_report) {
     mouse_report_t report = *(mouse_report_t *)packet->data;
     if (source_report) {
+        if (state->peer_mouse_buttons != report.buttons)
+            clipboard_remote_input(state);
         state->peer_mouse_buttons = report.buttons;
         state->mouse_buttons = combined_mouse_buttons(state);
         /* A packet already in flight can still target the previous output.
@@ -314,6 +320,8 @@ void handle_mouse_buttons_sync_msg(uart_packet_t *packet, device_t *state) {
     if (packet->data[1] > 1)
         return;
     uint8_t before = combined_mouse_buttons(state);
+    if (state->peer_mouse_buttons != packet->data[0] || packet->data[1])
+        clipboard_remote_input(state);
     state->peer_mouse_state_known = true;
     state->peer_mouse_buttons = packet->data[0];
     state->mouse_buttons = combined_mouse_buttons(state);
@@ -333,6 +341,8 @@ void handle_mouse_buttons_sync_msg(uart_packet_t *packet, device_t *state) {
    reasserting a stale absolute position. */
 void handle_mouse_nonmotion_uart_msg(uart_packet_t *packet, device_t *state) {
     mouse_nonmotion_report_t *input = (mouse_nonmotion_report_t *)packet->data;
+    if (state->peer_mouse_buttons != input->buttons)
+        clipboard_remote_input(state);
     state->peer_mouse_buttons = input->buttons;
     state->mouse_buttons = combined_mouse_buttons(state);
     if (!CURRENT_BOARD_IS_ACTIVE_OUTPUT)
@@ -495,12 +505,14 @@ void handle_screensaver_msg(uart_packet_t *packet, device_t *state) {
 
 /* Process consumer control message */
 void handle_consumer_control_msg(uart_packet_t *packet, device_t *state) {
+    clipboard_remote_input(state);
     queue_cc_packet(packet->data, state);
     record_remote_activity(state, BOARD_ROLE);
 }
 
 /* Process system control message */
 void handle_system_control_msg(uart_packet_t *packet, device_t *state) {
+    clipboard_remote_input(state);
     queue_system_packet(packet->data, state);
     record_remote_activity(state, BOARD_ROLE);
 }

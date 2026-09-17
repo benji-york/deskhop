@@ -15,6 +15,7 @@
 
 #include "main.h"
 #include "console.h"
+#include "clipboard.h"
 #include "diagnostic_peer.h"
 #include "diagnostic_history.h"
 #include "maintenance.h"
@@ -132,7 +133,10 @@ bool is_config_mode_active(device_t *state) {
 /* ================================================== *
  * Configure DMA for reliable UART transfers
  * ================================================== */
-const uint8_t* uart_buffer_pointers[1] = {uart_rxbuf};
+/* Ring addressing already wraps the write pointer. Reloading the transfer
+ * count explicitly also permits an ownership-safe pause/resume with a shorter
+ * remainder without changing subsequent full-ring cycles. */
+static const uint32_t uart_rx_reload_count = DMA_RX_BUFFER_SIZE;
 uint8_t uart_rxbuf[DMA_RX_BUFFER_SIZE] __attribute__((aligned(DMA_RX_BUFFER_SIZE))) ;
 uint8_t uart_txbuf[DMA_TX_BUFFER_SIZE] __attribute__((aligned(DMA_TX_BUFFER_SIZE))) ;
 
@@ -198,8 +202,8 @@ static void configure_rx_dma(device_t *state) {
     dma_channel_configure(
         state->dma_control_channel,
         &control_config,
-        &dma_hw->ch[state->dma_rx_channel].al2_write_addr_trig,
-        uart_buffer_pointers,
+        &dma_hw->ch[state->dma_rx_channel].al1_transfer_count_trig,
+        &uart_rx_reload_count,
         1,
         false);
 
@@ -250,6 +254,7 @@ void initial_setup(device_t *state) {
     firmware_batch_init(state, boot_session);
     maintenance_init(state->board_role, boot_session);
     keyboard_sync_init(boot_session);
+    clipboard_init(boot_session);
     pico_unique_board_id_t physical_id;
     pico_get_unique_board_id(&physical_id);
     peer_status_snapshot_t identity = {

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 113)
+set(VERSION_MINOR 118)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -59,10 +59,14 @@ target_include_directories(Pico-PIO-USB PRIVATE ${PICO_PIO_USB_DIR})
 set(COMMON_SOURCES
   ${SRC_DIR}/usb_descriptors.c
   ${SRC_DIR}/console.c
+  ${SRC_DIR}/clipboard.c
+  ${SRC_DIR}/clipboard_state.c
+  ${SRC_DIR}/clipboard_cdc.c
   ${SRC_DIR}/maintenance.c
   ${SRC_DIR}/peer_status.c
   ${SRC_DIR}/diagnostic_peer.c
   ${SRC_DIR}/diagnostic_runtime.c
+  ${SRC_DIR}/diagnostic_transport.c
   ${SRC_DIR}/verification.c
   ${SRC_DIR}/peer_verify.c
   ${SRC_DIR}/diagnostic_verify.c
@@ -101,6 +105,18 @@ set(COMMON_SOURCES
   ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
   ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
 )
+
+# These bounded control paths run at human/serial rates. Size optimization
+# preserves scarce copy-to-RAM space without changing latency-critical HID.
+set_source_files_properties(${SRC_DIR}/clipboard.c ${SRC_DIR}/clipboard_state.c
+  ${SRC_DIR}/clipboard_cdc.c ${SRC_DIR}/console.c
+  ${SRC_DIR}/history.c ${SRC_DIR}/diagnostic_history.c ${SRC_DIR}/diagnostic_peer_history.c
+  ${SRC_DIR}/diagnostic_peer.c ${SRC_DIR}/diagnostic_runtime.c ${SRC_DIR}/peer_observation.c
+  ${SRC_DIR}/diagnostic_verify.c ${SRC_DIR}/diagnostic_transport.c
+  ${SRC_DIR}/config_confirm.c ${SRC_DIR}/maintenance.c
+  ${SRC_DIR}/fw_batch.c ${SRC_DIR}/firmware_batch.c
+  ${SRC_DIR}/peer_history.c ${SRC_DIR}/peer_status.c ${SRC_DIR}/peer_verify.c
+  PROPERTIES COMPILE_OPTIONS "-Os")
 
 ## Include Directories
 set(COMMON_INCLUDES

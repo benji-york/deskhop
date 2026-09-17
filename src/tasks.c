@@ -11,6 +11,8 @@
 
 #include "main.h"
 #include "console.h"
+#include "clipboard.h"
+#include "ram_clear.h"
 #include "diagnostic_peer.h"
 
 _Static_assert(ACTIVITY_OUTPUT_COUNT == NUM_SCREENS,
@@ -54,7 +56,7 @@ void usb_device_task(device_t *state) {
 }
 
 void diagnostic_console_task(device_t *state) {
-    (void)state;
+    clipboard_task(state);
     diagnostic_runtime_checkpoint(0);
 #if DH_CONSOLE && CFG_TUD_CDC
     console_task(time_us_64());
@@ -414,16 +416,81 @@ void packet_receiver_task(device_t *state) {
     uint32_t current_pointer
         = (uint32_t)DMA_RX_BUFFER_SIZE - dma_channel_hw_addr(state->dma_rx_channel)->transfer_count;
     uint32_t delta = get_ptr_delta(current_pointer, state);
+    uint64_t now = time_us_64();
+    current_pointer &= DMA_RX_BUFFER_SIZE - 1u;
+    if (!state->uart_idle_seen || current_pointer != state->uart_idle_writer
+        || now < state->uart_idle_since) {
+        state->uart_idle_seen = true;
+        state->uart_idle_writer = current_pointer;
+        state->uart_idle_since = now;
+        state->uart_idle_scrub = state->uart_idle_scan = 0;
+    }
+    if (!delta) {
+        if (state->uart_idle_scrub < DMA_RX_BUFFER_SIZE
+            && now - state->uart_idle_since >= 50000u) {
+            /* Idle cleanup also removes unparsed residue after a whole-ring
+             * producer lap. Recheck ownership after DMA stops: a newly arrived
+             * physical report must survive this optimistic empty snapshot. */
+            uart_rx_erase_consumed(state, state->uart_idle_scrub, 32);
+            state->uart_idle_scrub += 32;
+        } else if (state->uart_idle_scrub == DMA_RX_BUFFER_SIZE) {
+            /* The legacy modulo producer pointer cannot observe an exact lap.
+             * New nonzero wire symbols in an erased idle ring prove activity
+             * even when that pointer is unchanged. This bounded read-only scan
+             * causes no repeated DMA pauses while the cleaned ring stays idle. */
+            for (unsigned i = 0; i < 32; ++i) {
+                uint32_t index = state->uart_idle_scan;
+                state->uart_idle_scan = NEXT_RING_IDX(state->uart_idle_scan);
+                if (*(volatile uint8_t *)&uart_rxbuf[index]) {
+                    state->uart_idle_since = now;
+                    state->uart_idle_scrub = state->uart_idle_scan = 0;
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    uint32_t start = state->dma_ptr;
+    unsigned scanned = 0;
+    bool discarded = false;
 
-    /* Bounded by the captured DMA ring occupancy; one valid dispatch per pass.
+    /* Scan at most one frame of junk, with one valid dispatch per pass. The
+       ownership-safe wipe therefore spans at most 31 junk + 32 valid bytes.
        Failed candidates advance ONE byte, preserving the next delimiter after
        corruption/truncation. No byte pattern negotiates a weaker protocol. */
-    while (delta) {
+    while (delta && scanned < RAW_PACKET_LENGTH) {
         if (is_start_of_packet(state)) {
-            if (delta < RAW_PACKET_LENGTH)
+            if (state->uart_partial && state->uart_partial_cursor == state->dma_ptr
+                && now >= state->uart_partial_since
+                && now - state->uart_partial_since >= 50000u) {
+                state->uart_partial = false;
+                state->dma_ptr = NEXT_RING_IDX(state->dma_ptr);
+                --delta;
+                ++scanned;
+                discarded = true;
+                continue;
+            }
+            if (delta < RAW_PACKET_LENGTH) {
+                if (!state->uart_partial || state->uart_partial_cursor != state->dma_ptr
+                    || now < state->uart_partial_since) {
+                    state->uart_partial = true;
+                    state->uart_partial_cursor = state->dma_ptr;
+                    state->uart_partial_since = now;
+                }
+                /* A complete contiguous DMA frame takes 87 us at this baud.
+                 * Even a truncated/malformed frame may not retain text forever. */
+                if (discarded)
+                    uart_rx_erase_consumed(state, start,
+                        (state->dma_ptr - start) & (DMA_RX_BUFFER_SIZE - 1u));
                 return;
+            }
+            state->uart_partial = false;
             if (fetch_packet(state)) {
+                if (discarded || state->in_packet.type == CLIPBOARD_MSG)
+                    uart_rx_erase_consumed(state, start,
+                        (state->dma_ptr - start) & (DMA_RX_BUFFER_SIZE - 1u));
                 process_packet(&state->in_packet, state);
+                ram_clear(&state->in_packet, sizeof(state->in_packet));
                 return;
             }
         }
@@ -431,5 +498,11 @@ void packet_receiver_task(device_t *state) {
         /* No packet found, advance to next position and decrement delta */
         state->dma_ptr = NEXT_RING_IDX(state->dma_ptr);
         delta--;
+        ++scanned;
+        discarded = true;
+        state->uart_partial = false;
     }
+    if (discarded)
+        uart_rx_erase_consumed(state, start,
+            (state->dma_ptr - start) & (DMA_RX_BUFFER_SIZE - 1u));
 }

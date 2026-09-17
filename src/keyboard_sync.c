@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "main.h"
+#include "clipboard.h"
 
 #define SNAPSHOT_US 100000u
 #define LEASE_US 500000u
@@ -97,6 +98,7 @@ static void publish_peer(device_t *state, const hid_keyboard_report_t *report) {
         state->peer_modifiers_last_seen = time_us_64();
     }
     firmware_update_unlock();
+    if (changed) clipboard_remote_input(state);
     if (changed && CURRENT_BOARD_IS_ACTIVE_OUTPUT && !state->reboot_requested)
         keyboard_queue_current(state);
 }
@@ -265,6 +267,7 @@ void keyboard_sync_receive(uart_packet_t *packet, device_t *state) {
     sync.peer_serial = serial;
     sync.peer_serial_valid = sync.peer_valid = true;
     sync.peer_seen = now;
+    clipboard_peer_session(boot);
     hid_keyboard_report_t report;
     memcpy(&report, p + 24, sizeof(report));
     publish_peer(state, &report);

@@ -226,6 +226,13 @@ static void __tusb_irq_path_func(reset_non_control_endpoints)(void) {
     usb_dpram->ep_ctrl[i].out = 0;
   }
 
+  #if CFG_TUD_RP2040_RX_WIPE
+  /* Endpoint controls are disabled and reset owns these banks. Also erase a
+   * receive packet abandoned by reset before sync_ep_buffer could consume it. */
+  volatile uint8_t *abandoned = &usb_dpram->epx_data[0];
+  for (size_t i = 0; i < sizeof(usb_dpram->epx_data); ++i) abandoned[i] = 0;
+  #endif
+
   // clear non-control hw endpoints
   tu_memclr(hw_endpoints[1], sizeof(hw_endpoints) - 2 * sizeof(hw_endpoint_t));
 

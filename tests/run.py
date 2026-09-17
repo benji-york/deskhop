@@ -39,12 +39,21 @@ def main():
         run('ARM firmware',['cmake','--build','build/arm-validation','--parallel','4'],env,600)
         return
     run('host updater contracts',[sys.executable,'-m','unittest','discover','-s','tests/updater','-v'])
+    helper_env = dict(os.environ)
+    if sys.platform == 'darwin':
+        native_reader = BUILD/'clipboard-reader'
+        run('build clipboard reader (no clipboard access)', ['xcrun','swiftc',
+            '-module-cache-path',BUILD/'swift-module-cache','-O',
+            'scripts/clipboard/native.swift','-o',native_reader])
+        helper_env['DESKHOP_TEST_NATIVE_READER'] = str(native_reader)
+        run('Swift menu-bar app fixtures', [sys.executable, 'scripts/build_clipboard_app.py', '--test-only'], timeout=300)
+    run('clipboard helper fixtures',[sys.executable,'-m','unittest','discover','-s','tests','-p','clipboard_helper_test.py','-v'],helper_env)
     for name,unit in [('zoom_tracker','zoom_tracker'),('fw_update','fw_update'),('fw_batch','fw_batch'),
                       ('screensaver_policy','screensaver_policy'),('reboot_hotkey','reboot_hotkey'),
                       ('config_migration','config_migration'),('selection','selection'),
                       ('peer_status','peer_status'),('history','history'),
                       ('peer_history','peer_history'),('peer_observation','peer_observation'),('verification','verification'),
-                      ('peer_verify','peer_verify')]:
+                      ('peer_verify','peer_verify'),('clipboard_state','clipboard_state')]:
         dependencies = ['src/history.c'] if name == 'peer_history' else []
         compile_test(name,[f'tests/test_{name}.c',f'src/{unit}.c',*dependencies])
     compile_test('diagnostic_verify',['tests/test_diagnostic_verify.c','src/peer_verify.c',
@@ -74,6 +83,10 @@ def main():
     build(BUILD/'sim/node.so')
     native=build(BUILD/'sim/native-boundaries',executable=ROOT/'tests/sim/test_native_boundaries.c',sanitize=True)
     run('production native boundary properties',[native])
+    clipboard_dma=build(BUILD/'sim/clipboard-dma',executable=ROOT/'tests/sim/test_clipboard_dma.c',sanitize=True)
+    run('clipboard DMA privacy boundaries',[clipboard_dma])
+    transport=build(BUILD/'sim/transport-diagnostics',executable=ROOT/'tests/sim/test_transport_diagnostics.c',sanitize=True)
+    run('local transport register diagnostics',[transport])
     advertisement=build(BUILD/'sim/fw-advertisement',executable=ROOT/'tests/sim/test_fw_advertisement.c',sanitize=True)
     for role in ('0','1'):
         run('firmware advertisement boundary role '+role,[advertisement,role])
@@ -83,6 +96,8 @@ def main():
     run('configuration equal-border regression',[crashes,'border'])
     run('configuration output-identity regression',[crashes,'identity'])
     run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'],timeout=300)
+    run('paired clipboard fixtures',[sys.executable,'tests/sim/test_clipboard.py',
+        '--library',BUILD/'sim/node.so'],timeout=300)
     run('simulator contract checks',[sys.executable,'tests/sim/test_harness.py'])
     run('confirmed configuration paired transport',
         [sys.executable,'tests/sim/test_config_confirm.py',

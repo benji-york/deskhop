@@ -10,11 +10,13 @@
  */
 
 #include "main.h"
+#include "clipboard.h"
 #include "diagnostic_peer.h"
 #include "diagnostic_peer_history.h"
 #include "diagnostic_history.h"
 #include "diagnostic_verify.h"
 #include "maintenance.h"
+#include "ram_clear.h"
 
 /* ================================================== *
  * ===============  Sending Packets  ================ *
@@ -35,6 +37,7 @@ void write_raw_packet(uint8_t *dst, uart_packet_t *packet) {
         dst[2 + 2 * i] = 0x40 | (body[i] & 0xf);
     }
     dst[RAW_PACKET_LENGTH - 1] = UART_FRAME_END;
+    ram_clear(body, sizeof(body));
 }
 
 /* Schedule packet for sending to the other box */
@@ -118,6 +121,11 @@ void process_uart_tx_task(device_t *state) {
     _Static_assert(RAW_PACKET_LENGTH <= DMA_TX_BUFFER_SIZE, "UART frame exceeds DMA buffer");
     uart_packet_t packet = {0};
 
+    /* DMA has copied the last frame into the UART FIFO/shifter at this point;
+     * the peripheral owns those bytes, so the source RAM is now ours to erase. */
+    if (!dma_channel_is_busy(state->dma_tx_channel))
+        ram_clear(uart_txbuf, sizeof(uart_txbuf));
+
     if (maintenance_task(time_us_64()))
         return;
 
@@ -130,14 +138,18 @@ void process_uart_tx_task(device_t *state) {
     /* Page service never fills the normal queue. Pending input/control traffic
      * always wins; at most the one DMA frame already selected can precede new HID. */
     if (!queue_try_remove(&state->uart_tx_queue, &packet)
-        && !firmware_batch_next_tx(state, &packet))
+        && !firmware_batch_next_tx(state, &packet)
+        && !clipboard_next_tx(&packet, time_us_64()))
         return;
 
-    if (!maintenance_packet_allowed(packet.type, packet.data, time_us_64()))
+    if (!maintenance_packet_allowed(packet.type, packet.data, time_us_64())) {
+        ram_clear(&packet, sizeof(packet));
         return;
+    }
 
     write_raw_packet(uart_txbuf, &packet);
     dma_channel_transfer_from_buffer_now(state->dma_tx_channel, uart_txbuf, RAW_PACKET_LENGTH);
+    ram_clear(&packet, sizeof(packet));
 }
 
 /* ================================================== *
@@ -147,6 +159,11 @@ void process_uart_tx_task(device_t *state) {
 static void handle_verify_request(uart_packet_t *packet, device_t *state) {
     (void)state;
     diagnostic_verify_receive(false, packet->data, time_us_64());
+}
+
+static void handle_clipboard(uart_packet_t *packet, device_t *state) {
+    (void)state;
+    clipboard_receive(packet->type, packet->data, time_us_64());
 }
 
 static void handle_maintenance(uart_packet_t *packet, device_t *state) {
@@ -180,6 +197,7 @@ static void handle_history_response(uart_packet_t *packet, device_t *state) {
 }
 
 const uart_handler_t uart_handler[] = {
+    {.type = CLIPBOARD_MSG, .handler = handle_clipboard},
     /* Core functions */
     {.type = KEYBOARD_STATE_RESET_MSG, .handler = keyboard_sync_receive},
     {.type = KEYBOARD_STATE_REQUEST_MSG, .handler = keyboard_sync_receive},

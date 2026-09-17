@@ -100,6 +100,11 @@
 #define CFG_TUD_CDC_RX_BUFSIZE 64
 #define CFG_TUD_CDC_TX_BUFSIZE 64
 
+/* DeskHop's CDC task/consumer share core0. Erase completed clipboard transport
+ * storage before releasing FIFO/endpoint ownership back to USB. */
+#define CFG_TUD_CDC_RX_WIPE 1
+#define CFG_TUD_RP2040_RX_WIPE 1
+
 // Line coding settings to use on CDC enumeration.
 #define CFG_TUH_CDC_LINE_CODING_ON_ENUM \
     { 921600, CDC_LINE_CONDING_STOP_BITS_1, CDC_LINE_CONDING_PARITY_NONE, 8 }

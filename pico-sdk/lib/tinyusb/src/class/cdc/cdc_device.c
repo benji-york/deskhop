@@ -82,6 +82,44 @@ typedef struct
 //--------------------------------------------------------------------+
 CFG_TUD_MEM_SECTION tu_static cdcd_interface_t _cdcd_itf[CFG_TUD_CDC];
 
+#if CFG_TUD_CDC_RX_WIPE
+/* Opt-in for a single CDC task/writer owner (DeskHop core0). Do not clear
+ * published free slots: a producer could already be reusing them. */
+static void cdcd_rx_wipe(void *buffer, size_t length)
+{
+  volatile uint8_t *p = (volatile uint8_t *)buffer;
+  while (length--) *p++ = 0;
+}
+
+static uint16_t cdcd_read_wipe(cdcd_interface_t *p_cdc, void *buffer, uint16_t maximum)
+{
+  tu_fifo_t *fifo = &p_cdc->rx_ff;
+  #if OSAL_MUTEX_REQUIRED
+  if (fifo->mutex_rd) osal_mutex_lock(fifo->mutex_rd, OSAL_TIMEOUT_WAIT_FOREVER);
+  #endif
+  /* RX is non-overwritable, so get_read_info cannot correct the read index
+   * (and recursively take its mutex). Producer writes stay outside these slots. */
+  tu_fifo_buffer_info_t info;
+  tu_fifo_get_read_info(fifo, &info);
+  uint16_t count = (uint16_t)TU_MIN(maximum, info.len_lin + info.len_wrap);
+  uint16_t linear = (uint16_t)TU_MIN(count, info.len_lin);
+  uint16_t wrapped = count - linear;
+  if (linear) {
+    memcpy(buffer, info.ptr_lin, linear);
+    cdcd_rx_wipe(info.ptr_lin, linear);
+  }
+  if (wrapped) {
+    memcpy((uint8_t *)buffer + linear, info.ptr_wrap, wrapped);
+    cdcd_rx_wipe(info.ptr_wrap, wrapped);
+  }
+  tu_fifo_advance_read_pointer(fifo, count);
+  #if OSAL_MUTEX_REQUIRED
+  if (fifo->mutex_rd) osal_mutex_unlock(fifo->mutex_rd);
+  #endif
+  return count;
+}
+#endif
+
 static bool _prep_out_transaction (cdcd_interface_t* p_cdc)
 {
   uint8_t const rhport = 0;
@@ -147,7 +185,11 @@ uint32_t tud_cdc_n_available(uint8_t itf)
 uint32_t tud_cdc_n_read(uint8_t itf, void* buffer, uint32_t bufsize)
 {
   cdcd_interface_t* p_cdc = &_cdcd_itf[itf];
+  #if CFG_TUD_CDC_RX_WIPE
+  uint32_t num_read = cdcd_read_wipe(p_cdc, buffer, (uint16_t)TU_MIN(bufsize, UINT16_MAX));
+  #else
   uint32_t num_read = tu_fifo_read_n(&p_cdc->rx_ff, buffer, (uint16_t) TU_MIN(bufsize, UINT16_MAX));
+  #endif
   _prep_out_transaction(p_cdc);
   return num_read;
 }
@@ -160,6 +202,13 @@ bool tud_cdc_n_peek(uint8_t itf, uint8_t* chr)
 void tud_cdc_n_read_flush (uint8_t itf)
 {
   cdcd_interface_t* p_cdc = &_cdcd_itf[itf];
+  #if CFG_TUD_CDC_RX_WIPE
+  /* This runs in the same task as the FIFO producer. The DCD IRQ may still
+   * own epout_buf; its completion path wipes it before callbacks/rearm. */
+  cdcd_rx_wipe(p_cdc->rx_ff_buf, sizeof(p_cdc->rx_ff_buf));
+  if (!usbd_edpt_busy(0, p_cdc->ep_out))
+    cdcd_rx_wipe(p_cdc->epout_buf, sizeof(p_cdc->epout_buf));
+  #endif
   tu_fifo_clear(&p_cdc->rx_ff);
   _prep_out_transaction(p_cdc);
 }
@@ -264,6 +313,13 @@ void cdcd_init(void)
 }
 
 bool cdcd_deinit(void) {
+  #if CFG_TUD_CDC_RX_WIPE
+  /* tud_deinit stops the DCD before invoking class deinitializers. */
+  for (uint8_t i = 0; i < CFG_TUD_CDC; ++i) {
+    cdcd_rx_wipe(_cdcd_itf[i].rx_ff_buf, sizeof(_cdcd_itf[i].rx_ff_buf));
+    cdcd_rx_wipe(_cdcd_itf[i].epout_buf, sizeof(_cdcd_itf[i].epout_buf));
+  }
+  #endif
   #if OSAL_MUTEX_REQUIRED
   for(uint8_t i=0; i<CFG_TUD_CDC; i++) {
     cdcd_interface_t* p_cdc = &_cdcd_itf[i];
@@ -294,6 +350,11 @@ void cdcd_reset(uint8_t rhport)
     cdcd_interface_t* p_cdc = &_cdcd_itf[i];
 
     tu_memclr(p_cdc, ITF_MEM_RESET_SIZE);
+    #if CFG_TUD_CDC_RX_WIPE
+    /* Reset is delivered after the DCD stopped endpoint transfers. */
+    cdcd_rx_wipe(p_cdc->rx_ff_buf, sizeof(p_cdc->rx_ff_buf));
+    cdcd_rx_wipe(p_cdc->epout_buf, sizeof(p_cdc->epout_buf));
+    #endif
     tu_fifo_clear(&p_cdc->rx_ff);
     #if !CFG_TUD_CDC_PERSISTENT_TX_BUFF
     tu_fifo_clear(&p_cdc->tx_ff);
@@ -470,6 +531,21 @@ bool cdcd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
   {
     tu_fifo_write_n(&p_cdc->rx_ff, p_cdc->epout_buf, (uint16_t) xferred_bytes);
 
+    #if CFG_TUD_CDC_RX_WIPE
+    /* Snapshot matches before wiping. Both callbacks may consume the FIFO and
+     * rearm OUT, so endpoint storage must be cleared before either callback. */
+    uint16_t wanted_count = 0;
+    char const wanted = p_cdc->wanted_char;
+    if (tud_cdc_rx_wanted_cb && ((signed char)wanted != -1)) {
+      for (uint32_t i = 0; i < xferred_bytes; ++i)
+        if ((uint8_t)wanted == p_cdc->epout_buf[i]) ++wanted_count;
+    }
+    cdcd_rx_wipe(p_cdc->epout_buf, sizeof(p_cdc->epout_buf));
+    while (wanted_count && !tu_fifo_empty(&p_cdc->rx_ff)) {
+      --wanted_count;
+      tud_cdc_rx_wanted_cb(itf, wanted);
+    }
+    #else
     // Check for wanted char and invoke callback if needed
     if ( tud_cdc_rx_wanted_cb && (((signed char) p_cdc->wanted_char) != -1) )
     {
@@ -481,6 +557,8 @@ bool cdcd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
         }
       }
     }
+
+    #endif
 
     // invoke receive callback (if there is still data)
     if (tud_cdc_rx_cb && !tu_fifo_empty(&p_cdc->rx_ff) ) tud_cdc_rx_cb(itf);

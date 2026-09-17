@@ -34,12 +34,12 @@ MUTATIONS=[
  ('zoom-no-quiet-period','zoom_tracker.c','now + ZOOM_ASSIST_QUIET_TIME_US',
   'now','zoom_scroll_debt_and_quiet_exit','zoom'),
  ('repair-untrusted-uart-crc','utils.c',
-  'if (calc_crc32(body, 11) != crc)\n        return false;',
+  'if (calc_crc32(body, 11) != crc)\n        goto done;',
   'crc = calc_crc32(body, 11);',
   'uart_type_integrity','system_timeout[0] on 0'),
  ('consume-rejected-uart-frame','utils.c',
-  'if (!read_raw_packet(raw, &state->in_packet)) {',
-  'if (!read_raw_packet(raw, &state->in_packet)) {\n        state->dma_ptr = cursor;',
+  'if (!valid) {\n        diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR',
+  'if (!valid) {\n        state->dma_ptr = cursor;\n        diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR',
   'uart_faults','x[0] on 0'),
 ]
 MUTATIONS.extend(SOURCE_MUTATIONS)

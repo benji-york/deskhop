@@ -70,7 +70,7 @@ typedef struct { struct { uint32_t ctrl; } io[6]; } sim_ioqspi_hw_t;
 extern sim_ioqspi_hw_t *ioqspi_hw;
 typedef struct { uint32_t gpio_hi_in; } sim_sio_hw_t;
 extern sim_sio_hw_t *sio_hw;
-typedef struct { uint32_t fr; } sim_uart_hw_t;
+typedef struct { uint32_t fr, rsr, dmacr; } sim_uart_hw_t;
 #define uart0 0
 #define UART_UARTFR_BUSY_BITS 0x00000008u
 sim_uart_hw_t *uart_get_hw(unsigned);

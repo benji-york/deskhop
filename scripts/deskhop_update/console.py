@@ -245,7 +245,7 @@ class Console:
 
     def command(self, text: str, timeout=None) -> bytes:
         require(not self.bootloader_sent, "no further commands after bootloader request")
-        require(text in ("help", "status", "history")
+        require(text in ("help", "status", "history", "link")
                 or re.fullmatch(r"history (?:[1-9]|[1-5][0-9]|6[0-4])", text) is not None
                 or re.fullmatch(r"verify (?:0|[1-9][0-9]{0,4})\.(?:0|[1-9][0-9]{0,2}) [0-9a-f]{8}", text) is not None,
                 "unsupported diagnostic command")
@@ -351,24 +351,54 @@ def parse_status(raw) -> dict:
     return {"boards": boards, "local": next(iter(boards)), "peer": peer, "verification": "available"}
 
 
+def parse_link(raw) -> dict:
+    """Short local register observation, sequential reads, not a health verdict."""
+    text = normalized(raw)
+    match = re.fullmatch(r"link\n([AB]) ([0-9.]+) C=([0-9]+)/([0-9]+) "
+                         r"U=([0-9a-f]+)/([0-9a-f]+)/([0-9a-f]+) "
+                         r"D=([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{2}) "
+                         r"R=([0-9]+)/([0-9]+) P=([0-4])/([0-4])\ndeskhop> ", text)
+    require(match is not None, "invalid link response")
+    role, build, c0, c1, *values = match.groups()
+    uart = [int(value, 16) for value in values[:3]]
+    dma = [int(value, 16) for value in values[3:6]]
+    require(all(value <= MAX_U32 for value in uart) and all(value <= 127 for value in dma),
+            "link register value out of range")
+    return {"board": role, "build": version(build), "scope": "local", "snapshot": "non_atomic",
+            "core_age_ms": [decimal(c0, MAX_U32, "core age"), decimal(c1, MAX_U32, "core age")],
+            "uart": uart, "dma_flags": dma,
+            "rx_remaining": decimal(values[6], MAX_U32, "RX remainder"),
+            "rx_dreq": decimal(values[7], 63, "RX credits"),
+            "cleanup": [int(value) for value in values[8:]]}
+
+
 def validate_help(raw, require_bootloader=True):
     lines = frame_body(raw, "help", "help")
     commands = [line.split()[0] for line in lines if line.startswith("  ")]
     expected = ["help", "status", "history", "verify"]
-    supported = (expected + ["bootloader"], expected + ["bootloader", "config"])
-    if not require_bootloader:
-        supported += (expected,)
-    require(commands in supported, "unexpected help command list")
+    # Enumerate known wire grammars. Unknown, reordered and duplicate commands
+    # remain errors; knowledge of a command never authorizes command() to send it.
+    supported = [expected + ["bootloader"], expected + ["bootloader", "clipboard"],
+                 expected + ["bootloader", "config"],
+                 expected + ["bootloader", "config", "clipboard"]]
+    supported += [["help", "status", "link", "history", "verify", "bootloader", "config", "clipboard"]]
+    require(commands in supported + ([] if require_bootloader else [expected]),
+            "unexpected help command list")
     phrases = ["GAP", "full 256KiB firmware including metadata; configuration excluded",
                "PASS describes a fresh scan", "Status image CRC is boot metadata only"]
     if "bootloader" in commands:
         require(not any("all commands are read-only" in line for line in lines), "misleading maintenance help")
-        phrases += ["diagnostics and disruptive maintenance", "Diagnostics are read-only and query both boards",
+        phrases += ["diagnostics and disruptive maintenance", "Diagnostics are read-only",
                     "bounded peer timeouts", "bootloader A|B", "DISRUPTIVE", "disk-free USB ROM",
                     "physical A or B; no default/both", "target's USB-connected computer", "peer acceptance is not boot proof"]
+        phrases += (["Status/history/verify query both boards", "link is local only"]
+                    if "link" in commands else ["Diagnostics are read-only and query both boards"])
     if "config" in commands:
         require(any(re.fullmatch(r"  config +DISRUPTIVE: connected board enters configuration mode\.", line)
                     for line in lines), "missing connected-board config explanation")
+    if "clipboard" in commands:
+        require("  clipboard <session>   Local binary clipboard helper; close to release port." in lines,
+                "misleading clipboard help")
     for phrase in phrases:
         require(any(phrase in line for line in lines), f"missing help explanation: {phrase}")
 
@@ -483,8 +513,18 @@ def _parse_transfer_event(name, rest):
     return {"event": name, **values}
 
 
+# Fixed metadata labels; never accept clipboard data or arbitrary diagnostic fields.
+CLIPBOARD_PHASES = ('trigger', 'admitted', 'rejected', 'pull', 'offer', 'grant', 'release', 'helper_open', 'helper_close', 'helper_request', 'helper_result', 'payload_ready', 'typing', 'done', 'cancelled')
+CLIPBOARD_REASONS = ('none', 'uninitialized', 'host_disconnected', 'suspended', 'config_mode', 'maintenance', 'update_active', 'focus_invalid', 'led_unknown', 'caps_on', 'busy', 'helper_missing', 'input_held', 'counter_limit', 'non_bare', 'incomplete_report', 'focus_changed', 'usb_changed', 'helper_expired', 'peer_expired', 'deadline', 'physical_input', 'helper_closed', 'peer_restarted', 'protocol', 'binding', 'stale', 'empty', 'non_text', 'oversize', 'unsupported', 'unavailable', 'peer_cancelled', 'payload_invalid', 'host_reset')
+
+
 def _parse_event(text):
     name, _, rest = text.partition(" ")
+    if name == "clipboard":
+        values = ordered_fields(rest, ("phase", "reason"))
+        require(values["phase"] in CLIPBOARD_PHASES and values["reason"] in CLIPBOARD_REASONS,
+                "invalid clipboard diagnostic label")
+        return {"event": name, **values}
     if name in ("transfer_source", "transfer_timing", "transfer_count"):
         return _parse_transfer_event(name, rest)
     schemas = {"boot": ("build", "output"), "output_local": ("old", "new"), "output_peer": ("old", "new"),

@@ -10,8 +10,10 @@
  */
 
 #include "main.h"
+#include "diagnostic_transport.h"
 #include "critical_try.h"
 #include "diagnostic_history.h"
+#include "ram_clear.h"
 
 _Static_assert(sizeof(config_t) <= FLASH_PAGE_SIZE,
                "config_t has grown beyond the configuration flash page");
@@ -246,7 +248,9 @@ void config_set_screen_index(device_t *state, uint8_t output, uint32_t index) {
 uint32_t calc_packet_checksum(const uart_packet_t *packet) {
     uint8_t body[11] = {UART_FRAME_VERSION, PACKET_DATA_LENGTH, packet->type};
     memcpy(body + 3, packet->data, PACKET_DATA_LENGTH);
-    return calc_crc32(body, sizeof(body));
+    uint32_t crc = calc_crc32(body, sizeof(body));
+    ram_clear(body, sizeof(body));
+    return crc;
 }
 
 bool verify_checksum(const uart_packet_t *packet) {
@@ -255,25 +259,29 @@ bool verify_checksum(const uart_packet_t *packet) {
 
 bool read_raw_packet(const uint8_t *raw, uart_packet_t *packet) {
     uint8_t body[UART_FRAME_BODY_LENGTH];
+    bool valid = false;
     if (raw[0] != UART_FRAME_START || raw[RAW_PACKET_LENGTH - 1] != UART_FRAME_END)
-        return false;
+        goto done;
     for (unsigned i = 0; i < sizeof(body); ++i) {
         uint8_t hi = raw[1 + 2 * i], lo = raw[2 + 2 * i];
         if ((hi & 0xf0) != 0x40 || (lo & 0xf0) != 0x40)
-            return false;
+            goto done;
         body[i] = ((hi & 0xf) << 4) | (lo & 0xf);
     }
     if (body[0] != UART_FRAME_VERSION || body[1] != PACKET_DATA_LENGTH)
-        return false;
+        goto done;
     uint32_t crc = 0;
     for (unsigned i = 0; i < 4; ++i)
         crc |= (uint32_t)body[11 + i] << (8 * i);
     if (calc_crc32(body, 11) != crc)
-        return false;
+        goto done;
     packet->type = body[2];
     memcpy(packet->data, body + 3, PACKET_DATA_LENGTH);
     packet->checksum = crc;
-    return true;
+    valid = true;
+done:
+    ram_clear(body, sizeof(body));
+    return valid;
 }
 
 uint32_t crc32_iter(uint32_t crc, const uint8_t byte) {
@@ -729,12 +737,66 @@ bool fetch_packet(device_t *state) {
         raw[i] = uart_rxbuf[cursor];
         cursor = NEXT_RING_IDX(cursor);
     }
-    if (!read_raw_packet(raw, &state->in_packet)) {
+    bool valid = read_raw_packet(raw, &state->in_packet);
+    ram_clear(raw, sizeof(raw));
+    if (!valid) {
         diagnostic_history_record(HISTORY_PACKET_CHECKSUM_ERROR, 0, 0, 0);
         return false;
     }
     state->dma_ptr = cursor;
     return true;
+}
+
+volatile uint32_t diagnostic_rx_cleanup_phase;
+
+/* Core 1 owns parsing; the DMA owns the producer side. No live DMA destination
+ * may be erased. Disable the reload channel first, then abort both channels
+ * using the SDK's BUSY-drain barrier (including already issued bus writes).
+ * Active normal frames incur no pause: callers erase clipboard frames,
+ * discarded corrupt/partial bytes, and stable idle ring slices. The pause
+ * contains at most 63 byte stores and the SDK's DMA BUSY-drain barriers;
+ * it performs no parsing, allocation, lock acquisition or dispatch.
+ *
+ * The reload channel writes 1024 to TRANS_COUNT_TRIG, rather than resetting the
+ * write address. Therefore restarting this exact remainder does not change the
+ * next full-ring reload count. No completion IRQ is installed for these two
+ * channels; RP2040-E13's spurious completion IRQ cannot run a handler.
+ */
+void uart_rx_erase_consumed(device_t *state, uint32_t start, uint32_t length) {
+    if (!length || length >= 2 * RAW_PACKET_LENGTH || start >= DMA_RX_BUFFER_SIZE) return;
+    uint32_t interrupts = save_and_disable_interrupts();
+    dma_channel_config control = dma_get_channel_config(state->dma_control_channel);
+    dma_channel_config paused = control;
+    channel_config_set_enable(&paused, false);
+    dma_channel_set_config(state->dma_control_channel, &paused, false);
+    diagnostic_rx_cleanup_phase = DIAGNOSTIC_RX_STOP_CONTROL;
+    dma_channel_abort(state->dma_control_channel);
+    diagnostic_rx_cleanup_phase = DIAGNOSTIC_RX_STOP_DATA;
+    dma_channel_abort(state->dma_rx_channel);
+    diagnostic_rx_cleanup_phase = DIAGNOSTIC_RX_CLEAR;
+
+    /* CHAN_ABORT clears TRANS_COUNT (RP2040 datasheet 2.5.5.3). After the
+     * SDK's BUSY-drain barrier, WRITE_ADDR is stable with no in-flight address
+     * adjustment (E12). Recover the remainder from that actual ring position;
+     * reading the cleared count would falsely rewind the logical producer. */
+    uint32_t writer = ((uintptr_t)dma_channel_hw_addr(state->dma_rx_channel)->write_addr
+                       - (uintptr_t)uart_rxbuf) & (DMA_RX_BUFFER_SIZE - 1u);
+    uint32_t remaining = DMA_RX_BUFFER_SIZE - writer;
+    uint32_t unread = get_ptr_delta(writer, state);
+    for (uint32_t i = 0; i < length; ++i) {
+        uint32_t index = (start + i) & (DMA_RX_BUFFER_SIZE - 1u);
+        uint32_t distance = (index - state->dma_ptr) & (DMA_RX_BUFFER_SIZE - 1u);
+        /* A producer wrap after the parser snapshot may have replaced an old
+         * consumed slot with new unread input. That new input retains ownership. */
+        if (distance >= unread) *(volatile uint8_t *)&uart_rxbuf[index] = 0;
+    }
+    diagnostic_rx_cleanup_phase = DIAGNOSTIC_RX_RESTART;
+    dma_channel_set_trans_count(state->dma_control_channel, 1, false);
+    dma_channel_set_config(state->dma_control_channel, &control, false);
+    dma_channel_set_trans_count(state->dma_rx_channel,
+                               remaining, true);
+    diagnostic_rx_cleanup_phase = DIAGNOSTIC_RX_IDLE;
+    restore_interrupts(interrupts);
 }
 
 /* Validating any input is mandatory. Only packets of these type are allowed

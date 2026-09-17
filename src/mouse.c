@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "clipboard.h"
 #include <math.h>
 #include <limits.h>
 
@@ -589,6 +590,10 @@ void process_mouse_report(uint8_t *raw_report, int len, uint8_t itf, hid_interfa
 
     /* Interpret the mouse HID report, extract and save values we need. */
     extract_report_values(raw_report, len, state, &values, iface);
+
+    /* Compare the real interface before aggregation: a second held mouse can
+     * hide another device's button edge in the combined button mask. */
+    clipboard_mouse_buttons(iface, iface->mouse_buttons, (uint8_t)values.buttons, state);
 
     /* The output protocol carries signed 16-bit motion; saturate wider HID
        fields once so local and forwarded relative reports cannot wrap. */

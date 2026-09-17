@@ -53,6 +53,7 @@
   *  Functions to handle incoming UART packets, especially for firmware updates.
   *==============================================================================*/
  bool     fetch_packet(device_t *);
+ void     uart_rx_erase_consumed(device_t *, uint32_t start, uint32_t length);
  bool     read_raw_packet(const uint8_t *, uart_packet_t *);
  uint32_t get_ptr_delta(uint32_t, device_t *);
  bool     is_start_of_packet(device_t *);

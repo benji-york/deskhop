@@ -6,9 +6,12 @@
 #include "diagnostic_history.h"
 #include "diagnostic_peer_history.h"
 #include "diagnostic_runtime.h"
+#include "diagnostic_transport.h"
 #include "diagnostic_verify.h"
 #include "maintenance.h"
 #include "config_confirm.h"
+#include "clipboard.h"
+#include "clipboard_diagnostics.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -29,6 +32,37 @@ static size_t host_count;
 static char cdc_bytes[32768];
 static size_t cdc_count;
 static uint64_t cdc_submitted_bytes, console_now_us;
+/* Clipboard runtime boundary: the real CDC byte parser and TinyUSB FIFOs run
+ * here; production paired transport/injection is tested separately. */
+static bool clip_active, clip_pending;
+static uint64_t clip_session;
+static unsigned clip_begins, clip_chunks, clip_commits, clip_pings;
+static clipboard_request_t clip_request = {1, 2, 3, 4, 5};
+bool clipboard_helper_open(uint64_t session, uint64_t now) {
+    (void)now;
+    clip_active = !global_state.config_mode_active;
+    clip_session = session;
+    return clip_active;
+}
+void clipboard_helper_close(uint64_t now) { (void)now; clip_active = clip_pending = false; }
+void clipboard_helper_keepalive(uint64_t now) { (void)now; ++clip_pings; }
+bool clipboard_helper_active(uint64_t now) { (void)now; return clip_active; }
+bool clipboard_helper_poll(clipboard_request_t *r) {
+    if (!clip_pending) return false;
+    clip_pending = false; *r = clip_request; return true;
+}
+bool clipboard_helper_reply_begin(const clipboard_request_t *r, uint8_t status,
+                                 uint16_t length, uint32_t crc, uint64_t now) {
+    (void)crc; (void)now;
+    CHECK(!memcmp(r, &clip_request, sizeof(*r)));
+    CHECK((status == 0 && length == 3) || (status >= 1 && status <= 5 && length == 0 && crc == 0));
+    ++clip_begins; return true;
+}
+bool clipboard_helper_reply_chunk(uint16_t offset, const uint8_t *bytes, size_t length, uint64_t now) {
+    (void)now; CHECK(offset == 0 && length == 3 && !memcmp(bytes, "xY!", 3));
+    ++clip_chunks; return true;
+}
+bool clipboard_helper_reply_commit(uint64_t now) { (void)now; ++clip_commits; return true; }
 /* Console/USB contract double. Real maintenance admission, UART transactions,
  * updater guards and ROM entry are covered by the paired production simulator. */
 static maintenance_start_t maintenance_start = MAINTENANCE_STARTED;
@@ -107,6 +141,12 @@ static unsigned runtime_reads;
 diagnostic_runtime_snapshot_t diagnostic_runtime_snapshot(void) {
     ++runtime_reads;
     return local_runtime;
+}
+static diagnostic_transport_snapshot_t transport_fixture;
+static unsigned transport_reads;
+diagnostic_transport_snapshot_t diagnostic_transport_snapshot(void) {
+    ++transport_reads;
+    return transport_fixture;
 }
 /* The production assessment policy consumes fixed scalar bridge fixtures. */
 static verify_result_t verify_queue[4], verify_fixture[2];
@@ -332,10 +372,11 @@ void send_value(uint8_t value, enum packet_type_e type) { CHECK(type == KBD_SET_
 bool validate_packet(uart_packet_t *packet) { return false; }
 uint32_t calc_packet_checksum(const uart_packet_t *packet) { return 0; }
 void process_packet(uart_packet_t *packet, device_t *state) { CHECK(false); }
-/* This stack-only fixture rejects config packets above. Bootloader dispatch and
- * updater-guard behavior are exercised by the paired production-code simulator. */
-void firmware_update_lock(void) { CHECK(false); }
-void firmware_update_unlock(void) { CHECK(false); }
+/* Config dispatch is rejected above; the production LED callback now protects
+ * its cache update with the same short RAM lock used by clipboard admission. */
+static bool firmware_locked;
+void firmware_update_lock(void) { CHECK(!firmware_locked); firmware_locked = true; }
+void firmware_update_unlock(void) { CHECK(firmware_locked); firmware_locked = false; }
 void tud_suspend_cb(bool remote_wakeup_en) { ++suspend_callbacks; }
 void tud_resume_cb(void) { ++resume_callbacks; }
 
@@ -659,6 +700,78 @@ static void cdc_status_fields(void) {
     CHECK(strstr(cdc_bytes, "deskhop> ") != NULL);
 }
 
+static void cdc_local_transport(void) {
+    const unsigned peers = peer_requests, histories = history_peer_requests;
+    const unsigned reads = transport_reads;
+    transport_fixture = (diagnostic_transport_snapshot_t){
+        .flags = 0x48, .errors = 8, .dma_enabled = 3,
+        .phase_before = DIAGNOSTIC_RX_STOP_DATA, .phase_after = DIAGNOSTIC_RX_IDLE,
+        .dma = {{.control = 0x61000001, .remaining = UINT32_MAX, .dreq = 63,
+                 .reload = UINT32_MAX, .abort_pending = 1},
+                {.control = 1, .remaining = 1, .reload = 1}, {.control = 1}},
+    };
+    cdc_capture_clear();
+    cdc_send("link\n");
+    CHECK(transport_reads == reads + 1 && peer_requests == peers && history_peer_requests == histories);
+    CHECK(occurrences("deskhop> ") == 1 && strstr(cdc_bytes, "A 0.101 C=0/1") != NULL);
+    CHECK(strstr(cdc_bytes, " U=48/8/3 D=2f/01/51 R=4294967295/63 P=2/0\r\n") != NULL);
+    CHECK(cdc_count < 130); /* Even maximum register values stay easy to transcribe. */
+    CHECK(strstr(cdc_bytes, "peer=") == NULL);
+    cdc_capture_clear();
+    cdc_send("link A\nlink reset\nlink \nLINK\n");
+    CHECK(occurrences("ERROR") == 4 && transport_reads == reads + 1);
+}
+
+static void cdc_link_watch(void) {
+    const unsigned peers = peer_requests, histories = history_peer_requests;
+    const uint64_t started = console_now_us;
+    cdc_capture_clear();
+    cdc_send("link watch\n");
+    CHECK(occurrences("A 0.101 C=") == 1 && occurrences("deskhop> ") == 0);
+    for (unsigned second = 1; second < 60; ++second) {
+        console_now_us = started + second * UINT64_C(1000000);
+        console_drain();
+    }
+    CHECK(occurrences("A 0.101 C=") == 60 && occurrences("deskhop> ") == 0);
+    console_now_us = started + UINT64_C(60000000);
+    console_drain();
+    CHECK(occurrences("A 0.101 C=") == 60 && occurrences("deskhop> ") == 1);
+    CHECK(peer_requests == peers && history_peer_requests == histories);
+
+    cdc_capture_clear();
+    cdc_send("link watch\n");
+    cdc_send("status\n"); /* No queued commands while watching. */
+    CHECK(peer_requests == peers);
+    cdc_send("\x03");
+    CHECK(occurrences("^C") == 1 && occurrences("deskhop> ") == 1);
+    console_now_us += UINT64_C(2000000);
+    console_drain();
+    CHECK(occurrences("A 0.101 C=") == 1);
+
+    /* A slow reader must not cause catch-up bursts or postpone the deadline.
+     * HID still submits while the CDC endpoint is backpressured. */
+    cdc_capture_clear();
+    cdc_send("link watch\n");
+    console_now_us += UINT64_C(1000000);
+    for (unsigned i = 0; i < 64; ++i) console_tick();
+    uint8_t keys[6] = {HID_KEY_C};
+    CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+    complete(0x81, NULL, 0);
+    console_now_us += UINT64_C(65000000);
+    console_drain();
+    CHECK(occurrences("A 0.101 C=") == 2 && occurrences("deskhop> ") == 1);
+
+    cdc_send("link watch\n");
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    console_drain();
+    CHECK(control(0x21, 0x22, 3, 2, 0, NULL));
+    cdc_capture_clear();
+    console_now_us += UINT64_C(2000000);
+    console_drain();
+    CHECK(occurrences("A 0.101 C=") == 0 && occurrences("deskhop> ") == 1);
+    CHECK(peer_requests == peers && history_peer_requests == histories);
+}
+
 static void cdc_command_stream(void) {
     cdc_capture_clear();
     cdc_send("he");
@@ -673,10 +786,9 @@ static void cdc_command_stream(void) {
     CHECK(strstr(cdc_bytes, "both boards") != NULL);
     CHECK(strstr(cdc_bytes, "history [count]") != NULL);
     CHECK(strstr(cdc_bytes, "event ages align approximately") != NULL);
-    CHECK(strstr(cdc_bytes, "Core counts mark diagnostic task checkpoints") != NULL);
-    CHECK(strstr(cdc_bytes, "Peer confirmation is historical/version-only; progress compares status queries") != NULL);
+    CHECK(strstr(cdc_bytes, "Core counts are checkpoints; peer progress compares status queries") != NULL);
     CHECK(strstr(cdc_bytes, "progress compares status queries") != NULL);
-    CHECK(strstr(cdc_bytes, "History/observations are in RAM until reboot") != NULL);
+    CHECK(strstr(cdc_bytes, "History is volatile") != NULL);
     CHECK(strstr(cdc_bytes, "GAP means unavailable capture data or older peer support") != NULL);
     CHECK(strstr(cdc_bytes, "Verify CRC: full 256KiB firmware including metadata; configuration excluded") != NULL);
     CHECK(strstr(cdc_bytes, "PASS describes a fresh scan; rerun verify after changes") != NULL);
@@ -1447,6 +1559,30 @@ static void cdc_transfer_history_fields(void) {
         CHECK(strstr(cdc_bytes, row) != NULL);
     }
     CHECK(occurrences("board=A seq=") == 14 && occurrences("END history") == 1);
+}
+
+static void cdc_clipboard_history_fields(void) {
+#define LABEL(name, text) text,
+    static const char *const phases[] = {CLIPBOARD_DIAGNOSTIC_PHASES(LABEL)};
+    static const char *const reasons[] = {CLIPBOARD_DIAGNOSTIC_REASONS(LABEL)};
+#undef LABEL
+    /* Walk both enums through real CDC formatting; no numeric payload field. */
+    for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); ++i) {
+        diagnostic_history_init();
+        console_now_us = 1000000;
+        unsigned phase = i % (sizeof(phases) / sizeof(phases[0]));
+        diagnostic_history_record(HISTORY_CLIPBOARD, phase, i, 0);
+        cdc_capture_clear(); cdc_send("history\n"); history_frame(1, 0);
+        char expected[160];
+        snprintf(expected, sizeof(expected), "event=clipboard phase=%s reason=%s\r\n", phases[phase], reasons[i]);
+        CHECK(strstr(cdc_bytes, expected));
+        CHECK(!strstr(cdc_bytes, "value=") && !strstr(cdc_bytes, "length="));
+    }
+    diagnostic_history_init();
+    diagnostic_history_record(HISTORY_CLIPBOARD, 255, 255, UINT32_MAX);
+    cdc_capture_clear(); cdc_send("history\n"); history_frame(1, 0);
+    CHECK(strstr(cdc_bytes, "clipboard phase=invalid reason=invalid\r\n"));
+    CHECK(!strstr(cdc_bytes, "4294967295"));
 }
 
 static void cdc_history_stalled_reader_and_hid(void) {
@@ -2372,6 +2508,90 @@ static void msc_bulk(void) {
     complete(0x04, (uint8_t *)&bad, sizeof(bad));
     CHECK(endpoint(0x04)->stalled && endpoint(0x84)->stalled);
 }
+static void clip_put(uint8_t *p, uint64_t value, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) p[i] = value >> (8 * i);
+}
+static void clip_frame(uint8_t bytes[64], uint8_t opcode) {
+    memset(bytes, 0, 64); memcpy(bytes, "DHC2", 4); bytes[4] = opcode;
+}
+static void clip_reconnect(void) {
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    CHECK(!clip_active);
+    CHECK(control(0x21, 0x22, 3, 2, 0, NULL));
+    console_drain(); cdc_capture_clear();
+}
+static void cdc_clipboard_binary(void) {
+    uint8_t frame[64];
+    clip_reconnect();
+    const char *invalid[] = {"clipboard", "clipboard 0000000000000000",
+        "clipboard 123", "clipboard 000000000000000G", "clipboard 000000000000000A",
+        "clipboard 0000000000000001 extra"};
+    for (unsigned i = 0; i < sizeof(invalid)/sizeof(*invalid); ++i) {
+        char command[80]; snprintf(command, sizeof(command), "%s\n", invalid[i]);
+        cdc_send(command); CHECK(!clip_active && strstr(cdc_bytes, "ERROR clipboard unavailable"));
+        cdc_capture_clear();
+    }
+    cdc_send("clipboard 0000000000000003\n");
+    const char *echo = "clipboard 0000000000000003\r\n";
+    size_t prefix = strlen(echo);
+    CHECK(clip_active && clip_session == 3 && cdc_count == prefix + 64);
+    CHECK(!memcmp(cdc_bytes, echo, prefix) && !memcmp(cdc_bytes + prefix, "DHC2", 4));
+    CHECK(cdc_bytes[prefix + 4] == 0 && cdc_bytes[prefix + 16] == 3);
+    cdc_capture_clear();
+    clip_pending = true; console_drain();
+    CHECK(cdc_count == 64 && cdc_bytes[4] == 1);
+    for (unsigned i = 0; i < 5; ++i) CHECK(cdc_bytes[8 + 8*i] == i+1);
+    cdc_capture_clear();
+    clip_frame(frame, 2);
+    for (unsigned i = 0; i < 5; ++i) clip_put(frame + 8 + 8*i, i+1, 8);
+    clip_put(frame + 49, 3, 2);
+    cdc_send_bytes(frame, 31); CHECK(clip_begins == 0);
+    cdc_send_bytes(frame + 31, 33); CHECK(clip_begins == 1 && cdc_count == 0);
+    clip_frame(frame, 3); clip_put(frame + 8, 4, 8);
+    frame[18] = 3; memcpy(frame + 19, "xY!", 3);
+    cdc_send_bytes(frame, 64); CHECK(clip_chunks == 1 && cdc_count == 0);
+    clip_frame(frame, 4); clip_put(frame + 8, 4, 8);
+    cdc_send_bytes(frame, 64); CHECK(clip_commits == 1 && cdc_count == 0);
+    clip_frame(frame, 5); clip_put(frame + 8, 3, 8);
+    cdc_send_bytes(frame, 64); CHECK(clip_pings == 1);
+    for (unsigned status = 1; status <= 5; ++status) {
+        clip_pending = true; console_drain(); cdc_capture_clear();
+        clip_frame(frame, 2);
+        for (unsigned i = 0; i < 5; ++i) clip_put(frame + 8 + 8*i, i+1, 8);
+        frame[48] = status;
+        cdc_send_bytes(frame, 64);
+        CHECK(clip_active && cdc_count == 0 && clip_begins == status + 1);
+    }
+    /* Unexpected data, bad padding, unknown opcode or stale nonce closes the
+     * helper and latches binary discard until DTR. Never enter maintenance. */
+    for (unsigned fault = 0; fault < 5; ++fault) {
+        clip_reconnect(); cdc_send("clipboard 0000000000000003\n");
+        cdc_capture_clear(); clip_pending = true; console_drain(); cdc_capture_clear();
+        clip_frame(frame, 5); clip_put(frame + 8, 3, 8);
+        if (fault == 0) frame[0] = 'X';
+        if (fault == 1) frame[5] = 1;
+        if (fault == 2) frame[63] = 1;
+        if (fault == 3) frame[4] = 255;
+        if (fault == 4) frame[8] = 4;
+        cdc_send_bytes(frame, 64); CHECK(!clip_active);
+        unsigned before = maintenance_requests;
+        cdc_send("bootloader A\nhelp\n");
+        CHECK(maintenance_requests == before && cdc_count == 0);
+    }
+    /* Disconnect erases an incomplete binary frame before a new session. */
+    clip_reconnect(); cdc_send("clipboard 0000000000000003\n");
+    clip_frame(frame, 5); clip_put(frame + 8, 3, 8);
+    cdc_send_bytes(frame, 17); clip_reconnect();
+    cdc_send("help\n"); CHECK(strstr(cdc_bytes, "END help"));
+    cdc_capture_clear();
+    console_init(OUTPUT_B, "fedcba9876543210", 2, 0); console_drain(); cdc_capture_clear();
+    cdc_send("clipboard 0000000000000003\n"); CHECK(clip_active);
+    CHECK(cdc_count == strlen("clipboard 0000000000000003\r\n") + 64);
+    clip_reconnect();
+    console_init(OUTPUT_A, "0123456789abcdef", UINT64_C(0x1122334455667788), UINT32_C(0x89abcdef));
+    console_drain(); cdc_capture_clear();
+}
+
 int main(void) {
     local_runtime = default_runtime;
     diagnostic_history_init();
@@ -2401,6 +2621,7 @@ int main(void) {
     scenario = "CDC runtime and unknown history event fields";
     cdc_runtime_history_fields();
     cdc_transfer_history_fields();
+    cdc_clipboard_history_fields();
     scenario = "CDC history stalled reader and HID progress";
     cdc_history_stalled_reader_and_hid();
     scenario = "CDC history close discards frozen window";
@@ -2411,6 +2632,10 @@ int main(void) {
     cdc_history_capture_ignores_usb_backpressure();
     scenario = "CDC peer history failure, fallback and cancellation";
     cdc_history_peer_failures_and_cancel();
+    scenario = "CDC local register snapshot without peer queries";
+    cdc_local_transport();
+    scenario = "CDC bounded link watch, cancellation, slow reader and HID progress";
+    cdc_link_watch();
     scenario = "CDC asynchronous local-first peer status";
     cdc_peer_wait_is_local_first();
     scenario = "CDC peer failure and core-1 fallback";
@@ -2441,6 +2666,8 @@ int main(void) {
     cdc_config_cancel();
     scenario = "CDC close and reopen";
     cdc_disconnect_discards_partial();
+    scenario = "CDC clipboard strict binary framing, no echo and disconnect";
+    cdc_clipboard_binary();
     scenario = "suspend and unplug";
     suspend_and_unplug();
     scenario = "config enumeration";
@@ -2471,3 +2698,8 @@ int main(void) {
 
 /* Queue invalidation is covered by the paired production keyboard layer. */
 void keyboard_host_reset(device_t *state) { (void)state; }
+void clipboard_physical_disconnect(hid_interface_t *iface, device_t *state) {
+    (void)iface; (void)state;
+}
+void clipboard_usb_session_reset(device_t *state) { (void)state; }
+void clipboard_host_led_report(device_t *state) { (void)state; }

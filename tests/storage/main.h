@@ -83,12 +83,20 @@ enum gpio_override { GPIO_OVERRIDE_NORMAL, GPIO_OVERRIDE_LOW };
 struct storage_ioqspi { struct { uint32_t ctrl; } io[2]; };
 struct storage_sio { uint32_t gpio_hi_in; };
 struct storage_watchdog { uint32_t scratch[8]; };
-struct storage_dma { uint32_t transfer_count; };
+struct storage_dma { uint32_t transfer_count; uintptr_t write_addr; };
 extern struct storage_ioqspi *ioqspi_hw;
 extern struct storage_sio *sio_hw;
 extern struct storage_watchdog *watchdog_hw;
 void hw_write_masked(uint32_t *, uint32_t, uint32_t);
 struct storage_dma *dma_channel_hw_addr(uint32_t);
+/* RX cleanup is compiled with utils.c but outside this storage fixture's
+ * reachable boundary; DMA ownership is exercised by tests/sim instead. */
+typedef struct { bool enabled; } dma_channel_config;
+dma_channel_config dma_get_channel_config(uint32_t);
+void channel_config_set_enable(dma_channel_config *, bool);
+void dma_channel_set_config(uint32_t, const dma_channel_config *, bool);
+void dma_channel_abort(uint32_t);
+void dma_channel_set_trans_count(uint32_t, uint32_t, bool);
 
 /* Instrument native memcpy boundaries without replacing production logic. */
 void *storage_memcpy(void *, const void *, size_t);

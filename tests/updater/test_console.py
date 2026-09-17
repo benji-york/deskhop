@@ -109,6 +109,30 @@ def bootloader(role="A"):
             "action=enter_disk_free_usb_rom_after_reply\r\nEND bootloader\r\n").encode()
 
 
+class ClipboardHistoryTests(unittest.TestCase):
+    def test_fixed_metadata_labels_match_firmware(self):
+        import re
+        header = (Path(__file__).resolve().parents[2] / 'src/include/clipboard_diagnostics.h').read_text()
+        phases, reasons = header.split('#define CLIPBOARD_DIAGNOSTIC_REASONS(X)')
+        pattern = r'X\(\w+, "(\w+)"\)'
+        self.assertEqual(tuple(re.findall(pattern, phases)), c.CLIPBOARD_PHASES)
+        self.assertEqual(tuple(re.findall(pattern, reasons)), c.CLIPBOARD_REASONS)
+        for phase in c.CLIPBOARD_PHASES:
+            for reason in c.CLIPBOARD_REASONS:
+                row = f"clipboard phase={phase} reason={reason}"
+                self.assertEqual(c._parse_event(row), dict(event='clipboard', phase=phase, reason=reason))
+
+    def test_reject_unrecognized_or_payload_fields(self):
+        for row in ('clipboard phase=rejected reason=unknown',
+                    'clipboard phase=unknown reason=none', 'clipboard phase=trigger',
+                    'clipboard reason=none phase=trigger',
+                    'clipboard phase=trigger reason=none text=secret',
+                    'clipboard phase=trigger reason=none length=5',
+                    'clipboard phase=trigger reason=none crc=12345678'):
+            with self.subTest(row=row), self.assertRaises(c.ProtocolError):
+                c._parse_event(row)
+
+
 class ParserTests(unittest.TestCase):
     def setUp(self):
         self.identities = c.parse_status(status())["boards"]
@@ -201,6 +225,16 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(c.ProtocolError):
             c.validate_help(CONFIG_HELP.replace(CONFIG_HELP_LINE,
                             b"  config Safe command.\r\n" + CONFIG_HELP_LINE.lstrip()))
+    def test_clipboard_and_config_help_are_explicit_known_grammars(self):
+        clip = b"  clipboard <session>   Local binary clipboard helper; close to release port.\r\n"
+        config = b"  config                DISRUPTIVE: connected board enters configuration mode.\r\n"
+        for suffix in (clip, config, config + clip):
+            c.validate_help(HELP.replace(b"END help", suffix + b"END help"))
+        for suffix in (clip + clip, clip + config, config + config,
+                       clip.replace(b"Local", b"Anything"), clip.replace(b"<session>", b"anything"),
+                       config.replace(b"connected", b"remote"), b"  unknown\r\n"):
+            with self.subTest(suffix=suffix), self.assertRaises(c.ProtocolError):
+                c.validate_help(HELP.replace(b"END help", suffix + b"END help"))
 
     def test_correct_wrong_correct_fresh_scans(self):
         first = self.parse_verify(verify())

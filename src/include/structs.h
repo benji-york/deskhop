@@ -156,6 +156,13 @@ typedef struct {
 
     /* DMA */
     uint32_t dma_ptr;             // Stores info about DMA ring buffer last checked position
+    uint64_t uart_partial_since; // Bounded lifetime for an incomplete wire frame
+    uint32_t uart_partial_cursor;
+    bool uart_partial;
+    uint64_t uart_idle_since;
+    uint32_t uart_idle_writer;
+    uint16_t uart_idle_scrub, uart_idle_scan;
+    bool uart_idle_seen;
     uint32_t dma_rx_channel;      // DMA RX channel we're using to receive
     uint32_t dma_control_channel; // DMA channel that controls the RX transfer channel
     uint32_t dma_tx_channel;      // DMA TX channel we're using to send

@@ -1,5 +1,8 @@
 /* Execute production update/config/MSC units against observable NOR/SDK edges. */
 #include "main.h"
+
+/* Clipboard runtime is covered by paired tests, outside this storage boundary. */
+void clipboard_task(device_t *state) { (void)state; }
 #undef memcpy
 #include <stdio.h>
 #include <setjmp.h>

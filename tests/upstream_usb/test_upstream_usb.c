@@ -222,6 +222,7 @@ static void test_endpoint_isolation(void) {
 /* RP2040 register seam; endpoint layout and both buffer helpers are real. */
 typedef volatile uint32_t io_rw_32;
 #define CFG_TUH_ENABLED 0
+#define CFG_TUD_RP2040_RX_WIPE 1
 #define USB_BUF_CTRL_FULL 0x8000u
 #define USB_BUF_CTRL_LAST 0x4000u
 #define USB_BUF_CTRL_DATA1_PID 0x2000u
@@ -232,6 +233,32 @@ typedef volatile uint32_t io_rw_32;
 #define pico_trace(...) ((void)0)
 #define _hw_endpoint_buffer_control_get_value32(ep) (*(ep)->buffer_control)
 #include "dpram_production.h"
+
+#define USB_MAX_ENDPOINTS 16
+#define tu_memclr(buffer, length) memset(buffer, 0, length)
+typedef struct {
+    struct { uint32_t in, out; } ep_ctrl[USB_MAX_ENDPOINTS - 1];
+    uint8_t epx_data[3840];
+} fake_dpram_t;
+static fake_dpram_t fake_usb_dpram;
+static fake_dpram_t *usb_dpram = &fake_usb_dpram;
+static hw_endpoint_t hw_endpoints[USB_MAX_ENDPOINTS][2];
+static uint8_t *next_buffer_ptr;
+#include "dpram_reset_production.h"
+
+static void test_reset_erases_abandoned_rx(void) {
+    memset(&fake_usb_dpram, 0xa5, sizeof(fake_usb_dpram));
+    memset(hw_endpoints, 0xa5, sizeof(hw_endpoints));
+    next_buffer_ptr = fake_usb_dpram.epx_data + 128;
+    reset_non_control_endpoints();
+    for (unsigned i = 0; i < USB_MAX_ENDPOINTS - 1; ++i)
+        assert(fake_usb_dpram.ep_ctrl[i].in == 0 && fake_usb_dpram.ep_ctrl[i].out == 0);
+    for (unsigned i = 0; i < sizeof(fake_usb_dpram.epx_data); ++i)
+        assert(fake_usb_dpram.epx_data[i] == 0);
+    for (unsigned i = 0; i < sizeof(hw_endpoints); ++i)
+        assert(((uint8_t *)hw_endpoints)[i] == (i < 2 * sizeof(hw_endpoint_t) ? 0xa5 : 0));
+    assert(next_buffer_ptr == fake_usb_dpram.epx_data);
+}
 
 static void test_copy_alignment(void) {
     uint8_t source[160], destination[160];
@@ -277,7 +304,13 @@ static void test_endpoint_buffers(void) {
                 assert(sync_ep_buffer(&ep, buffer_id) == length);
                 assert(ep.xferred_len == length && ep.user_buf == user + offset + length);
                 assert(ep.remaining_len == (length < 64 ? 0 : 100));
-                assert(memcmp(user + offset, dpram + offset + buffer_id * 64, length) == 0);
+                for (uint16_t i = 0; i < length; ++i) {
+                    assert(user[offset + i] == (uint8_t)(offset + i));
+                    assert(dpram[offset + buffer_id * 64 + i] == 0);
+                }
+                /* Clear only the consumed bank/range, preserving its neighbor. */
+                assert(dpram[offset + buffer_id * 64 + length] == 0xa5);
+                if (buffer_id) assert(dpram[offset] == 0xa5);
                 assert(user[offset + length] == 0);
             }
         }
@@ -291,6 +324,7 @@ int main(void) {
     test_endpoint_isolation();
     test_copy_alignment();
     test_endpoint_buffers();
+    test_reset_erases_abandoned_rx();
     puts("upstream USB: transaction retry, reset, isolation, STALL/NAK, SETUP, and DPRAM tests passed");
     return 0;
 }

@@ -3,6 +3,9 @@
 #include "main.h"
 #include <assert.h>
 #include <setjmp.h>
+#if SIM_HAS_CLIPBOARD
+#include "clipboard.h"
+#endif
 #if SIM_HAS_MAINTENANCE
 #include "maintenance.h"
 #endif
@@ -40,7 +43,15 @@ static bool history_request_accepted, history_poll_ready;
 static const peer_history_result_t *history_borrowed;
 #endif
 static uint8_t protocol[MAX_DEVICES][MAX_INTERFACES], boot[MAX_DEVICES][MAX_INTERFACES];
-static dma_channel_hw_t rx_hw;
+static dma_channel_hw_t dma_regs[3];
+static sim_dma_hw_t dma_hw_storage;
+static sim_dma_debug_hw_t dma_debug_storage;
+sim_dma_hw_t *dma_hw = &dma_hw_storage;
+sim_dma_debug_hw_t *dma_debug_hw = &dma_debug_storage;
+static dma_channel_config dma_configs[3];
+static bool dma_running[3], rx_reload_inflight;
+static int rx_abort_byte = -1;
+static unsigned dma_abort_count[3], dma_restart_count[3];
 static uint32_t rx_write;
 static unsigned critical_depth, interrupt_depth;
 /* kind: USB=1, UART=2, LED=3, watchdog=4, reset=5, yield=6,
@@ -122,7 +133,11 @@ void reset_usb_boot(uint32_t a,uint32_t b) { stopped=true; emit(5,1,(int)b,NULL,
 void gpio_put(uint32_t pin,bool value) { led=value; }
 bool gpio_get(uint32_t pin) { return led; }
 void pico_get_unique_board_id_string(char *s,uint32_t n) { snprintf(s,n,"SIMULATED-%u",global_state.board_role); }
-bool dma_channel_is_busy(uint32_t channel) { return uart_stalled || now_us < dma_busy_until; }
+bool dma_channel_is_busy(uint32_t channel) {
+    assert(channel < 3);
+    return channel == global_state.dma_tx_channel
+        ? uart_stalled || now_us < dma_busy_until : dma_running[channel];
+}
 sim_uart_hw_t *uart_get_hw(unsigned uart) {
     (void)uart;
     /* Independent FIFO/shifter control catches DMA-idle-but-not-wire-idle
@@ -131,15 +146,109 @@ sim_uart_hw_t *uart_get_hw(unsigned uart) {
     return &uart_hw;
 }
 void dma_channel_transfer_from_buffer_now(uint32_t channel,const void *p,uint32_t n) {
+    assert(channel == global_state.dma_tx_channel);
     /* 8N1 serial duration, rounded upwards. Copying/serialization belongs to
        the transport model; RX feeds the real production DMA ring parser. */
     dma_busy_until=now_us+((uint64_t)n*10*1000000+SERIAL_BAUDRATE-1)/SERIAL_BAUDRATE;
     emit(2,channel,(int)(dma_busy_until-now_us),p,n);
 }
-dma_channel_hw_t *dma_channel_hw_addr(uint32_t channel) { return &rx_hw; }
+dma_channel_hw_t *dma_channel_hw_addr(uint32_t channel) {
+    assert(channel < 3);
+    return &dma_regs[channel];
+}
 void sim_rx_byte(uint8_t b) {
+    assert(dma_running[global_state.dma_rx_channel]);
     uart_rxbuf[rx_write]=b; rx_write=NEXT_RING_IDX(rx_write);
-    rx_hw.transfer_count=DMA_RX_BUFFER_SIZE-rx_write;
+    dma_regs[global_state.dma_rx_channel].write_addr = (uintptr_t)(uart_rxbuf + rx_write);
+    dma_channel_hw_t *rx = &dma_regs[global_state.dma_rx_channel];
+    assert(rx->transfer_count);
+    if (--rx->transfer_count == 0) {
+        dma_running[global_state.dma_rx_channel] = false;
+        if (dma_configs[global_state.dma_control_channel].enabled) {
+            rx->transfer_count = DMA_RX_BUFFER_SIZE;
+            dma_running[global_state.dma_rx_channel] = true;
+        }
+    }
+}
+dma_channel_config dma_get_channel_config(uint32_t channel) {
+    assert(channel < 3);
+    return dma_configs[channel];
+}
+void channel_config_set_enable(dma_channel_config *config, bool enabled) {
+    config->enabled = enabled;
+}
+void dma_channel_set_config(uint32_t channel, const dma_channel_config *config, bool trigger) {
+    assert(channel < 3);
+    dma_configs[channel] = *config;
+    if (trigger) dma_running[channel] = config->enabled;
+}
+void dma_channel_abort(uint32_t channel) {
+    assert(interrupt_depth && channel < 3);
+    assert(!dma_configs[global_state.dma_control_channel].enabled);
+    if (channel == global_state.dma_rx_channel) {
+        assert(dma_abort_count[global_state.dma_control_channel] ==
+               dma_abort_count[global_state.dma_rx_channel] + 1);
+        assert(!dma_running[global_state.dma_control_channel]);
+    }
+    ++dma_abort_count[channel];
+    if (channel == global_state.dma_control_channel && rx_reload_inflight) {
+        /* A control write accepted before EN cleared may still finish while
+         * SDK abort waits for BUSY to settle; RX must be stopped afterwards. */
+        dma_regs[global_state.dma_rx_channel].transfer_count = DMA_RX_BUFFER_SIZE;
+        dma_running[global_state.dma_rx_channel] = true;
+        rx_reload_inflight = false;
+    }
+    if (channel == global_state.dma_rx_channel && rx_abort_byte >= 0) {
+        sim_rx_byte((uint8_t)rx_abort_byte);
+        rx_abort_byte = -1;
+    }
+    /* RP2040 datasheet 2.5.5.3: abort clears TRANS_COUNT, not WRITE_ADDR. */
+    dma_regs[channel].transfer_count = 0;
+    dma_running[channel] = false;
+}
+void dma_channel_set_trans_count(uint32_t channel, uint32_t count, bool trigger) {
+    assert(interrupt_depth && channel < 3);
+    dma_regs[channel].transfer_count = count;
+    if (trigger) {
+        ++dma_restart_count[channel];
+        dma_running[channel] = dma_configs[channel].enabled && count;
+    }
+}
+/* Native privacy-boundary fixture: identities, producer position, in-flight
+ * beats and SDK abort/restart order remain independent from firmware helpers. */
+void sim_dma_rx_fixture(uint32_t consumer, uint32_t remaining, bool reload_inflight, int byte) {
+    assert(consumer < DMA_RX_BUFFER_SIZE && remaining <= DMA_RX_BUFFER_SIZE);
+    global_state.dma_ptr = consumer;
+    rx_write = (DMA_RX_BUFFER_SIZE - remaining) & (DMA_RX_BUFFER_SIZE - 1);
+    dma_regs[global_state.dma_rx_channel].transfer_count = remaining;
+    dma_regs[global_state.dma_rx_channel].write_addr = (uintptr_t)(uart_rxbuf + rx_write);
+    dma_regs[global_state.dma_control_channel].transfer_count = 1;
+    dma_running[global_state.dma_rx_channel] = remaining != 0;
+    dma_running[global_state.dma_control_channel] = reload_inflight;
+    dma_configs[global_state.dma_rx_channel].enabled = true;
+    dma_configs[global_state.dma_control_channel].enabled = true;
+    rx_reload_inflight = reload_inflight;
+    rx_abort_byte = byte;
+    memset(dma_abort_count, 0, sizeof(dma_abort_count));
+    memset(dma_restart_count, 0, sizeof(dma_restart_count));
+}
+void sim_dma_rx_assert_resumed(uint32_t remaining) {
+    assert(!interrupt_depth);
+    assert(dma_regs[global_state.dma_rx_channel].transfer_count == remaining);
+    assert(dma_regs[global_state.dma_control_channel].transfer_count == 1);
+    assert(dma_configs[global_state.dma_control_channel].enabled);
+    assert(dma_running[global_state.dma_rx_channel]);
+    assert(dma_abort_count[global_state.dma_rx_channel] == 1);
+    assert(dma_abort_count[global_state.dma_control_channel] == 1);
+    assert(dma_restart_count[global_state.dma_rx_channel] == 1);
+}
+void sim_dma_rx_assert_pauses(unsigned pauses) {
+    assert(!interrupt_depth);
+    assert(dma_abort_count[global_state.dma_rx_channel] == pauses);
+    assert(dma_abort_count[global_state.dma_control_channel] == pauses);
+    assert(dma_restart_count[global_state.dma_rx_channel] == pauses);
+    assert(dma_configs[global_state.dma_control_channel].enabled);
+    assert(dma_running[global_state.dma_rx_channel]);
 }
 /* Link against real TinyUSB declarations. Stack/transactions are explicit models. */
 void tud_task_ext(uint32_t timeout,bool in_isr) { }
@@ -185,13 +294,27 @@ void sim_init(uint8_t role, event_cb_t cb) {
     memset(&global_state,0,sizeof(global_state));
     memset(sim_flash,0xff,sizeof(sim_flash));
     global_state.board_role=role; global_state.config=default_config;
+    global_state.dma_rx_channel = 0;
+    global_state.dma_tx_channel = 1;
+    global_state.dma_control_channel = 2;
+    memset(dma_regs, 0, sizeof(dma_regs));
+    memset(dma_configs, 0, sizeof(dma_configs));
+    memset(dma_running, 0, sizeof(dma_running));
+    memset(dma_abort_count, 0, sizeof(dma_abort_count));
+    memset(dma_restart_count, 0, sizeof(dma_restart_count));
+    rx_write = 0;
+    dma_configs[0].enabled = dma_configs[2].enabled = true;
+    dma_running[0] = true;
+    rx_reload_inflight = false;
+    rx_abort_byte = -1;
     global_state.pointer_x=16000; global_state.pointer_y=16000;
     global_state._running_fw.version=192;
     queue_init(&global_state.kbd_queue,sizeof(hid_keyboard_report_t),KBD_QUEUE_LENGTH);
     queue_init(&global_state.mouse_queue,sizeof(mouse_report_t),MOUSE_QUEUE_LENGTH);
     queue_init(&global_state.uart_tx_queue,sizeof(uart_packet_t),UART_QUEUE_LENGTH);
     queue_init(&global_state.hid_queue_out,sizeof(hid_generic_pkt_t),HID_QUEUE_LENGTH);
-    firmware_sync_init(); rx_hw.transfer_count=DMA_RX_BUFFER_SIZE;
+    firmware_sync_init(); dma_regs[global_state.dma_rx_channel].transfer_count=DMA_RX_BUFFER_SIZE;
+    dma_regs[global_state.dma_rx_channel].write_addr = (uintptr_t)uart_rxbuf;
 #if SIM_HAS_CONFIG_CONFIRM
     config_confirm_init();
 #endif
@@ -206,6 +329,9 @@ void sim_init(uint8_t role, event_cb_t cb) {
 #endif
 #if SIM_HAS_KEYBOARD_SYNC
     keyboard_sync_init(role + 1);
+#endif
+#if SIM_HAS_CLIPBOARD
+    clipboard_init(role + 1);
 #endif
 #if SIM_HAS_DIAGNOSTIC_HISTORY
     /* The store and its cross-core bridge remain production code even when
