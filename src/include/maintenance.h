@@ -16,6 +16,7 @@ typedef enum {
     MAINTENANCE_UPDATE_ACTIVE,
     MAINTENANCE_REBOOT_PENDING,
     MAINTENANCE_BAD_ARGUMENT,
+    MAINTENANCE_ALREADY_CONFIG,
 } maintenance_start_t;
 
 typedef enum {
@@ -40,6 +41,10 @@ typedef struct {
 void maintenance_init(uint8_t role, uint64_t boot_session);
 void maintenance_shutdown(void);
 maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t now_us);
+/* Enter configuration mode on this physical board only. Already-active config
+ * mode is an idempotent no-op, never the keyboard shortcut's exit toggle.
+ * A started request uses the same LOCAL_READY/console-completion fence. */
+maintenance_start_t maintenance_request_config(uint32_t token, uint64_t now_us);
 bool maintenance_poll(maintenance_result_t *result);
 void maintenance_console_reply_complete(uint32_t token, uint64_t now_us);
 /* Cancellation cannot retract a remote request already admitted to UART.

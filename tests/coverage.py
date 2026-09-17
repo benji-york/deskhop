@@ -66,6 +66,7 @@ def build_and_run(name, output, hid_iterations):
         native = sim.build(output / 'native-boundaries', coverage=True,
                            executable=ROOT / 'tests/sim/test_native_boundaries.c')
         run([sys.executable, ROOT / 'tests/sim/run.py', '--library', library, '--known-gaps'], environment)
+        run([sys.executable, ROOT / 'tests/sim/test_config_confirm.py', '--library', library], environment)
         run([native], environment)
         sources = [ROOT / f'src/{source}.c' for source in sim.SOURCES]
         sources += [ROOT / f'src/{source}.c' for source in sim.OPTIONAL_SOURCES

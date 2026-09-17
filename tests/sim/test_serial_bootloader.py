@@ -323,6 +323,119 @@ def webhid_boundary(s):
                 s.expect(node, 'maintenance_reserved', 0)
 
 
+def config_start(s, node, token=TOKEN, expected=0):
+    s.do(node, 'maintenance_config', token)
+    s.expect(node, 'maintenance_start', expected)
+
+
+def config_unchanged(s, node):
+    safe(s, node)
+    s.expect(node, 'reboot', 0)
+    s.expect(node, 'watchdog_scratch', 0, index=5)
+    s.expect(node, 'watchdog_scratch', 0, index=6)
+    assert not frames(s, node, REQ), 'local config request escaped to peer'
+
+
+def config_local(s, node):
+    # A local command must ignore active output and never put either side in ROM.
+    s.do(node, 'select', 1 - node)
+    pump(s, 8)
+    generation = s.get(node, 'kbd_host_generation')
+    config_start(s, node)
+    s.expect(node, 'maintenance_reserved', 1)
+    result(s, node, 0, node)
+    s.do(node, 'maintenance_complete', TOKEN + 1)
+    s.do(node, 'task', TX)
+    config_unchanged(s, node)
+    s.do(node, 'maintenance_complete', TOKEN)
+    s.do(node, 'task', TX)
+    safe(s, node)
+    s.expect(node, 'reboot', 1)
+    s.expect(node, 'watchdog_scratch', 0xdeadf00f, index=5)
+    s.expect(node, 'watchdog_scratch', 0x00c0ffee, index=6)
+    s.expect(node, 'kbd_host_generation', generation + 1)
+    s.expect(node, 'maintenance_reserved', 0)
+    config_unchanged(s, 1 - node)
+    assert not frames(s, node, REQ)
+    # A second task pass cannot schedule a second transition/release.
+    s.do(node, 'task', TX)
+    s.expect(node, 'kbd_host_generation', generation + 1)
+
+
+def config_already(s, node):
+    s.do(node, 'set', 'config_mode', 0, 1)
+    generation = s.get(node, 'kbd_host_generation')
+    config_start(s, node, expected=5)
+    s.do(node, 'maintenance_poll')
+    s.expect(node, 'maintenance_ready', 0)
+    s.do(node, 'maintenance_complete', TOKEN)
+    pump(s, 3)
+    s.expect(node, 'config_mode', 1)
+    s.expect(node, 'maintenance_reserved', 0)
+    s.expect(node, 'kbd_host_generation', generation)
+    config_unchanged(s, node)
+
+
+def config_cancel(s, node, expire=False, stall=None):
+    config_start(s, node)
+    result(s, node, 0, node)
+    if stall:
+        s.do(node, stall, 1)
+        s.do(node, 'maintenance_complete', TOKEN)
+        s.do(node, 'task', TX)
+        config_unchanged(s, node)
+    if expire:
+        s.advance(3000001)
+        s.do(node, 'task', TX)
+        result(s, node, 7, node)
+    else:
+        # Includes cancellation after USB completion but before the wire drains.
+        s.do(node, 'maintenance_cancel', TOKEN)
+    if stall:
+        s.do(node, stall, 0)
+    s.do(node, 'maintenance_complete', TOKEN)
+    pump(s, 3)
+    s.expect(node, 'maintenance_reserved', 0)
+    config_unchanged(s, node)
+    config_unchanged(s, 1 - node)
+
+
+def config_rejected(s, node, guard):
+    if guard in ('updating', 'dirty', 'reboot'):
+        s.do(node, 'verify_update_state', {'updating': 1, 'dirty': 2, 'reboot': 3}[guard])
+        expected = 3 if guard == 'reboot' else 2
+    elif guard == 'source':
+        inject(s, node, 24, bytes(8))
+        expected = 2
+    elif guard in ('bootloader_peer_pending', 'bootloader_local_pending'):
+        s.do(node, 'set', guard, 0, 1)
+        expected = 1
+    elif guard == 'busy':
+        start(s, node, node)
+        expected = 1
+    else:
+        expected = 4
+    config_start(s, node, token=0 if guard == 'zero_token' else TOKEN + 1,
+                 expected=expected)
+    s.expect(node, 'watchdog_scratch', 0, index=5)
+    s.expect(node, 'watchdog_scratch', 0, index=6)
+    safe(s, node)
+    if guard == 'busy':
+        s.do(node, 'maintenance_cancel', TOKEN)
+    s.expect(node, 'maintenance_reserved', 0)
+
+
+def config_late_update(s, node):
+    config_start(s, node)
+    result(s, node, 0, node)
+    s.do(node, 'maintenance_complete', TOKEN)
+    s.do(node, 'verify_update_state', 2)
+    s.do(node, 'task', TX)
+    result(s, node, 7, node)
+    s.expect(node, 'maintenance_reserved', 0)
+    config_unchanged(s, node)
+
+
 SCENARIOS = {
     **{f'serial_bootloader_local_{n}': partial(local, node=n) for n in (0, 1)},
     **{f'serial_bootloader_remote_{n}': partial(remote, node=n) for n in (0, 1)},
@@ -352,5 +465,14 @@ SCENARIOS = {
        for r in (False, True)},
     'serial_bootloader_reservation': reservation,
     'serial_bootloader_webhid_boundary': webhid_boundary,
+    **{f'serial_config_local_{n}': partial(config_local, node=n) for n in (0, 1)},
+    **{f'serial_config_already_{n}': partial(config_already, node=n) for n in (0, 1)},
+    **{f'serial_config_late_update_{n}': partial(config_late_update, node=n) for n in (0, 1)},
+    **{f'serial_config_cancel_{n}_{expire}_{stall}':
+       partial(config_cancel, node=n, expire=expire, stall=stall)
+       for n in (0, 1) for expire in (False, True) for stall in (None, 'uart_stall', 'uart_busy')},
+    **{f'serial_config_rejected_{n}_{guard}': partial(config_rejected, node=n, guard=guard)
+       for n in (0, 1) for guard in ('updating', 'dirty', 'reboot', 'source', 'busy',
+                                    'bootloader_peer_pending', 'bootloader_local_pending', 'zero_token')},
 }
 BACKGROUND_FALSE = set(SCENARIOS)

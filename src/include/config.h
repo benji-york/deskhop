@@ -16,6 +16,7 @@
 #include "structs.h"
 #include "misc.h"
 #include "screen.h"
+#include "config_confirm.h"
 
 #define CONFIG_V8_SIZE_BYTES     136
 #define CONFIG_V8_RESERVED_OFFSET 128
@@ -55,11 +56,16 @@ void config_snapshot(const device_t *, config_t *);
 bool config_validate(const config_t *);
 bool config_repair(config_t *);
 bool config_set_value(device_t *, uint8_t, const uint8_t value[7]);
+bool config_set_value64(device_t *, uint8_t, uint64_t);
+uint32_t config_digest(const device_t *);
+config_confirm_status_t config_check_value64(const device_t *, uint8_t, uint64_t, uint32_t *);
+config_confirm_status_t config_save_confirmed(device_t *, uint32_t, uint32_t *);
 bool config_set_border(device_t *, uint8_t, const border_size_t *);
 bool config_set_screensaver_mode(device_t *, uint8_t, uint8_t);
 void config_set_screen_index(device_t *, uint8_t, uint32_t);
 void load_config(device_t *);
 void queue_cfg_packet(uart_packet_t *, device_t *);
+bool queue_cfg_packet_try(uart_packet_t *, device_t *);
 void reset_config_timer(device_t *);
 void save_config(device_t *);
 bool validate_packet(uart_packet_t *);

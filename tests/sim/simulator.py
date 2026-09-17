@@ -25,7 +25,9 @@ FIELDS={'output':0,'x':1,'y':2,'buttons':3,'reboot':4,'stopped':5,'kbd_queue':6,
         'maintenance_start':130,'maintenance_ready':131,'maintenance_token':132,
         'maintenance_target':133,'maintenance_outcome':134,'maintenance_reserved':135,
         'maintenance_source_seen':136,'maintenance_source_last':137,
-        'config_mode':50,'system_timeout':51,'ss_mode':30,'ss_idle':31,'ss_max':32,'ss_inactive':33,'ss_timeout':34,
+        'watchdog_scratch':138,'kbd_host_generation':139,
+        'config_mode':50,'system_timeout':51,'border_top':52,'border_bottom':53,
+        'ss_mode':30,'ss_idle':31,'ss_max':32,'ss_inactive':33,'ss_timeout':34,
         'zoom_debt':40,'zoom_overscroll':41,'zoom_pending':42,'zoom_direction':43,'zoom_deadline':44,
         'acceleration':35,'speed':36,'os':37,'led_indicator':38,
         'diagnostic_request_accepted':60,'diagnostic_poll_ready':61,'diagnostic_token':62,
@@ -93,6 +95,7 @@ class Simulation:
                 'sim_uart_stall':([C.c_int],None),
                 'sim_uart_busy':([C.c_int],None),
                 'sim_maintenance_request':([C.c_uint8,C.c_uint32],None),
+                'sim_maintenance_config':([C.c_uint32],None),
                 'sim_maintenance_poll':([],None),
                 'sim_maintenance_complete':([C.c_uint32],None),
                 'sim_maintenance_cancel':([C.c_uint32],None),
@@ -300,7 +303,7 @@ class Simulation:
     def do(self,node,op,*args,record=True):
         if record:self.steps.append({'node':node,'op':op,'args':list(args)})
         # Peripheral input and UART handling run on core1; host SET_REPORT on core0.
-        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll','history_request','history_poll','history_release','verify_request','verify_poll','verify_assess','verify_recheck','maintenance_request','maintenance_poll','maintenance_complete','maintenance_cancel','maintenance_session') else 1)
+        core=self.nodes[node].sim_task_core(self.task_id(node,args[0])) if op=='task' else (0 if op in ('host','led','endpoint','vendor','diagnostic_request','diagnostic_poll','history_request','history_poll','history_release','verify_request','verify_poll','verify_assess','verify_recheck','maintenance_request','maintenance_config','maintenance_poll','maintenance_complete','maintenance_cancel','maintenance_session') else 1)
         self.active.append((node,core))
         try:self._invoke(node,op,list(args))
         finally:self.active.pop()

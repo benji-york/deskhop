@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.6)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 set(VERSION_MAJOR 0)
-set(VERSION_MINOR 111)
+set(VERSION_MINOR 113)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -80,6 +80,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/fw_batch.c
   ${SRC_DIR}/firmware_batch.c
   ${SRC_DIR}/config_migration.c
+  ${SRC_DIR}/config_confirm.c
   ${SRC_DIR}/utils.c
   ${SRC_DIR}/handlers.c
   ${SRC_DIR}/setup.c

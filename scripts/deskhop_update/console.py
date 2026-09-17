@@ -1,6 +1,7 @@
 """Bounded POSIX CDC transport and strict, artifact-parameterized diagnostics.
 
-Only ``bootloader`` is disruptive. It is sent once, never retried, and a local
+Of the commands this transport sends, only ``bootloader`` is disruptive.
+It is sent once, never retried, and a local
 acceptance reply is not proof of ROM enumeration. Keep the context open through
 all PICOBOOT operations and normal application reboot, matching the successful
 macOS diagnostic. This lifetime alone has not resolved the observed USB timeout.
@@ -354,8 +355,10 @@ def validate_help(raw, require_bootloader=True):
     lines = frame_body(raw, "help", "help")
     commands = [line.split()[0] for line in lines if line.startswith("  ")]
     expected = ["help", "status", "history", "verify"]
-    require(commands == expected + ["bootloader"] if require_bootloader else commands in (expected, expected + ["bootloader"]),
-            "unexpected help command list")
+    supported = (expected + ["bootloader"], expected + ["bootloader", "config"])
+    if not require_bootloader:
+        supported += (expected,)
+    require(commands in supported, "unexpected help command list")
     phrases = ["GAP", "full 256KiB firmware including metadata; configuration excluded",
                "PASS describes a fresh scan", "Status image CRC is boot metadata only"]
     if "bootloader" in commands:
@@ -363,6 +366,9 @@ def validate_help(raw, require_bootloader=True):
         phrases += ["diagnostics and disruptive maintenance", "Diagnostics are read-only and query both boards",
                     "bounded peer timeouts", "bootloader A|B", "DISRUPTIVE", "disk-free USB ROM",
                     "physical A or B; no default/both", "target's USB-connected computer", "peer acceptance is not boot proof"]
+    if "config" in commands:
+        require(any(re.fullmatch(r"  config +DISRUPTIVE: connected board enters configuration mode\.", line)
+                    for line in lines), "missing connected-board config explanation")
     for phrase in phrases:
         require(any(phrase in line for line in lines), f"missing help explanation: {phrase}")
 

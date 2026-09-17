@@ -8,6 +8,7 @@
 #include "diagnostic_runtime.h"
 #include "diagnostic_verify.h"
 #include "maintenance.h"
+#include "config_confirm.h"
 #include <stdio.h>
 #ifdef DH_DEBUG
 #error The CDC regression must exercise a production console without DH_DEBUG
@@ -31,17 +32,25 @@ static uint64_t cdc_submitted_bytes, console_now_us;
 /* Console/USB contract double. Real maintenance admission, UART transactions,
  * updater guards and ROM entry are covered by the paired production simulator. */
 static maintenance_start_t maintenance_start = MAINTENANCE_STARTED;
-static bool maintenance_auto = true, maintenance_pending, maintenance_ready;
+static bool maintenance_auto = true, maintenance_pending, maintenance_ready, maintenance_config;
 static uint8_t maintenance_role, maintenance_target;
 static uint32_t maintenance_token;
-static unsigned maintenance_requests, maintenance_completions, maintenance_cancels, maintenance_polls;
+/* The real configuration engine is covered by the paired firmware simulator;
+ * this controller harness tests USB endpoint admission and console behavior. */
+bool config_confirm_usb_request(const uart_packet_t *packet, device_t *state) {
+    (void)packet;
+    (void)state;
+    return false;
+}
+void config_confirm_usb_disconnect(void) {}
+static unsigned maintenance_requests, maintenance_config_requests, maintenance_completions, maintenance_cancels, maintenance_polls;
 static maintenance_result_t maintenance_result;
 static void maintenance_publish(uint32_t token, uint8_t target, maintenance_outcome_t outcome) {
     CHECK(!maintenance_ready);
     maintenance_result = (maintenance_result_t){.token = token, .target = target, .outcome = outcome};
     maintenance_ready = true;
 }
-maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t now_us) {
+static maintenance_start_t maintenance_request_common(uint8_t target, uint32_t token) {
     ++maintenance_requests;
     CHECK(target < 2 && token != 0);
     if (maintenance_start != MAINTENANCE_STARTED)
@@ -54,6 +63,15 @@ maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t
         maintenance_publish(token, target, target == maintenance_role
                             ? MAINTENANCE_LOCAL_READY : MAINTENANCE_REMOTE_ACCEPTED);
     return MAINTENANCE_STARTED;
+}
+maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t now_us) {
+    maintenance_config = false;
+    return maintenance_request_common(target, token);
+}
+maintenance_start_t maintenance_request_config(uint32_t token, uint64_t now_us) {
+    ++maintenance_config_requests;
+    maintenance_config = true;
+    return maintenance_request_common(maintenance_role, token);
 }
 bool maintenance_poll(maintenance_result_t *result) {
     ++maintenance_polls;
@@ -68,7 +86,7 @@ bool maintenance_poll(maintenance_result_t *result) {
 }
 void maintenance_console_reply_complete(uint32_t token, uint64_t now_us) {
     CHECK(maintenance_pending && maintenance_target == maintenance_role && token == maintenance_token);
-    CHECK(strstr(cdc_bytes, "END bootloader\r\n") != NULL);
+    CHECK(strstr(cdc_bytes, maintenance_config ? "END config\r\n" : "END bootloader\r\n") != NULL);
     ++maintenance_completions;
     maintenance_pending = false;
 }
@@ -2127,6 +2145,202 @@ static void cdc_bootloader_cancel(void) {
     cdc_status_fields();
 }
 
+static void cdc_config_parser(void) {
+    bootloader_console_reset(OUTPUT_A);
+    unsigned before = maintenance_requests;
+    unsigned config_before = maintenance_config_requests;
+    const char *invalid[] = {
+        "config A\n", "config B\n", "config both\n", "config on\n",
+        "config off\n", "config \n", "config  \n", "config extra\n",
+    };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        cdc_capture_clear();
+        cdc_send(invalid[i]);
+        CHECK(occurrences("ERROR usage: config (connected board; no arguments)") == 1);
+        CHECK(occurrences("BEGIN config") == 0 && occurrences("deskhop> ") == 1);
+    }
+    const char *other_invalid[] = {" config\n", "CONFIG\n", "configuration\n", "config\t\n"};
+    for (unsigned i = 0; i < sizeof(other_invalid) / sizeof(other_invalid[0]); ++i) {
+        cdc_capture_clear();
+        cdc_send(other_invalid[i]);
+        CHECK(occurrences("ERROR") == 1 && occurrences("BEGIN config") == 0);
+    }
+    char oversized[96];
+    memset(oversized, 'x', sizeof(oversized));
+    memcpy(oversized, "config", 6);
+    oversized[sizeof(oversized) - 1] = '\n';
+    cdc_capture_clear();
+    cdc_send_bytes(oversized, sizeof(oversized));
+    CHECK(occurrences("ERROR line too long") == 1);
+    const char nul[] = "config\0ignored\n";
+    cdc_capture_clear();
+    cdc_send_bytes(nul, sizeof(nul) - 1);
+    CHECK(occurrences("ERROR command must contain printable ASCII") == 1);
+    CHECK(maintenance_requests == before && maintenance_config_requests == config_before);
+    cdc_capture_clear();
+    cdc_send("help\n");
+    CHECK(occurrences("END help") == 1 && occurrences("deskhop> ") == 1);
+    CHECK(strstr(cdc_bytes, "config") != NULL && strstr(cdc_bytes, "bootloader A|B") != NULL);
+    CHECK(cdc_count < 1280); /* Help remains complete in the existing fixed TX buffer. */
+}
+
+static void config_send_held(void) {
+    /* A queued command must not run while the mode-changing reply is pending. */
+    const char *commands = "config\nhelp\n";
+    complete_short_out(0x06, commands, (unsigned)strlen(commands));
+    for (unsigned tick = 0; tick < 32; ++tick)
+        console_tick();
+    CHECK(endpoint(0x86)->pending);
+    CHECK(occurrences("BEGIN help") == 0);
+}
+
+static void config_drive_to_final_newline(unsigned completions) {
+    unsigned tick;
+    for (tick = 0; tick < 256; ++tick) {
+        console_tick();
+        CHECK(maintenance_completions == completions);
+        if (!endpoint(0x86)->pending)
+            continue;
+        if (endpoint(0x86)->length == 1 && endpoint(0x86)->buffer[0] == '\n')
+            break;
+        complete(0x86, NULL, 0);
+    }
+    CHECK(tick < 256);
+    CHECK(tud_cdc_write_available() == CFG_TUD_CDC_TX_BUFSIZE);
+    CHECK(strstr(cdc_bytes, "END config\r") != NULL);
+    CHECK(strstr(cdc_bytes, "END config\r\n") == NULL);
+    CHECK(occurrences("BEGIN help") == 0);
+}
+
+static void cdc_config_completion(void) {
+    for (uint8_t role = OUTPUT_A; role <= OUTPUT_B; ++role) {
+        bootloader_console_reset(role);
+        global_state.active_output = role ^ 1; /* Focus never selects another Pico. */
+        unsigned before = maintenance_completions;
+        unsigned config_before = maintenance_config_requests;
+        unsigned total_before = maintenance_requests;
+        config_send_held();
+        CHECK(maintenance_config_requests == config_before + 1);
+        CHECK(maintenance_requests == total_before + 1 && maintenance_config);
+        CHECK(maintenance_target == role && maintenance_completions == before);
+        uint8_t keys[6] = {HID_KEY_C};
+        CHECK(tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keys));
+        host_count = 0;
+        complete(0x81, NULL, 0);
+        CHECK(host_count == 9 && host_bytes[3] == HID_KEY_C);
+        config_drive_to_final_newline(before);
+        char row[80];
+        snprintf(row, sizeof(row), "board=%c result=accepted scope=local\r\n", role == OUTPUT_A ? 'A' : 'B');
+        CHECK(strstr(cdc_bytes, row) != NULL);
+        CHECK(strstr(cdc_bytes, "action=enter_configuration_mode_after_reply\r\n") != NULL);
+        for (unsigned tick = 0; tick < 32; ++tick) console_tick();
+        CHECK(maintenance_completions == before && occurrences("BEGIN help") == 0);
+        complete(0x86, NULL, 0);
+        CHECK(maintenance_completions == before); /* USB callback cannot change modes. */
+        console_tick();
+        CHECK(maintenance_completions == before + 1);
+        CHECK(strstr(cdc_bytes, "END config\r\n") != NULL);
+        for (unsigned tick = 0; tick < 32; ++tick) console_tick();
+        CHECK(maintenance_completions == before + 1);
+        CHECK(occurrences("BEGIN help") == 0 && occurrences("deskhop> ") == 0);
+    }
+    global_state.active_output = OUTPUT_A;
+    bootloader_console_reset(OUTPUT_A);
+}
+
+static void cdc_config_rejections_and_stale_results(void) {
+    bootloader_console_reset(OUTPUT_A);
+    unsigned completions = maintenance_completions;
+    const maintenance_start_t starts[] = {MAINTENANCE_BUSY, MAINTENANCE_UPDATE_ACTIVE,
+                                         MAINTENANCE_REBOOT_PENDING, MAINTENANCE_BAD_ARGUMENT};
+    const char *reasons[] = {"busy", "update_active", "reboot_pending", "bad_argument"};
+    for (unsigned i = 0; i < sizeof(starts) / sizeof(starts[0]); ++i) {
+        maintenance_start = starts[i];
+        cdc_capture_clear();
+        cdc_send("config\n");
+        char row[96];
+        snprintf(row, sizeof(row), "board=A result=rejected reason=%s\r\n", reasons[i]);
+        CHECK(strstr(cdc_bytes, row) != NULL);
+        CHECK(occurrences("END config") == 1 && occurrences("deskhop> ") == 1);
+        CHECK(!maintenance_pending && maintenance_completions == completions);
+    }
+    maintenance_start = MAINTENANCE_STARTED;
+    maintenance_auto = false;
+    cdc_capture_clear();
+    cdc_send("config\n");
+    maintenance_publish(maintenance_token + 1, OUTPUT_A, MAINTENANCE_LOCAL_READY);
+    console_drain();
+    maintenance_publish(maintenance_token, OUTPUT_B, MAINTENANCE_LOCAL_READY);
+    console_drain();
+    CHECK(occurrences("BEGIN config") == 0 && maintenance_completions == completions);
+    unsigned cancels = maintenance_cancels;
+    console_now_us += UINT64_C(4000000);
+    console_drain();
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    CHECK(strstr(cdc_bytes, "result=unconfirmed reason=console_timeout") != NULL);
+    CHECK(occurrences("END config") == 1 && occurrences("deskhop> ") == 1);
+    CHECK(maintenance_completions == completions);
+    bootloader_console_reset(OUTPUT_A);
+}
+
+static void cdc_config_cancel(void) {
+    bootloader_console_reset(OUTPUT_A);
+    unsigned completions = maintenance_completions;
+    unsigned cancels = maintenance_cancels;
+    config_send_held();
+    console_now_us += UINT64_C(2000000);
+    console_tick();
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    console_drain();
+    CHECK(maintenance_completions == completions);
+    CHECK(strstr(cdc_bytes, "result=cancelled reason=usb_reply_timeout") != NULL);
+
+    bootloader_console_reset(OUTPUT_A);
+    cancels = maintenance_cancels;
+    config_send_held();
+    config_drive_to_final_newline(completions);
+    CHECK(control(0x21, 0x22, 0, 2, 0, NULL));
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    console_drain(); /* Even a late final newline cannot resurrect the cancelled mode change. */
+    CHECK(maintenance_completions == completions);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    console_drain();
+    cdc_capture_clear();
+    cdc_send("status\n");
+    cdc_status_fields();
+
+    bootloader_console_reset(OUTPUT_A);
+    cancels = maintenance_cancels;
+    config_send_held();
+    enumerate(false);
+    CHECK(maintenance_cancels == cancels + 1 && !maintenance_pending);
+    CHECK(control(0x21, 0x22, 1, 2, 0, NULL));
+    console_drain();
+    CHECK(maintenance_completions == completions);
+    cdc_capture_clear();
+    cdc_send("status\n");
+    cdc_status_fields();
+}
+
+static void cdc_config_already_active(void) {
+    CHECK(global_state.config_mode_active);
+    bootloader_console_reset(OUTPUT_A);
+    maintenance_start = MAINTENANCE_ALREADY_CONFIG;
+    unsigned completions = maintenance_completions;
+    unsigned cancels = maintenance_cancels;
+    unsigned requests = maintenance_config_requests;
+    cdc_send("config\r\nconfig\nhelp\n");
+    CHECK(occurrences("BEGIN config") == 2 && occurrences("END config") == 2);
+    CHECK(occurrences("result=already_active") == 2);
+    CHECK(occurrences("action=enter_configuration_mode_after_reply") == 0);
+    CHECK(occurrences("BEGIN help") == 1 && occurrences("END help") == 1);
+    CHECK(occurrences("deskhop> ") == 3);
+    CHECK(maintenance_config_requests == requests + 2);
+    CHECK(maintenance_completions == completions && maintenance_cancels == cancels);
+    CHECK(!maintenance_pending);
+    maintenance_start = MAINTENANCE_STARTED;
+}
+
 static void msc_bulk_command(uint8_t opcode, uint32_t bytes, unsigned expected_payload) {
     msc_cbw_t cbw = {.signature = MSC_CBW_SIGNATURE, .tag = 0x10203040,
                      .total_bytes = bytes, .dir = 0x80, .cmd_len = 10};
@@ -2217,6 +2431,14 @@ int main(void) {
     cdc_bootloader_remote_and_rejections();
     scenario = "CDC bootloader timeout, DTR drop and reset cancellation";
     cdc_bootloader_cancel();
+    scenario = "CDC config local-only strict grammar and complete help";
+    cdc_config_parser();
+    scenario = "CDC config both local roles, final IN completion and pipeline fence";
+    cdc_config_completion();
+    scenario = "CDC config admission rejections, stale outcomes and timeout";
+    cdc_config_rejections_and_stale_results();
+    scenario = "CDC config USB stall, DTR drop and reset cancellation";
+    cdc_config_cancel();
     scenario = "CDC close and reopen";
     cdc_disconnect_discards_partial();
     scenario = "suspend and unplug";
@@ -2231,6 +2453,8 @@ int main(void) {
     cdc_capture_clear();
     cdc_send("help\n");
     CHECK(strstr(cdc_bytes, "status") != NULL);
+    scenario = "CDC config already-active requests are idempotent";
+    cdc_config_already_active();
     scenario = "MSC controls and transfers";
     CHECK(control(0xa1, MSC_REQ_GET_MAX_LUN, 0, ITF_NUM_MSC, 1, NULL));
     CHECK(host_count == 1 && host_bytes[0] == 0);
@@ -2241,7 +2465,7 @@ int main(void) {
     CHECK(control(0, TUSB_REQ_SET_CONFIGURATION, 0, 0, 0, NULL));
     no_ep0_out_payload = false;
     CHECK(!tud_mounted() && !endpoint(0x81)->opened);
-    puts("TinyUSB virtual-DCD tests passed (normal/config CDC enumeration and real console streams, bootloader target/grammar/actual-IN-completion/cancellation, per-tick budgets, HID progress under CDC backpressure, control stages, HID LED, MSC SCSI, reconnect)");
+    puts("TinyUSB virtual-DCD tests passed (normal/config CDC enumeration and real console streams, bootloader target/grammar/actual-IN-completion/cancellation, local config grammar/idempotence/completion/cancellation, per-tick budgets, HID progress under CDC backpressure, control stages, HID LED, MSC SCSI, reconnect)");
     return 0;
 }
 

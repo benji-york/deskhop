@@ -9,7 +9,7 @@ SOURCES = ['defaults', 'constants', 'protocol', 'hid_parser', 'hid_report', 'key
 OPTIONAL_SOURCES = ['keyboard_sync', 'peer_status', 'diagnostic_peer', 'history', 'diagnostic_history',
                     'peer_history', 'diagnostic_peer_history', 'diagnostic_runtime', 'peer_observation',
                     'verification', 'peer_verify', 'diagnostic_verify', 'maintenance',
-                    'fw_batch', 'firmware_batch']
+                    'fw_batch', 'firmware_batch', 'config_confirm']
 
 def extract_tasks(main):
     """Keep table order and core ownership from the supplied production image."""
@@ -75,8 +75,12 @@ def build(output, source_root=ROOT, coverage=False, executable=None, sanitize=Fa
         flags += ['-DSIM_HAS_CONFIG_BOOTLOADER=1']
     if (source_root/'src/maintenance.c').exists():
         flags += ['-DSIM_HAS_MAINTENANCE=1']
+        if 'maintenance_request_config(' in (source_root/'src/include/maintenance.h').read_text():
+            flags += ['-DSIM_HAS_MAINTENANCE_CONFIG=1']
     if (source_root/'src/include/firmware_batch.h').exists():
         flags += ['-DSIM_HAS_FW_BATCH=1']
+    if (source_root/'src/include/config_confirm.h').exists():
+        flags += ['-DSIM_HAS_CONFIG_CONFIRM=1']
     cmd = [os.environ.get('CC', 'cc'), *flags, *([] if executable else ['-shared']),
            '-I'+str(output.parent), '-I'+str(ROOT/'tests/sim/include'), '-I'+str(source_root/'src/include'),
            '-I'+str(ROOT/'pico-sdk/src/common/pico_util/include'),

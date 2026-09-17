@@ -100,6 +100,9 @@ HELP = ("help\r\nBEGIN help\r\nDeskHop console - diagnostics and disruptive main
         "Status image CRC is boot metadata only; it is not the verify CRC.\r\n"
         "END help\r\ndeskhop> ").encode()
 
+CONFIG_HELP_LINE = b"  config                DISRUPTIVE: connected board enters configuration mode.\r\n"
+CONFIG_HELP = HELP.replace(b"Diagnostics are read-only", CONFIG_HELP_LINE + b"Diagnostics are read-only")
+
 
 def bootloader(role="A"):
     return (f"bootloader {role}\r\nBEGIN bootloader\r\nboard={role} result=accepted scope=local\r\n"
@@ -158,6 +161,46 @@ class ParserTests(unittest.TestCase):
                          (b"GAP", b"gap"), (b"diagnostics and disruptive maintenance", b"all commands are read-only")]:
             with self.subTest(old=old), self.assertRaises(c.ProtocolError):
                 c.validate_help(HELP.replace(old, new))
+
+    def test_help_accepts_known_versions_without_relaxing_command_lists(self):
+        legacy = HELP.replace(b"  bootloader A|B DISRUPTIVE: selected board enters disk-free USB ROM.\r\n", b"")
+        legacy = legacy.replace(b"diagnostics and disruptive maintenance", b"all commands are read-only")
+        c.validate_help(legacy, require_bootloader=False)
+        with self.assertRaises(c.ProtocolError):
+            c.validate_help(legacy)
+        for require_bootloader in (False, True):
+            for raw in (HELP, CONFIG_HELP):
+                with self.subTest(require_bootloader=require_bootloader, supported=raw):
+                    c.validate_help(raw, require_bootloader=require_bootloader)
+            bootloader_line = b"  bootloader A|B DISRUPTIVE: selected board enters disk-free USB ROM.\r\n"
+            malformed = (
+                CONFIG_HELP.replace(CONFIG_HELP_LINE, CONFIG_HELP_LINE * 2),
+                CONFIG_HELP.replace(CONFIG_HELP_LINE, b"  reboot Reboot.\r\n"),
+                CONFIG_HELP.replace(CONFIG_HELP_LINE, CONFIG_HELP_LINE + b"  mystery Unknown.\r\n"),
+                CONFIG_HELP.replace(bootloader_line + CONFIG_HELP_LINE, CONFIG_HELP_LINE + bootloader_line),
+                CONFIG_HELP.replace(bootloader_line, b""),
+                CONFIG_HELP.replace(b"  help Show help.\r\n  status Show status.\r\n",
+                                    b"  status Show status.\r\n  help Show help.\r\n"),
+            )
+            for raw in malformed:
+                with self.subTest(require_bootloader=require_bootloader, malformed=raw), self.assertRaises(c.ProtocolError):
+                    c.validate_help(raw, require_bootloader=require_bootloader)
+
+    def test_config_help_requires_exact_local_disruptive_description(self):
+        for replacement in (
+            b"  config Show configuration.\r\n",
+            CONFIG_HELP_LINE.replace(b"DISRUPTIVE: ", b""),
+            CONFIG_HELP_LINE.replace(b"connected board", b"selected board"),
+            CONFIG_HELP_LINE.replace(b"connected board", b"both boards"),
+            CONFIG_HELP_LINE.replace(b"config ", b"config A|B ", 1),
+            CONFIG_HELP_LINE.replace(b"configuration mode", b"disk-free USB ROM"),
+        ):
+            with self.subTest(replacement=replacement), self.assertRaises(c.ProtocolError):
+                c.validate_help(CONFIG_HELP.replace(CONFIG_HELP_LINE, replacement))
+        # Describing config elsewhere cannot disguise an unsafe command row.
+        with self.assertRaises(c.ProtocolError):
+            c.validate_help(CONFIG_HELP.replace(CONFIG_HELP_LINE,
+                            b"  config Safe command.\r\n" + CONFIG_HELP_LINE.lstrip()))
 
     def test_correct_wrong_correct_fresh_scans(self):
         first = self.parse_verify(verify())
@@ -373,7 +416,7 @@ class TransportTests(unittest.TestCase):
     def test_command_allowlist_prevents_control_or_maintenance_injection(self):
         fake = FakeSerial()
         with serial_double(fake), c.Console("/dev/cu.fixture") as con:
-            for command in ("bootloader A", "status\nbootloader A", "reboot", "history 65", "verify 66.1 deadbeef"):
+            for command in ("bootloader A", "config", "config A", "status\nbootloader A", "reboot", "history 65", "verify 66.1 deadbeef"):
                 with self.subTest(command=command), self.assertRaises(c.ProtocolError):
                     con.command(command)
         self.assertEqual(bytes(fake.sent), b"")

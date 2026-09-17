@@ -21,6 +21,7 @@ static bool server_ack_queued, server_ack_sent;
 static uint64_t client_started_us, client_sent_us, server_started_us;
 static uint32_t client_token;
 static uint8_t client_target;
+static bool client_config;
 static maintenance_result_t result;
 static bool result_pending;
 
@@ -53,6 +54,7 @@ static void finish_client(maintenance_outcome_t outcome) {
     result = (maintenance_result_t){client_token, client_target, outcome};
     result_pending = true;
     client_phase = CLIENT_IDLE;
+    client_config = false;
     local_reply_complete = false;
     firmware_update_lock();
     update_reservation_locked();
@@ -77,6 +79,7 @@ void maintenance_init(uint8_t role, uint64_t boot_session) {
     session_tag = boot_session ^ (boot_session >> 16) ^ (boot_session >> 32)
         ^ (boot_session >> 48);
     client_phase = CLIENT_IDLE;
+    client_config = false;
     server_phase = SERVER_IDLE;
     result_pending = false;
     last_request_valid = false;
@@ -89,7 +92,8 @@ void maintenance_init(uint8_t role, uint64_t boot_session) {
     initialized = true;
 }
 
-maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t now_us) {
+static maintenance_start_t request(uint8_t target, uint32_t token, uint64_t now_us,
+                                   bool config) {
     if (!initialized || local_role > 1 || target > 1 || !token)
         return MAINTENANCE_BAD_ARGUMENT;
     if (client_phase != CLIENT_IDLE || server_phase != SERVER_IDLE || result_pending)
@@ -101,8 +105,13 @@ maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t
         firmware_update_unlock();
         return safe;
     }
+    if (config && global_state.config_mode_active) {
+        firmware_update_unlock();
+        return MAINTENANCE_ALREADY_CONFIG;
+    }
     client_token = token;
     client_target = target;
+    client_config = config;
     client_started_us = now_us;
     local_reply_complete = false;
     client_payload[0] = MAINTENANCE_PROTOCOL_VERSION;
@@ -119,6 +128,14 @@ maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t
         result_pending = true;
     }
     return MAINTENANCE_STARTED;
+}
+
+maintenance_start_t maintenance_request(uint8_t target, uint32_t token, uint64_t now_us) {
+    return request(target, token, now_us, false);
+}
+
+maintenance_start_t maintenance_request_config(uint32_t token, uint64_t now_us) {
+    return request(local_role, token, now_us, true);
 }
 
 bool maintenance_poll(maintenance_result_t *output) {
@@ -140,6 +157,7 @@ void maintenance_cancel(uint32_t token, uint64_t now_us) {
     if (!initialized || !token || token != client_token)
         return;
     client_phase = CLIENT_IDLE;
+    client_config = false;
     local_reply_complete = false;
     result_pending = false;
     firmware_update_lock();
@@ -289,10 +307,21 @@ bool maintenance_task(uint64_t now_us) {
         bool reset = local_reply_complete && wire_idle();
         if (reset) {
             client_phase = CLIENT_IDLE;
-            reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
+            if (client_config) {
+                /* Match config hotkey entry without its exit-toggle behavior.
+                 * reboot_requested keeps the updater excluded after we release
+                 * the reservation; no ROM entry or flash write is involved. */
+                watchdog_hw->scratch[5] = MAGIC_WORD_1;
+                watchdog_hw->scratch[6] = MAGIC_WORD_2;
+                global_state.reboot_requested = true;
+            } else {
+                reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 1);
+            }
             update_reservation_locked();
         }
         firmware_update_unlock();
+        if (reset && client_config)
+            keyboard_focus_changed(&global_state);
         return reset;
     }
     if (client_phase == CLIENT_ADMISSION) {

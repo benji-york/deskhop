@@ -16,6 +16,9 @@
 #include "firmware_batch.h"
 #endif
 #include "config.h"
+#if SIM_HAS_CONFIG_CONFIRM
+#include "config_confirm.h"
+#endif
 #include "usb_descriptors.h"
 #include "user_config.h"
 #include "protocol.h"

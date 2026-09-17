@@ -108,9 +108,16 @@ void _queue_packet(uint8_t *payload, device_t *state, uint8_t type, uint8_t len,
 }
 
 void queue_cfg_packet(uart_packet_t *packet, device_t *state) {
+    (void)queue_cfg_packet_try(packet, state);
+}
+
+bool queue_cfg_packet_try(uart_packet_t *packet, device_t *state) {
     uint8_t raw_packet[CONFIG_PACKET_LENGTH];
     write_config_packet(raw_packet, packet);
-    _queue_packet(raw_packet, state, 0, CONFIG_PACKET_LENGTH, REPORT_ID_VENDOR, ITF_NUM_HID_VENDOR);
+    hid_generic_pkt_t generic_packet = {.type = 0, .len = CONFIG_PACKET_LENGTH,
+        .report_id = REPORT_ID_VENDOR, .instance = ITF_NUM_HID_VENDOR};
+    memcpy(generic_packet.data, raw_packet, sizeof(raw_packet));
+    return queue_try_add(&state->hid_queue_out, &generic_packet);
 }
 
 void queue_cc_packet(uint8_t *payload, device_t *state) {

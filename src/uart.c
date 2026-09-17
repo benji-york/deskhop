@@ -221,6 +221,12 @@ const uart_handler_t uart_handler[] = {
     {.type = GET_VAL_MSG, .handler = handle_api_msgs},
     {.type = GET_ALL_VALS_MSG, .handler = handle_api_read_all_msg},
     {.type = SET_VAL_MSG, .handler = handle_api_msgs},
+    {.type = CONFIG_CONFIRM_META_MSG, .handler = handle_config_confirm_msg},
+    {.type = CONFIG_CONFIRM_LO_MSG, .handler = handle_config_confirm_msg},
+    {.type = CONFIG_CONFIRM_HI_MSG, .handler = handle_config_confirm_msg},
+    {.type = CONFIG_CONFIRM_EXEC_MSG, .handler = handle_config_confirm_msg},
+    {.type = CONFIG_CONFIRM_ACK_META_MSG, .handler = handle_config_confirm_msg},
+    {.type = CONFIG_CONFIRM_ACK_VALUE_MSG, .handler = handle_config_confirm_msg},
 
     /* Firmware */
     {.type = REQUEST_BYTE_MSG, .handler = handle_request_byte_msg},

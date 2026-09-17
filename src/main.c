@@ -31,6 +31,7 @@ int main(void) {
         [4] = {.exec = &process_hid_queue_task,   .frequency = _HZ(1000)},   // | Check if there are any packets to send over vendor link
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
         [6] = {.exec = &diagnostic_console_task,  .frequency = _HZ(1000)},   // | Bounded serial work, after input and UART delivery
+        [7] = {.exec = &config_confirm_task,      .frequency = _HZ(1000)},   // | Deferred confirmed config operations
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core0);
 

@@ -27,6 +27,9 @@ static bool config_set_active;
 static bool config_set_on_read, config_read_on_copy, config_read_active, config_read_pending;
 static unsigned config_read_invoked;
 static bool config_write_border, config_write_opposite_edge;
+/* Exercise the confirmed-save contract at real NOR boundaries. The competing
+   operation is the production SET handler, not a direct config assignment. */
+static bool config_set_on_settings_program, corrupt_settings_program;
 static size_t config_copy_split;
 static config_t observed_config;
 static jmp_buf config_set_blocked;
@@ -264,6 +267,12 @@ void flash_range_erase(uint32_t offset, size_t length) {
 void flash_range_program(uint32_t offset, const uint8_t *bytes, size_t length) {
     before_flash(offset, length);
     CHECK(offset % FLASH_PAGE_SIZE == 0 && length % FLASH_PAGE_SIZE == 0);
+    if (offset == STORAGE_CONFIG_OFFSET && config_set_on_settings_program) {
+        config_set_on_settings_program = false;
+        interleaved_config_set();
+        CHECK(config_set_invoked == 1 && !config_set_pending);
+        event("config-set-before-settings-program", config_set_invoked);
+    }
     if (active_operation == cut_at_operation) {
         event("power-cut", cut_bytes);
         size_t changed = cut_bytes < length ? cut_bytes : length;
@@ -273,6 +282,16 @@ void flash_range_program(uint32_t offset, const uint8_t *bytes, size_t length) {
     for (size_t i = 0; i < length; ++i) {
         CHECK((storage_flash[offset + i] & bytes[i]) == bytes[i]);
         storage_flash[offset + i] &= bytes[i];
+    }
+    if (offset == STORAGE_CONFIG_OFFSET && corrupt_settings_program) {
+        corrupt_settings_program = false;
+        /* Model a silent NOR program failure by clearing an additional set
+           bit. Read-back must catch it; the SDK itself has no result code. */
+        size_t changed = offsetof(config_t, output[0].speed_x);
+        uint8_t value = storage_flash[offset + changed];
+        CHECK(value != 0);
+        storage_flash[offset + changed] = value & (uint8_t)(value - 1);
+        event("settings-program-corrupted", (uint32_t)changed);
     }
     ++programs;
     if (offset < STAGING_IMAGE_SIZE) ++page_programs[offset / FLASH_PAGE_SIZE];
@@ -327,6 +346,7 @@ static void fresh(const char *name) {
     config_set_on_read = config_read_on_copy = config_read_active = config_read_pending = false;
     config_read_invoked = 0;
     config_write_border = config_write_opposite_edge = false;
+    config_set_on_settings_program = corrupt_settings_program = false;
     config_copy_split = 0;
     event("scenario-start", 0);
     memset(&global_state, 0, sizeof(global_state));
@@ -1838,6 +1858,8 @@ static void verify_generation_saturation(void) {
     }
 }
 
+#include "test_confirmed_config.h"
+
 int main(int argc, char **argv) {
     if (argc > 1) seed = (uint32_t)strtoul(argv[1], NULL, 0);
     if (!seed) seed = 1;
@@ -1869,6 +1891,7 @@ int main(int argc, char **argv) {
     config_semantic_persistence();
     config_publication_schedules();
     config_full_width_legacy_timers();
+    confirmed_config_persistence();
     power_cut_observation();
     watchdog_contract();
     diagnostic_task_checkpoints();
@@ -1876,6 +1899,6 @@ int main(int argc, char **argv) {
     verify_nonblocking_and_bounds();
     verify_flash_mutation_generations();
     if (trace) fclose(trace);
-    printf("storage production-boundary tests passed (seed=%u; 2 word/4 batch images, batch faults/ownership/fallback, shuffled UF2, 6 serializations, 8 power cuts)\n", replay_seed);
+    printf("storage production-boundary tests passed (seed=%u; 2 word/4 batch images, batch faults/ownership/fallback, shuffled UF2, 6 serializations, confirmed config persistence/readback/conflicts, 8 power cuts)\n", replay_seed);
     return 0;
 }

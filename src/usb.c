@@ -10,6 +10,7 @@
  */
 
 #include "main.h"
+#include "config_confirm.h"
 #include "console.h"
 #include "hid_report.h"
 #include "diagnostic_history.h"
@@ -66,6 +67,11 @@ void tud_hid_set_report_cb(uint8_t instance,
         /* Only a certain packet types are accepted */
         if (!validate_packet(&packet))
             return;
+
+        if (packet.type >= CONFIG_CONFIRM_META_MSG && packet.type <= CONFIG_CONFIRM_EXEC_MSG) {
+            config_confirm_usb_request(&packet, &global_state);
+            return;
+        }
 
         /* The dispatcher accepts normalized packets only. The USB report's
            integrity was checked before constructing this internal checksum. */
@@ -131,6 +137,7 @@ void tud_mount_cb(void) {
 /* Invoked when device is unmounted */
 void tud_umount_cb(void) {
     global_state.tud_connected = false;
+    config_confirm_usb_disconnect();
     keyboard_host_reset(&global_state);
     diagnostic_history_record(HISTORY_USB_UNMOUNT, 0, 0, 0);
 #if DH_CONSOLE && CFG_TUD_CDC

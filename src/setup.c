@@ -242,6 +242,7 @@ void initial_setup(device_t *state) {
 
     /* Initialize UART queue */
     queue_init(&state->uart_tx_queue, sizeof(uart_packet_t), UART_QUEUE_LENGTH);
+    config_confirm_init();
 
     /* Capture identity before any peer update can replace flash metadata.
      * A random session distinguishes warm resets as well as power cycles. */

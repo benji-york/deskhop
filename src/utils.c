@@ -180,6 +180,13 @@ bool config_set_value(device_t *state, uint8_t index, const uint8_t value[7]) {
     uint64_t decoded = 0;
     for (unsigned i = 0; i < map->len; ++i)
         decoded |= (uint64_t)value[i] << (8 * i);
+    return config_set_value64(state, index, decoded);
+}
+
+bool config_set_value64(device_t *state, uint8_t index, uint64_t decoded) {
+    const field_map_t *map = get_field_map_entry(index);
+    if (!map || map->readonly)
+        return false;
     if (map->type == UINT64 && decoded > CONFIG_TIMEOUT_MAX_US)
         return false;
     if (!config_value_valid(index, decoded))
@@ -282,6 +289,56 @@ uint32_t calc_crc32(const uint8_t *s, size_t n) {
     }
 
     return ~crc;
+}
+
+/* Layout-independent checksum of user settings, not of C padding or the
+ * currently selected monitor. Version, then writable API fields in API order:
+ * each entry is id8, storage-width8, little-endian value (UINT64 really is 8).
+ * CRC32 is an accidental-change check, not an authentication mechanism. */
+static uint32_t config_digest_snapshot(const config_t *config) {
+    uint32_t crc = UINT32_MAX;
+    crc = crc32_iter(crc, 70);
+    crc = crc32_iter(crc, 4);
+    for (unsigned b = 0; b < 4; ++b)
+        crc = crc32_iter(crc, (uint8_t)(config->version >> (8 * b)));
+    for (size_t i = 0; i < get_field_map_length(); ++i) {
+        const field_map_t *map = get_field_map_index(i);
+        if (map->readonly) continue;
+        size_t size = config_field_size(map);
+        uint64_t value = 0;
+        memcpy(&value, (const uint8_t *)config + map->offset - offsetof(device_t, config), size);
+        crc = crc32_iter(crc, (uint8_t)map->idx);
+        crc = crc32_iter(crc, (uint8_t)size);
+        for (unsigned b = 0; b < size; ++b)
+            crc = crc32_iter(crc, (uint8_t)(value >> (8 * b)));
+    }
+    return ~crc;
+}
+
+uint32_t config_digest(const device_t *state) {
+    config_t snapshot;
+    config_snapshot(state, &snapshot);
+    return config_digest_snapshot(&snapshot);
+}
+
+/* Read-only expected-value proof. Compare the full storage width, including
+ * all eight timer bytes, and bind the result to that same coherent snapshot.
+ * A series of checks with one digest establishes all intended field values
+ * even when a peer rebooted between earlier independent SET operations. */
+config_confirm_status_t config_check_value64(const device_t *state, uint8_t index,
+                                             uint64_t expected, uint32_t *digest) {
+    if (!digest) return CONFIG_CONFIRM_INVALID;
+    *digest = 0;
+    const field_map_t *map = get_field_map_entry(index);
+    if (!map || map->readonly || !config_value_valid(index, expected)
+        || (map->type == UINT64 && expected > CONFIG_TIMEOUT_MAX_US))
+        return CONFIG_CONFIRM_INVALID;
+    config_t snapshot;
+    config_snapshot(state, &snapshot);
+    uint64_t actual = 0;
+    memcpy(&actual, config_field(&snapshot, map), config_field_size(map));
+    *digest = config_digest_snapshot(&snapshot);
+    return actual == expected ? CONFIG_CONFIRM_OK : CONFIG_CONFIRM_CONFLICT;
 }
 
 static uint32_t calculate_firmware_crc32_unlocked(void) {
@@ -524,6 +581,51 @@ void load_config(device_t *state) {
         save_config(state);
 }
 
+/* Called by the deferred core-0 command task, never from USB callbacks.
+ * Retain firmware ownership through readback, but do not hold the config lock
+ * across flash: a concurrent edit survives and changes the outcome to CONFLICT.
+ * This confirms persistence, not atomicity across boards or power-loss safety. */
+config_confirm_status_t config_save_confirmed(device_t *state, uint32_t expected,
+                                               uint32_t *actual) {
+    if (!actual) return CONFIG_CONFIRM_INVALID;
+    *actual = 0;
+    if (!firmware_update_try_lock()) return CONFIG_CONFIRM_BUSY;
+    if (state->fw.upgrade_in_progress || state->fw.image_dirty || state->reboot_requested
+        || state->maintenance_reserved || state->config_bootloader_local_pending
+        || state->config_bootloader_peer_pending) {
+        firmware_update_unlock();
+        return CONFIG_CONFIRM_BUSY;
+    }
+    config_t snapshot;
+    config_snapshot(state, &snapshot);
+    *actual = config_digest_snapshot(&snapshot);
+    if (!config_validate(&snapshot) || *actual != expected) {
+        firmware_update_unlock();
+        return *actual != expected ? CONFIG_CONFIRM_CONFLICT : CONFIG_CONFIRM_INVALID;
+    }
+    snapshot.checksum = calc_crc32((const uint8_t *)&snapshot, offsetof(config_t, checksum));
+    memset(state->page_buffer, 0, FLASH_PAGE_SIZE);
+    memcpy(state->page_buffer, &snapshot, sizeof(snapshot));
+
+    critical_section_enter_blocking(&flash_access_critical_section);
+    bool identical = memcmp(ADDR_CONFIG, state->page_buffer, FLASH_PAGE_SIZE) == 0;
+    critical_section_exit(&flash_access_critical_section);
+    if (!identical)
+        write_flash_page((uint32_t)ADDR_CONFIG - XIP_BASE, state->page_buffer);
+    critical_section_enter_blocking(&flash_access_critical_section);
+    bool verified = memcmp(ADDR_CONFIG, state->page_buffer, FLASH_PAGE_SIZE) == 0;
+    critical_section_exit(&flash_access_critical_section);
+
+    config_lock();
+    *actual = config_digest_snapshot(&state->config);
+    bool unchanged = *actual == expected;
+    if (verified && unchanged) state->config.checksum = snapshot.checksum;
+    config_unlock();
+    firmware_update_unlock();
+    if (!verified) return CONFIG_CONFIRM_FLASH_MISMATCH;
+    return unchanged ? CONFIG_CONFIRM_OK : CONFIG_CONFIRM_CONFLICT;
+}
+
 void save_config(device_t *state) {
     firmware_update_lock();
     if (state->fw.upgrade_in_progress) {
@@ -638,6 +740,10 @@ bool fetch_packet(device_t *state) {
 /* Validating any input is mandatory. Only packets of these type are allowed
    to be sent to the device over configuration endpoint. */
 bool validate_packet(uart_packet_t *packet) {
+    /* Multipart confirmed commands must never use the lossy legacy proxy
+     * envelope, and ACK packets are never accepted from WebHID. */
+    if (packet->type >= CONFIG_CONFIRM_META_MSG && packet->type <= CONFIG_CONFIRM_EXEC_MSG)
+        return true;
     const enum packet_type_e ALLOWED_PACKETS[] = {
         FLASH_LED_MSG,
         GET_VAL_MSG,

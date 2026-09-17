@@ -6,6 +6,14 @@ models they use. The runner's generated execution coverage, when enabled, is a
 separate measurement; compiling a translation unit does not execute every branch
 in it. No source-line percentage is inferred from suite counts.
 
+The [v0.112 confirmed-save addition](confirmed-config-saves-v112.md) adds browser
+intent/retry tests, actual paired command routing from both USB origins, and
+native persistence/expected-value checks. The paired coverage layer executes
+the new service using its instrumented library; storage covers the snapshot,
+digest and readback helpers. Existing percentages below are historical and
+are not extrapolated to the new code. The JavaScript endpoint double and paired
+C transport tests remain separate layers, not a real browser-to-silicon test.
+
 The deployed [v0.105 batch-transfer addition](batched-transfer-v105.md) is covered
 at three layers: pure `fw_batch.c` protocol/collector tests, production
 `firmware_batch.c` and page-commit logic over the storage oracle, and paired

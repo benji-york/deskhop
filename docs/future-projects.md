@@ -2,11 +2,11 @@
 
 Started 2026-09-16 from a discussion of unused flash capacity in then-deployed
 v0.108; expanded the same day to include the remaining project docket. The
-accepted device firmware is now v0.111, including the profiling/startup-guard
-changes developed on `codex/firmware-transfer-profiling`. Benji authorized merging
-and pushing this hardware-tested release after functional acceptance. Saving this docket does
-not authorize implementation, hardware experiments, or removal of old
-files/worktrees.
+accepted device firmware is now v0.113, including confirmed two-Pico saves and
+serial configuration-mode entry. Benji accepted physical input and the browser
+Save check and authorized merging and pushing the tested release. Saving this
+docket does not authorize implementation, hardware experiments, or removal of
+old files/worktrees.
 
 These are proposals and follow-ups, not promises about current behavior.
 Section numbers identify topics; the suggested priority order is below.
@@ -21,7 +21,12 @@ Section numbers identify topics; the suggested priority order is below.
 2. [Power-loss-safe settings](#1-power-loss-safe-settings-storage), followed by
    [recoverable firmware installation](#2-recoverable-firmware-installation-and-rollback).
    These are separate projects, not part of the completed configuration validation.
-3. [Acknowledged two-Pico configuration saves](#8-reliable-two-pico-configuration-saves).
+3. [Acknowledged two-Pico configuration saves](#8-reliable-two-pico-configuration-saves):
+   v0.112 implementation is included in deployed, firmware-verified v0.113 on
+   `codex/confirmed-config-saves`; serial config entry is now hardware-verified.
+   Physical input and the browser Save check are accepted. This implementation
+   is complete and its publication is authorized; cross-board atomicity and
+   power-loss-safe storage remain separate projects.
 4. [Composed end-to-end tests](#9-higher-fidelity-end-to-end-tests).
 
 The [normal-upgrade hardware acceptance](#10-normal-upgrade-hardware-acceptance)
@@ -246,7 +251,26 @@ Successful propagation alone is not evidence of acceleration.
 
 ## 8. Reliable two-Pico configuration saves
 
-**Remaining issue:** v0.109 validates values, but the protocol has no acknowledged
+**Status:** v0.112 implementation on `codex/confirmed-config-saves` adds
+capability-gated per-board apply/save acknowledgements, exact saved-page readback,
+digest-bound persistence, atomic border-pair apply and explicit partial/unknown
+browser results. All 66 deep-test steps and the ARM build passed. Two AFK
+attempts failed before any write. After Benji power-cycled, the fresh retry
+completed in 23.728236 seconds: both boards verified on v0.112, A's settings
+unchanged, automatic B propagation via 1024 pages with no words/retries.
+Physical input and browser Save have been accepted on v0.113, completing the
+authorized commit/merge/push gate. See the
+[implementation record](testing/confirmed-config-saves-v112.md).
+The v0.113 follow-up adds serial `config` entry: both Picos deployed and CRC
+verified in 23.625701 seconds; actual local entry, mounted-page identity,
+idempotence and exit to normal mode passed. The browser Save check was initially
+deferred while Benji was away and subsequently accepted with "Save looks good".
+This was a no-edit Save check, not a real-device edited-value or failure test. See the
+[serial-mode hardware record](testing/serial-config-v113.md).
+This deliberately does not implement atomic two-board saving or power-loss-safe
+storage (section 1).
+
+**Historical issue:** v0.109 validates values, but its protocol has no acknowledged
 peer SET or flash commit. Local RAM readback cannot confirm that both Picos saved
 the settings. Different starting border values can also cause the peer to reject
 an edit order valid on the connected board. See

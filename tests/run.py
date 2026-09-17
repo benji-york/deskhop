@@ -55,6 +55,7 @@ def main():
     run('WebConfig auto-start',[node,'tests/test_webconfig_autostart.js'])
     run('WebConfig Bootloader button',[node,'tests/test_webconfig_bootloader.js'])
     run('WebConfig timer units',[node,'tests/test_webconfig_timers.js'])
+    run('WebConfig confirmed two-Pico saves',[node,'tests/test_webconfig_confirmed_saves.js'])
     hid_flags=['-Wno-unused-parameter','-Wno-sign-compare','-Itests/hid_stubs','-Ipico-sdk/lib/tinyusb/src']
     hid_sources=['src/hid_parser.c','src/hid_report.c','src/keyboard.c','src/usb.c','src/reboot_hotkey.c',
                  'tests/history_stub.c']
@@ -83,6 +84,9 @@ def main():
     run('configuration output-identity regression',[crashes,'identity'])
     run('paired production firmware',[sys.executable,'tests/sim/run.py','--known-gaps'],timeout=300)
     run('simulator contract checks',[sys.executable,'tests/sim/test_harness.py'])
+    run('confirmed configuration paired transport',
+        [sys.executable,'tests/sim/test_config_confirm.py',
+         *(['--all-orders'] if a.tier=='deep' else [])],timeout=300)
     run('firmware startup guard and historical starvation witnesses',
         [sys.executable,'tests/sim/test_fw_startup.py','--library',BUILD/'sim/node.so',
          '--seeds','1',*(['--full'] if a.tier=='deep' else []),

@@ -50,6 +50,7 @@ static struct {
     peer_status_result_t peer_result;
     bool verify_active, verify_ready[2], verify_emitted[2];
     bool bootloader_active, bootloader_reply, bootloader_fence, bootloader_drained;
+    bool config_request;
     uint8_t bootloader_target;
     uint64_t now_us, bootloader_started_us;
     uint16_t verify_version;
@@ -73,6 +74,7 @@ void console_disconnect(void) {
         maintenance_cancel(console.query_token, console.now_us);
     console.bootloader_active = console.bootloader_reply = false;
     console.bootloader_fence = console.bootloader_drained = false;
+    console.config_request = false;
     console.connected = false;
     console.previous_cr = false;
     console.line_error = LINE_OK;
@@ -684,18 +686,27 @@ static void emit_verify_tick(uint64_t now_us) {
 }
 
 static void finish_bootloader(const char *outcome, const char *reason) {
+    const char *name = console.config_request ? "config" : "bootloader";
     console.bootloader_active = console.bootloader_reply = false;
     console.bootloader_fence = console.bootloader_drained = false;
-    appendf("BEGIN bootloader\r\nboard=%c result=%s reason=%s\r\nEND bootloader\r\n",
-            console.bootloader_target == 0 ? 'A' : 'B', outcome, reason);
+    appendf("BEGIN %s\r\nboard=%c result=%s reason=%s\r\nEND %s\r\n",
+            name, console.bootloader_target == 0 ? 'A' : 'B', outcome, reason, name);
+    console.config_request = false;
     append(prompt);
 }
 
-static void begin_bootloader(uint8_t target, uint64_t now_us) {
+static void begin_console_maintenance(uint8_t target, bool config_request, uint64_t now_us) {
     console.bootloader_target = target;
+    console.config_request = config_request;
     if (++console.query_token == 0)
         ++console.query_token;
-    maintenance_start_t result = maintenance_request(target, console.query_token, now_us);
+    maintenance_start_t result = config_request
+        ? maintenance_request_config(console.query_token, now_us)
+        : maintenance_request(target, console.query_token, now_us);
+    if (config_request && result == MAINTENANCE_ALREADY_CONFIG) {
+        finish_bootloader("already_active", "no_reboot");
+        return;
+    }
     if (result != MAINTENANCE_STARTED) {
         const char *reason = result == MAINTENANCE_UPDATE_ACTIVE ? "update_active"
                            : result == MAINTENANCE_REBOOT_PENDING ? "reboot_pending"
@@ -721,9 +732,11 @@ static void poll_bootloader(uint64_t now_us) {
             console.bootloader_reply = true;
             console.bootloader_fence = console.bootloader_drained = false;
             console.bootloader_started_us = now_us;
-            appendf("BEGIN bootloader\r\nboard=%c result=accepted scope=local\r\n"
-                    "action=enter_disk_free_usb_rom_after_reply\r\nEND bootloader\r",
-                    console.board);
+            const char *name = console.config_request ? "config" : "bootloader";
+            appendf("BEGIN %s\r\nboard=%c result=accepted scope=local\r\n"
+                    "action=%s\r\nEND %s\r", name, console.board,
+                    console.config_request ? "enter_configuration_mode_after_reply"
+                                           : "enter_disk_free_usb_rom_after_reply", name);
             break;
         case MAINTENANCE_REMOTE_ACCEPTED:
             finish_bootloader("accepted", "peer_admitted_not_boot_proof");
@@ -765,6 +778,7 @@ static void command(uint64_t now_us) {
                "  history [count]       Show recent events (default 16; 1..64 per board).\r\n"
                "  verify <build> <crc32> Check both firmware images.\r\n"
                "  bootloader A|B        DISRUPTIVE: selected board enters disk-free USB ROM.\r\n"
+               "  config                DISRUPTIVE: connected board enters configuration mode.\r\n"
                "\r\n"
                "Diagnostics are read-only and query both boards with bounded peer timeouts.\r\n"
                "Bootloader requires physical A or B; no default/both. Upload with picotool\r\n"
@@ -776,7 +790,6 @@ static void command(uint64_t now_us) {
                "Verify CRC: full 256KiB firmware including metadata; configuration excluded.\r\n"
                "PASS describes a fresh scan; rerun verify after changes.\r\n"
                "Status image CRC is boot metadata only; it is not the verify CRC.\r\n"
-               "Enter submits; Backspace edits; Ctrl-C cancels a line.\r\n"
                "END help\r\n");
     } else if (strcmp(console.line, "status") == 0) {
         /* Identity is captured before USB/core 1 start. In particular, do not
@@ -816,12 +829,20 @@ static void command(uint64_t now_us) {
             append("ERROR usage: verify <major.minor> <8 hex CRC32 digits>\r\n");
     } else if (strcmp(console.line, "bootloader") == 0 || strncmp(console.line, "bootloader ", 11) == 0) {
         if (strcmp(console.line, "bootloader A") == 0 || strcmp(console.line, "bootloader B") == 0) {
-            begin_bootloader((uint8_t)(console.line[11] - 'A'), now_us);
+            begin_console_maintenance((uint8_t)(console.line[11] - 'A'), false, now_us);
             console.line_used = 0;
             console.line_error = LINE_OK;
             return; /* The asynchronous response (or rejection) owns its prompt. */
         }
         append("ERROR usage: bootloader A|B (physical board; exactly one target)\r\n");
+    } else if (strcmp(console.line, "config") == 0 || strncmp(console.line, "config ", 7) == 0) {
+        if (strcmp(console.line, "config") == 0) {
+            begin_console_maintenance((uint8_t)(console.board - 'A'), true, now_us);
+            console.line_used = 0;
+            console.line_error = LINE_OK;
+            return;
+        }
+        append("ERROR usage: config (connected board; no arguments)\r\n");
     } else if (console.line_used != 0) {
         append("ERROR unknown command; type help\r\n");
     }

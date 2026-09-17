@@ -192,6 +192,9 @@ void sim_init(uint8_t role, event_cb_t cb) {
     queue_init(&global_state.uart_tx_queue,sizeof(uart_packet_t),UART_QUEUE_LENGTH);
     queue_init(&global_state.hid_queue_out,sizeof(hid_generic_pkt_t),HID_QUEUE_LENGTH);
     firmware_sync_init(); rx_hw.transfer_count=DMA_RX_BUFFER_SIZE;
+#if SIM_HAS_CONFIG_CONFIRM
+    config_confirm_init();
+#endif
 #if SIM_HAS_FW_BATCH
     firmware_batch_init(&global_state, role + 1);
 #endif
@@ -224,6 +227,9 @@ void sim_init(uint8_t role, event_cb_t cb) {
 #endif
 }
 void sim_destroy(void) {
+#if SIM_HAS_CONFIG_CONFIRM
+    config_confirm_shutdown();
+#endif
 #if SIM_HAS_MAINTENANCE
     maintenance_shutdown();
 #endif
@@ -252,6 +258,15 @@ void sim_maintenance_request(uint8_t target, uint32_t token) {
     maintenance_start_result = 4;
 #endif
     emit(18, token, maintenance_start_result, &target, sizeof(target));
+}
+void sim_maintenance_config(uint32_t token) {
+#if SIM_HAS_MAINTENANCE_CONFIG
+    maintenance_start_result = maintenance_request_config(token, now_us);
+#else
+    maintenance_start_result = 4;
+#endif
+    emit(18, token, maintenance_start_result, &global_state.board_role,
+         sizeof(global_state.board_role));
 }
 void sim_maintenance_poll(void) {
 #if SIM_HAS_MAINTENANCE
@@ -501,6 +516,8 @@ int64_t sim_get(int field,int index) {
       case 44:return s->zoom_assist[index].exit_deadline;
       case 50:return s->config_mode_active;
       case 51:return s->config.screensaver_system_timeout_sec;
+      case 52:assert(index >= 0 && index < 2);return s->config.output[index].border.top;
+      case 53:assert(index >= 0 && index < 2);return s->config.output[index].border.bottom;
       case 60:return diagnostic_request_accepted;
       case 61:return diagnostic_poll_ready;
       case 130:return maintenance_start_result;
@@ -514,6 +531,12 @@ int64_t sim_get(int field,int index) {
       case 137:return s->maintenance_source_last_us;
 #else
       case 132:case 133:case 134:case 135:case 136:case 137:return 0;
+#endif
+      case 138:assert(index >= 0 && index < 8);return watchdog_hw->scratch[index];
+#if SIM_HAS_KEYBOARD_SYNC
+      case 139:return s->kbd_host_generation;
+#else
+      case 139:return 0;
 #endif
       case 110:return verify_request_accepted;
       case 111:return verify_poll_ready;
@@ -594,6 +617,10 @@ void sim_set(int field,int index,int64_t value) {
     switch(field) {
       case 1:s->pointer_x=value;break; case 2:s->pointer_y=value;break;
       case 13:s->gaming_mode=value;break;
+#if SIM_HAS_CONFIG_BOOTLOADER
+      case 25:s->config_bootloader_peer_pending=value;break;
+      case 26:s->config_bootloader_local_pending=value;break;
+#endif
       case 30:s->config.output[index].screensaver.mode=value;break;
       case 31:s->config.output[index].screensaver.idle_time_us=value;break;
       case 32:s->config.output[index].screensaver.max_time_us=value;break;
@@ -604,6 +631,8 @@ void sim_set(int field,int index,int64_t value) {
       case 37:s->config.output[index].os=value;break;
       case 38:s->config.kbd_led_as_indicator=value;break;
       case 50:s->config_mode_active=value;break;
+      case 52:assert(index >= 0 && index < 2);s->config.output[index].border.top=value;break;
+      case 53:assert(index >= 0 && index < 2);s->config.output[index].border.bottom=value;break;
       default:assert(false);
     }
 }

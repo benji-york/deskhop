@@ -1,4 +1,4 @@
-/* USB diagnostics and explicit bootloader maintenance. All entry points belong
+/* USB diagnostics and explicit bootloader/config maintenance. All entry points belong
  * to core 0. Firmware uploads remain external to the console. */
 #pragma once
 

@@ -8,7 +8,96 @@ README.
 
 Snapshot: 2026-09-16
 
-## Current accepted device release: v0.111 firmware-advertisement startup guard
+## Separate task: one-way clipboard typing (requirements, not deployed)
+
+Benji requested a new task to implement fixed-size, on-demand text transfer from
+personal Mac A to work Mac B. A shortcut on B requests A's current clipboard;
+accept the entire supported text only if it fits in 1024 bytes, otherwise reject
+it. No truncation, unlimited streaming or old-cache fallback. Validate the full
+message before emitting paced, cancellable keystrokes on B. No software is to be
+installed on B, and B's clipboard is neither read nor changed.
+
+**Latest explicit helper decision:** Benji chose **Swift**, not Zig, and wants a
+native macOS **menu-bar app**, easy installation, and automatic startup. Provide
+a normal `.app` bundle and convenient packaging/install instructions, plus a
+user-visible **Launch at login** option using the supported macOS login-item
+mechanism. A user-session login item is appropriate for clipboard access; do not
+make a root/system boot daemon. Include connection status, Pause/Resume and Quit
+without displaying or logging clipboard contents. Building this capability is
+authorized; silently installing/enabling the login item or flashing the new
+feature is not. Pin the supported macOS version and document signing/notarization
+limitations honestly; do not disable Gatekeeper or alter security settings.
+
+The new task was requested as `Implement one-way 1 KiB clipboard typing`, in its
+own worktree based on main. These requirements supersede the earlier exploratory
+discussion of a Zig CLI helper. Keep that feature on its own branch; integrate
+the published v0.113 baseline there without deploying the clipboard feature.
+
+## Current accepted device release: v0.113 confirmed saves and serial config
+
+On the connected Pico's USB serial console, type `config` and Enter. This is a
+separate, local-only command: no A/B parameter, firmware upload or change to
+`bootloader A|B`. It reboots that Pico into the same configuration mode as L3-C;
+open the newly mounted DESKHOP `CONFIG.HTM` in Chrome and connect to DeskHop.
+The other Pico remains in normal mode and can receive confirmed settings writes
+over UART. Use the config page's Exit action to return to normal operation.
+
+The command waits for actual USB completion of its response and UART drain,
+rejects active/dirty updates and competing maintenance, and cancels on a stalled
+reply or terminal disconnect before authorization. `accepted` is permission to
+reboot, not proof that config USB enumerated; observe the configuration device.
+In configuration mode another `config` returns `already_active` without exiting
+or rebooting. Invalid arguments are rejected. Unsaved RAM edits can be lost on
+entry, as with the keyboard shortcut. The command does not save settings.
+
+This follow-up includes v0.112 confirmed saves. Validation and physical evidence
+are tracked in [the v0.113 record](docs/testing/serial-config-v113.md). Benji
+separately authorized commit, merge and push after successful verification.
+
+All deep-tier checks passed in 427.151 seconds and the ARM build passed. The
+normal upgrade completed in 23.625701 seconds without a retry or power cycle;
+both Picos passed fresh full-slot CRC `f530270f`, and A's saved settings were
+unchanged. Actual serial `config` on A mounted `/Volumes/DESKHOP` with the exact
+current config page. A second command returned `already_active`; neither Pico
+rebooted. After a safe disk unmount, the existing configuration Exit report
+returned A to normal USB mode. Final status confirmed both v0.113 builds, idle
+updaters and an unchanged B boot session. Benji has now accepted typing,
+right-click, switching, focus arrows and zoom assist, and authorized commit,
+merge and push once verified. Benji then reported **"Save looks good"**, completing
+the release acceptance gate. The requested Save check made no settings edits;
+this is user-observed acceptance, not an agent-captured browser receipt or an
+edited-value persistence test. The device is back in normal mode. The clipboard
+feature is being implemented in its separate task, not in this release.
+
+## Previous deployment: v0.112 confirmed two-Pico configuration saves
+
+Branch `codex/confirmed-config-saves` implements acknowledged per-Pico apply and
+verified persistence. All 66 deep-test steps and the ARM build passed. The first
+two guarded attempts hit the ROM read hang before writing; a checked normal
+reboot also failed. Benji power-cycled the pair, then the fresh normal-mode retry
+succeeded in 23.728236 seconds. Both Picos then ran verified v0.112 (full-slot CRC
+`e49caa16`), with both cores progressing and A's saved settings byte-identical.
+B auto-propagated using 1024 pages, zero words and zero retries. Evidence:
+`build/updater/runs/20260916T214920Z-zzaryspy/` in
+`/private/tmp/deskhop-confirmed-saves.X8z0OT`.
+Physical input and configuration-page acceptance were completed on the
+superseding v0.113 release above, which includes this implementation. See the
+[protocol, UI and validation record](docs/testing/confirmed-config-saves-v112.md).
+
+The updated page probes both Picos before new writes. Ordinary changes report
+RAM application separately from Save; border pairs apply together on Save.
+Successful Save explicitly reports **A and B saved to flash and verified**.
+Timeouts mean unknown, not failed or saved. Partial outcomes identify each
+physical board. Retry Save explicitly after connectivity is restored; unconfirmed
+edits survive Read so the peer is not skipped. Read itself still shows only the
+connected board's values. A warning means both boards saved but their settings
+digests differ; untouched historical differences are not silently synchronized.
+
+Use the newly embedded page after upgrading both Picos. An old page retains the
+old unacknowledged behavior; a new page refuses writes if either board does not
+support confirmation. Save is not atomic across boards or power-loss-safe.
+
+## Previous accepted device release: v0.111 firmware-advertisement startup guard
 
 Benji authorized the narrow follow-up implementation. Firmware metadata
 advertisements are now suppressed until monotonic uptime reaches one second;
@@ -19,7 +108,7 @@ config/maintenance and in-progress UF2-drop behavior is preserved.
 
 This is a bounded mitigation for the observed direct-device startup pattern,
 not a guarantee that every USB device/hub has finished enumerating. It does not
-address later hotplug stalls. Both physical Picos now run verified v0.111, and
+address later hotplug stalls. At acceptance both Picos ran verified v0.111, and
 Benji confirmed "Everything works normally" for the full functional checklist.
 The accepted change set was developed on `codex/firmware-transfer-profiling`.
 Benji subsequently authorized merging it into main and pushing the fork. See the

@@ -203,28 +203,24 @@ function borderPair(top, bottom, oldTop, oldBottom, base = 10) {
   return pair;
 }
 for (const base of [10, 40]) {
-  for (const [top, bottom, oldTop, oldBottom, expected] of [
-    [200, 300, 0, 100, [base + 5, base + 4]],
-    [0, 100, 200, 300, [base + 4, base + 5]],
-    [25, 75, 0, 100, [base + 4, base + 5]],
-    [0, 32767, 25, 75, [base + 4, base + 5]]
+  for (const [top, bottom, oldTop, oldBottom] of [
+    [200, 300, 0, 100], [0, 100, 200, 300],
+    [25, 75, 0, 100], [0, 32767, 25, 75]
   ]) {
     context.editElements = borderPair(top, bottom, oldTop, oldBottom, base);
-    const order = run('planConfigurationEdits(editElements).map(edit => edit.key)');
-    check(String(order) === String(expected), 'interval edits expand before shrinking');
-    let liveTop = oldTop, liveBottom = oldBottom;
-    for (const key of order) {
-      if (key === base + 4) liveTop = top;
-      else liveBottom = bottom;
-      check(liveTop < liveBottom, 'each planned intermediate interval is valid');
-    }
+    const planned = run('planConfigurationEdits(editElements)');
+    check(planned.length === 1 && planned[0].operation === 3,
+          'interval edits use one atomic pair operation per board');
+    check(planned[0].key === (base === 10 ? 0 : 1), 'pair selects the intended output');
+    check(planned[0].value === (BigInt(top) | (BigInt(bottom) << 32n)),
+          'atomic pair contains both bounds and requires no intermediate baseline');
   }
   for (const [top, bottom] of [[16384, 16384], [200, 100], [-1, 10], [0, 32768]]) {
     context.editElements = borderPair(top, bottom, 0, 32767, base);
     check(rejected(() => run('planConfigurationEdits(editElements)')), 'invalid final interval rejected');
   }
 }
-console.log(`webconfig numeric validation passed (${fieldCases.length} writable fields, exact 48-bit times, both border orders)`);
+console.log(`webconfig numeric validation passed (${fieldCases.length} writable fields, exact 48-bit times, atomic border pairs)`);
 
 if (!process.env.WEB_CONFIG_SCRIPT) {
   const packedPage = fs.readFileSync('webconfig/config.htm');
@@ -334,88 +330,25 @@ receive(oldXor);
 check(updates === 1, 'malformed length, report ID/type and old XOR response rejected');
 console.log('webconfig transport tests passed (CRC8 oracle, command/proxy encoding, 96 bit positions, strict input reports)');
 
-/* Execute real handlers against an independent in-memory USB endpoint. The
-   endpoint implements only byte storage/GET replies, not the JS validator. */
-run('updateElement = productionUpdateElement');
-const sent = [];
-const stored = new Map();
-let rejectWrites = false;
-let omitReadback = false;
-context.fakeDevice = {
-  opened: true,
-  async sendReport(reportId, bytes) {
-    check(reportId === 6 && bytes.length === 12, 'real write handler preserves report format');
-    sent.push(Uint8Array.from(bytes));
-    const command = bytes[2];
-    const key = bytes[3];
-    if (command === 21 && !rejectWrites)
-      stored.set(key, Uint8Array.from(bytes.slice(4, 11)));
-    if (command === 20 && !omitReadback) {
-      const response = new Uint8Array([0xaa, 0x55, 20, key, ...(stored.get(key) || [0, 0, 0, 0, 0, 0, 0]), 0]);
-      response[11] = crc8Oracle(response.slice(0, 11));
-      receive(response);
-    }
-  }
-};
-run('device = fakeDevice');
-
+/* The aggregate control still applies both per-output startup settings, now
+   with per-Pico RAM and persistent acknowledgements. Detailed fault/race cases
+   are shared with test_webconfig_confirmed_saves.js. */
+const {page, element} = require('./webconfig_test_helpers');
 (async () => {
-  const element = modeElement('7200', 21, 'uint64');
-  element.setAttribute('data-scale', '1000000');
-  element.setAttribute('fetched-value', '0');
-  modes[21] = element;
-  context.editElement = element;
-  check(await run('valueChangedHandler(editElement)'), 'confirmed change succeeds');
-  check(element.getAttribute('fetched-value') === '7200', 'only confirmed seconds become fetched');
-  check(sent[0][2] === 23 && sent[1][2] === 21 && sent[2][2] === 20,
-        'handler sends protected proxy SET, local SET, then local GET');
-
-  rejectWrites = true;
-  element.value = '7200.000001';
-  check(!await run('valueChangedHandler(editElement)'), 'readback mismatch rejects the edit');
-  check(element.getAttribute('fetched-value') === '7200', 'rejected edit retains old fetched value');
-  check(inertElement.textContent.includes('rejected'), 'rejected value is visible to the user');
-  rejectWrites = false;
-
-  element.value = '281474976.710656';
-  let before = sent.length;
-  check(!await run('valueChangedHandler(editElement)'), 'invalid changed value is caught');
-  check(sent.length === before, 'invalid edit sends no report');
-
-  const borders = borderPair(200, 300, 0, 100);
-  for (const border of borders) modes[border.getAttribute('data-key')] = border;
-  apiElements = borders;
-  context.editElement = borders[0];
-  before = sent.length;
-  check(await run('valueChangedHandler(editElement)'), 'border is staged in UI');
-  check(sent.length === before, 'single border change waits for Save');
-  check(await run('saveHandler()'), 'valid interval saves');
-  const changedKeys = sent.slice(before).filter(bytes => bytes[2] === 21).map(bytes => bytes[3]);
-  check(String(changedKeys) === '15,14', 'real save executes safe bottom-first interval order');
-  check(sent.at(-2)[2] === 23 && sent.at(-2)[3] === 18 && sent.at(-1)[2] === 18,
-        'save requests follow successful readbacks');
-
-  const validEdit = modeElement('2', 11, 'uint32');
-  validEdit.setAttribute('fetched-value', '1');
-  apiElements = [validEdit, ...borderPair(16384, 16384, 0, 32767)];
-  before = sent.length;
-  check(!await run('saveHandler()'), 'bad final border blocks save');
-  check(sent.length === before, 'all fields preflight before any SET or SAVE');
-
-  omitReadback = true;
-  element.value = '7200.000002';
-  context.editElement = element;
-  // Keep the real timeout path; accelerate only its virtual timer in this harness.
-  context.setTimeout = callback => setTimeout(callback, 0);
-  check(!await run('valueChangedHandler(editElement)'), 'missing readback is explicit failure');
-  check(element.getAttribute('fetched-value') === '7200', 'timeout leaves fetched value unchanged');
-  check(inertElement.textContent.includes('no readback'), 'readback timeout is visible');
-  omitReadback = false;
-  context.setTimeout = setTimeout;
-
-  const oversizedResponse = new Uint8Array([0xaa, 0x55, 20, 21, 0, 0, 0, 0, 0, 0, 1, 0]);
-  oversizedResponse[11] = crc8Oracle(oversizedResponse.slice(0, 11));
-  receive(oversizedResponse);
-  check(element.getAttribute('fetched-value') === '281474976.710656', '56-bit read beyond writable range is retained exactly');
-  console.log('webconfig real handler tests passed (preflight, safe border save, local readback, rejection, timeout)');
+  const p = page([element(19, 'uint8', null), element(49, 'uint8', null)]);
+  p.context.autoStartJitterChanged({checked: true, indeterminate: true});
+  check(p.elements.get(19).value === 2 && p.elements.get(49).value === 2,
+        'aggregate checkbox changes both startup modes');
+  check(await p.context.saveHandler(), 'aggregate startup modes persist with both board acknowledgements');
+  for (const role of [0, 1])
+    for (const key of [19, 49])
+      check(p.flash[role].get(key) === 2n, 'both outputs persist jitter mode on both Picos');
+  check(p.status.textContent.includes('A: saved to flash and verified; B: saved to flash and verified'),
+        'both verified save acknowledgements are visible');
+  p.context.autoStartJitterChanged({checked: false, indeterminate: false});
+  check(await p.context.saveHandler(), 'aggregate disable saves both outputs');
+  for (const role of [0, 1])
+    for (const key of [19, 49])
+      check(p.flash[role].get(key) === 0n, 'both startup modes disable on both Picos');
+  console.log('webconfig aggregate save tests passed (both output modes and both Pico persistent acknowledgements)');
 })().catch(error => { console.error(error); process.exitCode = 1; });

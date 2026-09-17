@@ -20,15 +20,144 @@ for (const base of [10, 40]) {
     configFieldRules[base + Number(offset)] = rule;
 }
 const borderKeys = [14, 15, 44, 45];
-const pendingConfigReads = new Map();
+/* Desired edits stay pending through RAM acknowledgements: an unpersisted
+   Pico can reboot and lose them before a later explicit Save retry. */
+const unconfirmedConfigEdits = new Set();
+const attemptedConfigEdits = new Set();
+const configTokens = new Set();
+const configAckTimeout = 3000; // Firmware staging expires after two seconds.
+const configOp = {capability: 1, set: 2, borderPair: 3, query: 4, save: 5, check: 6};
+const configResults = ['OK', 'INVALID', 'BUSY', 'CONFLICT', 'FLASH_MISMATCH', 'EXPIRED', 'INCOMPLETE'];
+let pendingConfigOperation;
+let configConnectionGeneration = 0;
+let activeConfigGeneration;
 let configWriteQueue = Promise.resolve();
 var device;
 
 const packetType = {
   keyboardReportMsg: 1, mouseReportMsg: 2, outputSelectMsg: 3, firmwareUpgradeMsg: 4, switchLockMsg: 7,
   syncBordersMsg: 8, flashLedMsg: 9, wipeConfigMsg: 10, readConfigMsg: 16, writeConfigMsg: 17, saveConfigMsg: 18,
-  rebootMsg: 19, getValMsg: 20, setValMsg: 21, getValAllMsg: 22, proxyPacketMsg: 23
+  rebootMsg: 19, getValMsg: 20, setValMsg: 21, getValAllMsg: 22, proxyPacketMsg: 23,
+  configMeta: 56, configLow: 57, configHigh: 58, configExecute: 59,
+  configAckMeta: 60, configAckValue: 61
 };
+
+function cancelConfigOperation(message) {
+  configConnectionGeneration++;
+  pendingConfigOperation?.reject(new Error(message));
+}
+
+function configToken() {
+  if (!globalThis.crypto?.getRandomValues)
+    throw new Error('Secure random tokens are unavailable; configuration writes are disabled.');
+  let token;
+  do { token = globalThis.crypto.getRandomValues(new Uint32Array(1))[0]; }
+  while (!token || configTokens.has(token));
+  configTokens.add(token);
+  return token;
+}
+
+function configWord(value) {
+  return [0, 8, 16, 24].map(shift => Number((BigInt(value) >> BigInt(shift)) & 255n));
+}
+
+async function confirmedConfigOperation(role, operation, key = 0, value = 0n) {
+  const connected = device;
+  const generation = configConnectionGeneration;
+  const unknown = error => ({role, state: 'unknown', message: error.message});
+  if (activeConfigGeneration !== undefined && activeConfigGeneration !== generation)
+    return unknown(new Error('operation cancelled by connection or maintenance change'));
+  if (!connected?.opened)
+    return unknown(new Error('disconnected'));
+  if (pendingConfigOperation)
+    throw new Error('Configuration operations must be serialized');
+  let timeout;
+  let pending;
+  try {
+    const token = configToken();
+    const reply = new Promise((resolve, reject) => {
+      pending = {token, role, operation, key, connected, generation, resolve, reject};
+      pendingConfigOperation = pending;
+      timeout = setTimeout(() => reject(new Error('timeout; outcome unknown')), configAckTimeout);
+    });
+    const tokenBytes = configWord(token);
+    const frames = [
+      [packetType.configMeta, [...tokenBytes, role, operation, key, 0]],
+      [packetType.configLow, [...tokenBytes, ...configWord(value)]],
+      [packetType.configHigh, [...tokenBytes, ...configWord(value >> 32n)]],
+      [packetType.configExecute, [...tokenBytes, 0, 0, 0, 0]]
+    ];
+    const sends = (async () => {
+      for (const [type, payload] of frames) {
+        if (pendingConfigOperation !== pending || device !== connected || !connected.opened
+            || generation !== configConnectionGeneration)
+          throw new Error('disconnected or operation cancelled; outcome unknown');
+        await connected.sendReport(mgmtReportId, makeReport(type, payload));
+      }
+      return reply;
+    })();
+    return await Promise.race([reply, sends]);
+  } catch (error) {
+    return unknown(error);
+  } finally {
+    clearTimeout(timeout);
+    if (pendingConfigOperation === pending)
+      pendingConfigOperation = undefined;
+  }
+}
+
+function configAcknowledgement(data) {
+  const pending = pendingConfigOperation;
+  const word = offset => new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, true);
+  if (!pending || device !== pending.connected || !device.opened
+      || pending.generation !== configConnectionGeneration || word(3) !== pending.token)
+    return;
+  if (data[2] === packetType.configAckMeta) {
+    if (data[7] !== pending.role || data[8] !== pending.operation || data[9] !== pending.key
+        || data[10] >= configResults.length)
+      return;
+    if (pending.status !== undefined && pending.status !== data[10]) {
+      pending.reject(new Error('conflicting acknowledgement; outcome unknown'));
+      return;
+    }
+    pending.status = data[10];
+  } else {
+    const value = word(7);
+    if (pending.value !== undefined && pending.value !== value) {
+      pending.reject(new Error('conflicting acknowledgement value; outcome unknown'));
+      return;
+    }
+    pending.value = value;
+  }
+  if (pending.status !== undefined && pending.value !== undefined) {
+    /* A bridge can expire after the peer committed but its ACK was lost.
+       Conflict/mismatch also do not prove that flash remained untouched. */
+    const state = pending.status === 0 ? 'ok' : pending.status === 5 ? 'unknown'
+      : [3, 4].includes(pending.status) ? 'error' : 'rejected';
+    pending.resolve({role: pending.role, state, code: configResults[pending.status],
+                     value: pending.value, message: 'EXPIRED; operation may have completed'});
+  }
+}
+
+function configBoardStatus(results, action) {
+  return results.map(result => `${result.role === 0 ? 'A' : 'B'}: ${result.state === 'ok'
+    ? action : result.state === 'rejected' ? `rejected (${result.code})`
+      : result.state === 'error' ? `error (${result.code}; requested state not confirmed)`
+        : `unknown (${result.message})`}`).join('; ');
+}
+
+async function requireConfigCapabilities() {
+  const results = [];
+  for (const role of [0, 1]) {
+    const result = await confirmedConfigOperation(role, configOp.capability);
+    if (result.state === 'ok' && result.value !== 1)
+      results.push({role, state: 'rejected', code: 'unsupported confirmation protocol'});
+    else
+      results.push(result);
+  }
+  if (results.some(result => result.state !== 'ok'))
+    throw new Error(`No configuration writes sent. ${configBoardStatus(results, 'confirmed-save protocol ready')}. Both Picos need compatible firmware.`);
+}
 
 function calcChecksum(report) {
   /* CRC-8/ATM, polynomial 0x07, init/xorout 0, no reflection. Keep the
@@ -152,6 +281,12 @@ window.addEventListener('load', function () {
   if (!("hid" in navigator)) {
     document.getElementById('warning').style.display = 'block';
   }
+  navigator.hid?.addEventListener?.('disconnect', event => {
+    if (event.device === device) {
+      cancelConfigOperation('disconnected; outcome unknown');
+      showConfigStatus('Disconnected. Outstanding configuration outcomes are unknown; reconnect and retry Save.', true);
+    }
+  });
 
   for (const key of screensaverModeKeys) {
     const element = document.querySelector(`[data-key="${key}"]`);
@@ -183,12 +318,14 @@ async function connectHandler() {
     filters: [{ vendorId: 0x2e8a, productId: 0x107c, usagePage: 0xff00, usage: 0x10 }]
   });
 
+  if (!devices.length)
+    return;
+  cancelConfigOperation('device connection changed; outcome unknown');
   device = devices[0];
-  device.open().then(async () => {
-    device.addEventListener('inputreport', handleInputReport);
-    document.querySelectorAll('.online').forEach(element => { element.style.opacity = 1.0; });
-    await readHandler();
-  });
+  await device.open();
+  device.addEventListener('inputreport', handleInputReport);
+  document.querySelectorAll('.online').forEach(element => { element.style.opacity = 1.0; });
+  await sendReport(packetType.getValAllMsg);
 }
 
 async function blinkHandler() {
@@ -276,11 +413,10 @@ function updateElement(key, event) {
     const value = unpackValue(element.getAttribute('data-type'), event.data);
     if (configFieldRules[key] && !isScaledTimer(element))
       validateConfigurationValue(key, configurationInteger(value));
-    const pending = pendingConfigReads.get(key);
-    if (pending) {
-      pending.resolve(String(value));
+    /* An uncorrelated local GET must not erase a partially applied desired
+       value or make retry Save skip the unconfirmed peer. */
+    if (unconfirmedConfigEdits.has(key))
       return;
-    }
     setValue(element, isScaledTimer(element) ? timerSeconds(BigInt(value)) : value);
     element.setCustomValidity('');
 
@@ -294,32 +430,40 @@ function updateElement(key, event) {
       setValue(element, `v${major}.${minor}`);
     }
   } catch (error) {
-    pendingConfigReads.get(key)?.reject(error);
     showConfigStatus(error.message, true);
   }
 }
 
 async function readHandler() {
   if (!device || !device.opened)
-    await connectHandler();
-
-  await sendReport(packetType.getValAllMsg);
+    return connectHandler();
+  return enqueueConfigurationWrite(async () => {
+    await sendReport(packetType.getValAllMsg);
+    if (unconfirmedConfigEdits.size)
+      showConfigStatus('Read connected-device values; unconfirmed edits retained for retry Save. Peer values are not confirmed.');
+  });
 }
 
 async function handleInputReport(event) {
   const data = new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength);
   if (event.reportId !== mgmtReportId || data.length !== configReportLength
-      || data[0] !== 0xaa || data[1] !== 0x55 || data[2] !== packetType.getValMsg
+      || data[0] !== 0xaa || data[1] !== 0x55
+      || (event.device && event.device !== device)
       || data[data.length - 1] !== calcChecksum(data))
     return;
-  updateElement(data[3], event);
+  if (data[2] === packetType.getValMsg)
+    updateElement(data[3], event);
+  else if (data[2] === packetType.configAckMeta || data[2] === packetType.configAckValue)
+    configAcknowledgement(data);
 }
 
 async function rebootHandler() {
+  cancelConfigOperation('reboot requested; configuration outcome unknown');
   await sendReport(packetType.rebootMsg);
 }
 
 async function enterBootloaderHandler() {
+  cancelConfigOperation('bootloader requested; configuration outcome unknown');
   await sendReport(packetType.firmwareUpgradeMsg, [], true);
 }
 
@@ -334,7 +478,8 @@ function configurationEdit(element) {
     const key = Number(element.getAttribute('data-key'));
     const payload = packValue(element, key, element.getAttribute('data-type'));
     element.setCustomValidity('');
-    return {element, key, payload, expected: configurationValue(element).toString()};
+    return {element, key, payload, value: configurationValue(element),
+            expected: configurationValue(element).toString()};
   } catch (error) {
     element.setCustomValidity(error.message);
     element.reportValidity();
@@ -344,12 +489,15 @@ function configurationEdit(element) {
 
 function planConfigurationEdits(elements) {
   const editable = [...elements].filter(element => !element.hasAttribute('readonly'));
-  for (const element of editable)
+  for (const element of editable) {
+    forgetUnsentRevertedEdit(element);
     if (element.getAttribute('fetched-value') == getValue(element))
       element.setCustomValidity('');
+  }
   /* Do not pack unchanged timers: fetched 56-bit values can exceed the 48-bit
      SET limit. Leaving those fields unsent preserves the stored full uint64. */
-  const edits = editable.filter(element => element.getAttribute('fetched-value') != getValue(element))
+  const edits = editable.filter(element => unconfirmedConfigEdits.has(Number(element.getAttribute('data-key')))
+                                || element.getAttribute('fetched-value') != getValue(element))
                         .map(configurationEdit);
   const result = edits.filter(edit => !borderKeys.includes(edit.key));
   for (const base of [10, 40]) {
@@ -359,15 +507,15 @@ function planConfigurationEdits(elements) {
       continue;
     if (pair.some(element => !element || !element.hasAttribute('fetched-value')))
       throw new Error('Read both borders before saving calibration');
-    const [top, bottom] = pair.map(element => configurationInteger(getValue(element)));
+    const [top, bottom] = pair.map(element => validateConfigurationValue(
+      Number(element.getAttribute('data-key')), configurationInteger(getValue(element))));
     if (top >= bottom)
       throw new RangeError('Border Top must be less than Border Bottom');
-    /* Expand before shrinking so every SET is valid against the connected
-       device's fetched interval. A divergent peer has no readback/transaction
-       acknowledgment in this protocol and can still reject an intermediate SET. */
-    const bottomFirst = top >= configurationInteger(pair[1].getAttribute('fetched-value'));
-    changed.sort((a, b) => bottomFirst ? b.key - a.key : a.key - b.key);
-    result.push(...changed);
+    /* Both bounds are applied atomically on each Pico, independently of its
+       previous interval. This is not an atomic transaction across Picos. */
+    result.push({operation: configOp.borderPair, key: base === 10 ? 0 : 1,
+                 value: top | (bottom << 32n), elements: pair,
+                 expected: [top.toString(), bottom.toString()]});
   }
   return result;
 }
@@ -375,25 +523,48 @@ function planConfigurationEdits(elements) {
 async function writeConfigurationEdit(edit) {
   if (!device || !device.opened)
     throw new Error('Connect before applying configuration');
-  await sendReport(packetType.setValMsg, edit.payload, true);
-  const accepted = new Promise((resolve, reject) => {
-    pendingConfigReads.set(edit.key, {resolve, reject});
-  });
-  const timeout = setTimeout(() => pendingConfigReads.get(edit.key)?.reject(
-    new Error(`${configurationLabel(edit.key)}: no readback; Read to check device values`)), 1500);
-  try {
-    const [, actual] = await Promise.all([sendReport(packetType.getValMsg, [edit.key]), accepted]);
-    if (actual !== edit.expected)
-      throw new Error(`${configurationLabel(edit.key)} rejected: device retained ${actual} ${isScaledTimer(edit.element) ? 'microseconds' : ''}`);
-    edit.element.setAttribute('fetched-value', isScaledTimer(edit.element) ? timerSeconds(BigInt(actual)) : actual);
-  } finally {
-    clearTimeout(timeout);
-    pendingConfigReads.delete(edit.key);
+  const elements = edit.elements || [edit.element];
+  const expected = edit.elements ? edit.expected : [edit.expected];
+  for (const element of elements) {
+    const key = Number(element.getAttribute('data-key'));
+    unconfirmedConfigEdits.add(key);
+    attemptedConfigEdits.add(key);
   }
+  const results = [];
+  for (const role of [0, 1])
+    results.push(await confirmedConfigOperation(role, edit.operation || configOp.set, edit.key, edit.value));
+  if (results.some(result => result.state !== 'ok'))
+    throw new Error(`${configBoardStatus(results, 'applied in RAM')}. Not saved to flash. Retry Save to reapply unconfirmed edits.`);
+  for (let index = 0; index < elements.length; index++) {
+    const element = elements[index];
+    element.setAttribute('fetched-value', isScaledTimer(element) ? timerSeconds(BigInt(expected[index])) : expected[index]);
+  }
+  return results;
+}
+
+function rememberConfigurationEdits(edits) {
+  for (const edit of edits)
+    for (const element of edit.elements || [edit.element])
+      unconfirmedConfigEdits.add(Number(element.getAttribute('data-key')));
+}
+
+function forgetUnsentRevertedEdit(element) {
+  const key = Number(element.getAttribute('data-key'));
+  /* A failed capability probe sends no mutation. Reverting that unsent edit
+     may restore a legacy timer too wide to write; leave its stored bytes alone.
+     Once a write was attempted, equality with local baseline is not enough. */
+  if (!attemptedConfigEdits.has(key) && element.getAttribute('fetched-value') == getValue(element))
+    unconfirmedConfigEdits.delete(key);
 }
 
 function enqueueConfigurationWrite(operation) {
-  configWriteQueue = configWriteQueue.then(operation).catch(error => {
+  const generation = configConnectionGeneration;
+  configWriteQueue = configWriteQueue.then(() => {
+    if (generation !== configConnectionGeneration)
+      throw new Error('Connection or maintenance state changed; queued configuration cancelled. Retry explicitly.');
+    activeConfigGeneration = generation;
+    return Promise.resolve().then(operation).finally(() => { activeConfigGeneration = undefined; });
+  }).catch(error => {
     showConfigStatus(error.message, true);
     return false;
   });
@@ -408,12 +579,21 @@ async function valueChangedHandler(element) {
     return true;
   }
   return enqueueConfigurationWrite(async () => {
-    if (element.getAttribute('fetched-value') != getValue(element))
-      await writeConfigurationEdit(configurationEdit(element));
-    else
+    forgetUnsentRevertedEdit(element);
+    if (unconfirmedConfigEdits.has(Number(element.getAttribute('data-key')))
+        || element.getAttribute('fetched-value') != getValue(element)) {
+      const edit = configurationEdit(element);
+      rememberConfigurationEdits([edit]);
+      await requireConfigCapabilities();
+      await writeConfigurationEdit(edit);
+    }
+    else {
       element.setCustomValidity('');
+      showConfigStatus('No change to connected-device values. Save to confirm both Picos and persist.');
+      return true;
+    }
     updateAutoStartJitter();
-    showConfigStatus('Applied and checked on the connected device. Save to persist.');
+    showConfigStatus('A: applied in RAM; B: applied in RAM. Not saved to flash; Save to persist.');
     return true;
   });
 }
@@ -425,15 +605,65 @@ async function saveHandler() {
     if (!device || !device.opened)
       throw new Error('Connect before saving configuration');
     const edits = planConfigurationEdits(document.querySelectorAll('.api'));
+    rememberConfigurationEdits(edits);
+    await requireConfigCapabilities();
+    let applied;
     for (const edit of edits)
-      await writeConfigurationEdit(edit);
-    await sendReport(packetType.saveConfigMsg, [], true);
+      applied = await writeConfigurationEdit(edit);
+    const snapshots = [];
+    for (const role of [0, 1]) {
+      const snapshot = await confirmedConfigOperation(role, configOp.query);
+      /* A reboot or another writer can discard a just-applied edit before
+         QUERY. Do not relabel that as an old, untouched board difference. */
+      if (snapshot.state === 'ok' && applied && snapshot.value !== applied[role].value)
+        snapshots.push({role, state: 'error', code: 'RAM_CHANGED_AFTER_APPLY'});
+      else
+        snapshots.push(snapshot);
+    }
+    if (snapshots.some(result => result.state !== 'ok'))
+      throw new Error(`No flash saves sent. ${configBoardStatus(snapshots, 'RAM digest read')}. Retry Save.`);
+    /* A Pico could have rebooted between two SETs, losing an earlier edit
+       before the last SET's digest was returned. Confirm every intended field
+       against the same post-apply snapshot before allowing either flash save. */
+    for (const edit of edits) {
+      const elements = edit.elements || [edit.element];
+      const expected = edit.elements ? edit.expected : [edit.expected];
+      for (let index = 0; index < elements.length; index++) {
+        const key = Number(elements[index].getAttribute('data-key'));
+        const checked = [];
+        for (const role of [0, 1]) {
+          const result = await confirmedConfigOperation(role, configOp.check, key, BigInt(expected[index]));
+          checked.push(result.state === 'ok' && result.value !== snapshots[role].value
+            ? {role, state: 'error', code: 'RAM_CHANGED_DURING_CHECK'} : result);
+        }
+        if (checked.some(result => result.state !== 'ok'))
+          throw new Error(`No flash saves sent. ${configurationLabel(key)}: ${configBoardStatus(checked, 'intended value checked in RAM')}. Retry Save.`);
+      }
+    }
+    const saved = [];
+    for (const snapshot of snapshots) {
+      const result = await confirmedConfigOperation(snapshot.role, configOp.save, 0, BigInt(snapshot.value));
+      if (result.state === 'ok' && result.value !== snapshot.value)
+        saved.push({role: snapshot.role, state: 'unknown', message: 'saved digest did not match requested RAM digest'});
+      else
+        saved.push(result);
+    }
     updateAutoStartJitter();
-    showConfigStatus('Save requested on both devices. Changes checked in connected-device RAM; peer acceptance and flash completion are not acknowledged.');
+    if (saved.some(result => result.state !== 'ok'))
+      throw new Error(`${configBoardStatus(saved, 'saved to flash and verified')}. Retry Save; this is not an atomic two-Pico save.`);
+    for (const edit of edits)
+      for (const element of edit.elements || [edit.element]) {
+        const key = Number(element.getAttribute('data-key'));
+        unconfirmedConfigEdits.delete(key);
+        attemptedConfigEdits.delete(key);
+      }
+    showConfigStatus(`A: saved to flash and verified; B: saved to flash and verified. ${snapshots[0].value === snapshots[1].value
+      ? 'Both settings digests match.' : 'Warning: settings differ between Picos; unchanged pre-existing differences were not synchronized.'}`);
     return true;
   });
 }
 
 async function wipeConfigHandler() {
+  cancelConfigOperation('wipe requested; configuration outcome unknown');
   await sendReport(packetType.wipeConfigMsg, [], true);
 }
